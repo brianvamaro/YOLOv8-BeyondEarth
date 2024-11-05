@@ -8,6 +8,7 @@
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="rastertools" />
     <orderEntry type="module" module-name="shptools" />
+    <orderEntry type="module" module-name="download_planetary_datasets" />
   </component>
   <component name="PyDocumentationSettings">
     <option name="format" value="PLAIN" />

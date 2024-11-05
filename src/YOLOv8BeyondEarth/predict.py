@@ -2,48 +2,60 @@ import cv2
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import rasterio as rio
 import torch
 
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, is_within_slice, shift_polygon,
-                                       add_geometries, bboxes_to_shp, outlines_to_shp)
+                                       add_geometries, bboxes_to_shp, outlines_to_shp, row_bbox)
 from lsnms import nms, wbc
-
+from PIL import Image
 from sahi.slicing import slice_image
 from tqdm import tqdm
 from pathlib import Path
 
 from rastertools_BOULDERING import raster, convert as raster_convert, metadata as raster_metadata
 from shptools_BOULDERING import shp
+from shapely.geometry import (box, Polygon)
+from scipy.ndimage import rotate
 
 #from torchvision.ops import (nms as nms_torch, batched_nms as batched_nms_torch)
 
 def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_threshold, downscale_pred):
     """
-    YOLOv8 expects numpy arrays to have BGR (height, width, 3).
+    Process image with YOLOv8 model to detect objects and generate masks.
 
-    1. Let's say you want to detect very very small objects, the slice height and width should be
-    pretty small, and detection_model.image_size should be increased:
-    - slice_height, slice_width = 256
-    - detection_model.image_size = 1024.
+    Parameters
+    ----------
+    detection_model : object
+        YOLOv8 model instance with loaded weights
+    image : ndarray
+        Input image in BGR format (height, width, 3)
+    has_mask : bool
+        Whether to generate segmentation masks
+    shift_amount : tuple of int
+        (x, y) coordinates to shift predictions to absolute position
+    slice_size : int
+        Size of image slice in pixels
+    min_area_threshold : int
+        Minimum pixel area for valid predictions
+    downscale_pred : bool
+        Whether to downscale predictions to match slice size
 
-    2. If you are in the opposite situation, where you realized that most of the large boulders are missed out. You can
-    increase the slice height and width.
-    - slice_height, slice_width = 1024
-    - detection_model.image_size = 512, 1024.
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame containing predictions with columns:
+        - score: confidence score
+        - polygon: coordinates of segmentation mask
+        - category_id: class ID
+        - category_name: class name
+        - is_within_slice: bool indicating if prediction is fully within slice
 
-    You can get the best of both worlds by combining predictions (1) and (2) with NMS. Obviously the larger the
-    slices height and width, and the larger the detection_model.image_size, the more time it takes to run this
-    script.
-
-    If the predictions is starting to be very large compare to the size of the slice, WBF can be advantageous as it
-    will merge the overlapping boulders. However, WBF and NMS works better in less dense area (or at least is less
-    sensitive to the iou_threshold selected).
-
-    Test Time Augmentation could be included too, but it takes lot of time to run it.. so not sure about that too.
-    WBF for instance seg: "https://www.kaggle.com/code/mistag/sartorius-tta-with-weighted-segments-fusion"
-
-    Note that the bboxes (in absolute coordinates) are calculated from the bounds of the polygons after the
-    predictions are computed.
+    Notes
+    -----
+    The function processes image slices through YOLOv8 model and converts
+    mask predictions to polygon format. Edge predictions have reduced confidence
+    scores. Predictions smaller than min_area_threshold are filtered out.
     """
 
     shift_x = shift_amount[0]
@@ -141,63 +153,85 @@ def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_
         df = pd.DataFrame(dict)
     return df
 
-def get_sliced_prediction(in_raster,
-                          detection_model=None,
-                          confidence_threshold: float = 0.1,
-                          has_mask=True,
-                          output_dir=None,
-                          interim_file_name=None,  # ADDED OUTPUT FILE NAME TO (OPTIONALLY) SAVE SLICES
-                          interim_dir=None,  # ADDED INTERIM DIRECTORY TO (OPTIONALLY) SAVE SLICES
-                          slice_size: int = None,
-                          inference_size: int = None,
-                          overlap_height_ratio: float = 0.2,
-                          overlap_width_ratio: float = 0.2,
-                          min_area_threshold: int = None,
-                          downscale_pred: bool = False,
-                          postprocess: bool = True,
-                          postprocess_match_threshold: float = 0.5,
-                          postprocess_class_agnostic: bool = False):
+def get_sliced_prediction(in_raster, detection_model=None, confidence_threshold=0.1,
+                         has_mask=True, output_dir=None, interim_file_name=None,
+                         interim_dir=None, slice_size=None, inference_size=None,
+                         overlap_height_ratio=0.2, overlap_width_ratio=0.2,
+                         min_area_threshold=None, downscale_pred=False,
+                         rotation_angle=None, postprocess=True,
+                         postprocess_match_threshold=0.5,
+                         postprocess_class_agnostic=False):
     """
-    Function for slice image + get predicion for each slice + combine predictions in full image.
+    Generate predictions on sliced raster image using YOLOv8 model.
 
-    The time to run the script is dependent on the number of predictions over the whole image. This is because we need
-    to loop through each prediction and transform the bool_mask to polygon. 
+    Parameters
+    ----------
+    in_raster : str or Path
+        Path to input raster file
+    detection_model : object, optional
+        YOLOv8 model instance
+    confidence_threshold : float, default=0.1
+        Minimum confidence threshold for predictions
+    has_mask : bool, default=True
+        Whether to generate segmentation masks
+    output_dir : str or Path, optional
+        Directory to save output files
+    interim_file_name : str, optional
+        Name pattern for saved image slices
+    interim_dir : str or Path, optional
+        Directory to save intermediate slices
+    slice_size : int, optional
+        Size of image slices in pixels
+    inference_size : int, optional
+        Input size for model inference
+    overlap_height_ratio : float, default=0.2
+        Overlap ratio between slices in height
+    overlap_width_ratio : float, default=0.2
+        Overlap ratio between slices in width
+    min_area_threshold : int, optional
+        Minimum pixel area for valid predictions
+    downscale_pred : bool, default=False
+        Whether to downscale predictions
+    rotation_angle : int, optional
+        Angle to rotate image before processing
+    postprocess : bool, default=True
+        Whether to apply non-maximum suppression
+    postprocess_match_threshold : float, default=0.5
+        IoU threshold for NMS
+    postprocess_class_agnostic : bool, default=False
+        Whether to apply class-agnostic NMS
 
-    Args:
-        in_raster: str or Path()
-            Path to raster tif file.
-        detection_model: model.DetectionModel
-        confidence_threshold: float
-            minimum confidence threshold, values below will be automatically filtered away.
-        has_mask: bool
-        interim_dir: str or Path()
-        slice_sze: int
-            Height and width of each slice.  Defaults to ``None``.
-        overlap_height_ratio: float
-            Fractional overlap in height of each window (e.g. an overlap of 0.2 for a window
-            of size 512 yields an overlap of 102 pixels).
-            Default to ``0.2``.
-        overlap_width_ratio: float
-            Fractional overlap in width of each window (e.g. an overlap of 0.2 for a window
-            of size 512 yields an overlap of 102 pixels).
-            Default to ``0.2``.
-        postprocess: bool
-            Include postprocessing or not.
-        postprocess_match_threshold: float
-            Sliced predictions having higher iou than postprocess_match_threshold will be
-            postprocessed after sliced prediction.
-        postprocess_class_agnostic: bool
-            If True, postprocess will ignore category ids.
+    Returns
+    -------
+    tuple of geopandas.GeoDataFrame
+        Two GeoDataFrames containing predictions:
+        - First contains all predictions
+        - Second contains NMS-filtered predictions (if postprocess=True)
+        - Returns (predictions, None) if postprocess=False
 
-    Returns:
-        A pd.DataFrame.
+    Notes
+    -----
+    The function:
+    1. Converts input raster to PNG
+    2. Optionally rotates image
+    3. Slices image with overlap
+    4. Runs YOLOv8 on each slice
+    5. Combines predictions and converts to geographic coordinates
+    6. Optionally applies NMS
+    7. Saves results as shapefiles
     """
 
     # convert in_raster tif file to png file
     in_raster = Path(in_raster)
     output_dir = Path(output_dir)
-    out_png = in_raster.with_name(in_raster.stem + ".png")
-    raster_convert.tiff_to_png(in_raster, out_png) # only work with 8bit
+    in_png = in_raster.with_name(in_raster.stem + ".png")
+    out_png = in_png
+    raster_convert.tiff_to_png(in_raster, out_png)  # only work with 8bit
+
+    # apply rotation angle and change out_png filename if needed
+    if rotation_angle and rotation_angle != 0:
+        out_png = in_raster.with_name(in_raster.stem + "_rotated.png")
+        rotate_png(in_png, out_png, rotation_angle)
 
     # create temporary directory
     tmp_dir = (Path.home() / "tmp")
@@ -220,18 +254,65 @@ def get_sliced_prediction(in_raster,
 
     num_slices = len(slice_image_result)
     shift_amounts = slice_image_result.starting_pixels
+
     frames = []
-    # perform sliced prediction
     for i, image in tqdm(enumerate(slice_image_result.images), total=num_slices):
         df = YOLOv8(detection_model, image, has_mask, shift_amounts[i], slice_size, min_area_threshold, downscale_pred)
         if df.shape[0] > 0:
             frames.append(df)
 
     df_all = pd.concat(frames, ignore_index=True)
-    gdf = add_geometries(in_raster, df_all)
+
+    if rotation_angle and rotation_angle != 0:
+        ## calculate centroid of image
+        in_raster = Path(in_raster)
+        in_crs = raster_metadata.get_crs(in_raster).to_wkt()
+        bbox = raster_metadata.get_bounds(in_raster)
+        bbox = box(*bbox)
+        gs = gpd.GeoSeries(bbox, crs=in_crs)
+        footprint_centroid = gs.centroid
+
+        boulder_geometry = []
+        for polygon in df_all.polygon.values:
+            xs, ys = (polygon[:, 0], polygon[:, 1])
+            p0 = Polygon(np.stack([xs, ys], axis=-1))
+            boulder_geometry.append(p0)
+
+        gdf_pixel = gpd.GeoDataFrame(df_all, geometry=boulder_geometry, crs=in_crs)
+
+        boulder_geometry = []
+        with rio.open(in_raster) as src:
+            for polygon in gdf_pixel.geometry:  # gdf_rotated
+                xt = np.array(list(polygon.exterior.coords.xy[1]))
+                yt = np.array(list(polygon.exterior.coords.xy[0]))
+                x_proj, y_proj = rio.transform.xy(src.transform, xt, yt)
+                boulder_geometry.append(Polygon(np.stack([x_proj, y_proj], axis=-1)))
+
+        gdf_world = gpd.GeoDataFrame(df_all, geometry=boulder_geometry, crs=in_crs)
+
+        rotated_geom = gdf_world.rotate(rotation_angle, origin=footprint_centroid.values[0])
+        gdf = gpd.GeoDataFrame(df_all, geometry=rotated_geom, crs=in_crs)
+
+        raster_height, raster_width = raster_metadata.get_shape(in_raster)
+        in_res = raster_metadata.get_resolution(in_raster)[0]
+        shift_v = ((raster_height / 2.0) - (raster_width / 2.0)) * in_res
+
+        # the rotation of the matrix generate shifts in the shapefiles
+        # the shifts only occur for angles equal to +-90 or +-270
+        if rotation_angle == 90 or rotation_angle == -270:
+            geom_shifted = gdf.geometry.translate(xoff=shift_v, yoff=-shift_v)
+            gdf["geometry"] = geom_shifted
+            gdf["bbox"] = gdf.apply(row_bbox, axis=1)
+        elif rotation_angle == -90 or rotation_angle == 270:
+            geom_shifted = gdf.geometry.translate(xoff=-shift_v, yoff=shift_v)
+            gdf["geometry"] = geom_shifted
+            gdf["bbox"] = gdf.apply(row_bbox, axis=1)
+        elif rotation_angle == -180 or rotation_angle == 180:
+            gdf["bbox"] = gdf.apply(row_bbox, axis=1)
+    else:
+        gdf = add_geometries(in_raster, df_all)
 
     # keep edge predictions (within 10% of slice size from the true footprint edge)
-
     # extract true footprint
     gdf_true_footprint = raster.true_footprint(in_raster, tmp_dir / "true-footprint.shp")
     in_res = raster_metadata.get_resolution(in_raster)[0]
@@ -269,7 +350,6 @@ def get_sliced_prediction(in_raster,
     bboxes_to_shp(gdf, out_bbox_shp)
     outlines_to_shp(gdf, out_mask_shp)
 
-
     if postprocess:
         # Non-maximum suppression (NMS)
         # regardless of the classes ids (right now is a class agnoistic not supported)
@@ -288,3 +368,33 @@ def get_sliced_prediction(in_raster,
         return gdf, gdf_nms
     else:
         return gdf, None
+
+def rotate_png(in_png, out_png, rotation_angle):
+    """
+    Rotate PNG image by specified angle.
+
+    Parameters
+    ----------
+    in_png : str or Path
+        Path to input PNG file
+    out_png : str or Path
+        Path to save rotated image
+    rotation_angle : int
+        Angle to rotate image in degrees (counter-clockwise)
+
+    Notes
+    -----
+    Uses scipy.ndimage.rotate to perform the rotation.
+    The rotation_angle is negated since scipy rotates counter-clockwise
+    while the input angle is specified clockwise.
+    """
+    in_png = Path(in_png)
+    out_png = Path(out_png)
+    in_img = Image.open(in_png)
+    array = np.array(in_img)
+    # the rotation_angle for scipy rotate is counter clockwise
+    # while the calculated rotation angle is clockwise
+    # need to take the negative of the rotation angle value.
+    array_rotated = rotate(array, -rotation_angle)
+    out_img= Image.fromarray(array_rotated)
+    out_img.save(out_png)

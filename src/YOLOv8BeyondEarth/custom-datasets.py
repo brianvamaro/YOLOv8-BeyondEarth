@@ -9,11 +9,38 @@ from YOLOv8BeyondEarth.polygon import binary_mask_to_polygon
 # for masks2yolo modify the code below.
 def detectron2yolo(detectron2_json, min_area_threshold, max_area_threshold, pre_processed_folder):
     """
-    the detectron2_json needs to have a 'dataset' column.
-    max_area_threshold is to remove too large objects for the tile.
+    Convert Detectron2 format annotations to YOLO format text files.
 
-    This function generates text file following the Ultralytics YOLO format
-    (https://docs.ultralytics.com/datasets/segment/#supported-dataset-formats)
+    Parameters
+    ----------
+    detectron2_json : pandas.DataFrame
+        DataFrame containing Detectron2 format annotations with columns:
+        - 'dataset': Dataset name
+        - 'file_name': Image file name
+        - 'annotations': List of dictionaries containing segmentation masks
+        - 'height': Image height
+    min_area_threshold : int
+        Minimum number of pixels a mask should contain to be included
+    max_area_threshold : int
+        Maximum number of pixels a mask should contain to be included
+    pre_processed_folder : pathlib.Path
+        Path to output directory where YOLO format text files will be saved
+
+    Notes
+    -----
+    The function converts Detectron2 RLE (Run Length Encoding) segmentation masks 
+    to YOLO polygon format. Each mask is processed to:
+    1. Remove small holes
+    2. Filter by size thresholds
+    3. Convert to normalized polygon coordinates
+    4. Save as space-separated values with class ID 0 prepended
+
+    The output follows the Ultralytics YOLO segmentation format:
+    <class-id> <x1> <y1> <x2> <y2> ... <xn> <yn>
+
+    References
+    ----------
+    .. [1] https://docs.ultralytics.com/datasets/segment/#supported-dataset-formats
     """
     for i, row in tqdm(detectron2_json.iterrows(), total=detectron2_json.shape[0]):
         masks = []
