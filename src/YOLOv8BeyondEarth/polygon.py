@@ -1,18 +1,11 @@
 import numpy as np
+import shapely
 import skimage
 import rasterio as rio
 import geopandas as gpd
 
 from shapely.geometry import (box, Polygon)
 
-
-def remvove_edge_predictions():
-    """
-    it should take in the in_raster, the true footprint should be computed.
-    Then should check if predictions are touching the true footprint. If yes give a column a value.
-
-    """
-    None
 
 def is_within_slice(polygon, slice_height, slice_width):
     """
@@ -50,18 +43,43 @@ def row_bbox_to_shapely(row):
 def add_geometries(in_raster, df):
     with rio.open(in_raster) as src:
         in_crs = src.meta["crs"]
-        boulder_geometry = []
-        for polygon in df.polygon.values:
-            xs, ys = rio.transform.xy(src.transform, polygon[:, 1], polygon[:, 0])
-            boulder_geometry.append(Polygon(np.stack([xs, ys], axis=-1)))
-        gdf = gpd.GeoDataFrame(df, geometry=boulder_geometry, crs=in_crs.to_wkt())
-        gdf["bbox"] = gdf.apply(row_bbox, axis=1)
+        transform = src.transform
+
+    polygons = df.polygon.values
+    if len(polygons) == 0:
+        gdf = gpd.GeoDataFrame(df, geometry=[], crs=in_crs.to_wkt())
+        gdf["bbox"] = []
+        return gdf
+
+    # Apply the affine transform to every vertex of every polygon in a single vectorized
+    # pass (equivalent to looping rio.transform.xy per polygon, which used pixel centers ->
+    # the +0.5 offset). a,b,c / d,e,f are the affine coefficients; b and d are 0 for
+    # north-up rasters but are kept for generality.
+    vertex_counts = np.fromiter((len(p) for p in polygons), dtype=np.int64, count=len(polygons))
+    stacked = np.concatenate(polygons, axis=0)
+    cols = stacked[:, 0] + 0.5
+    rows = stacked[:, 1] + 0.5
+    a, b, c, d, e, f = transform.a, transform.b, transform.c, transform.d, transform.e, transform.f
+    xs = a * cols + b * rows + c
+    ys = d * cols + e * rows + f
+    coords = np.stack([xs, ys], axis=-1)
+
+    boulder_geometry = []
+    start = 0
+    for n in vertex_counts:
+        boulder_geometry.append(Polygon(coords[start:start + n]))
+        start += n
+
+    gdf = gpd.GeoDataFrame(df, geometry=boulder_geometry, crs=in_crs.to_wkt())
+    gdf["bbox"] = gdf.geometry.bounds.values.tolist()
     return gdf
 
 def bboxes_to_shp(gdf, out_shp):
     gdf_copy = gdf.rename(columns={"category_id": "cat_id", "category_name": "cat_name", "is_within_slice": "isin_slice"})
-    gdf_copy["geometry"] = gdf_copy.apply(row_bbox_to_shapely, axis=1)
-    gdf_copy.drop(columns=['bbox','polygon']).to_file(out_shp)
+    # vectorized box construction from the [minx, miny, maxx, maxy] bbox column
+    bbox_arr = np.asarray(gdf_copy.bbox.tolist(), dtype=float).reshape(-1, 4)
+    gdf_copy["geometry"] = shapely.box(bbox_arr[:, 0], bbox_arr[:, 1], bbox_arr[:, 2], bbox_arr[:, 3])
+    gdf_copy.drop(columns=['bbox', 'polygon']).to_file(out_shp)
 
 def outlines_to_shp(gdf, out_shp):
     gdf_copy = gdf.rename(columns={"category_id": "cat_id", "category_name": "cat_name", "is_within_slice": "isin_slice"})
@@ -123,13 +141,3 @@ def check_mask_validity(binary_mask, min_area_threshold=4):
         return True
     else:
         return False
-
-def is_within_slice(polygon, slice_height, slice_width):
-    """
-    Returns True if the polygon is touching one of the edge of the slice else False
-    """
-    at_edge12 = np.any(np.any(polygon == -0.5, axis=0) == True)
-    at_edge3 = np.any(polygon[:, 0] == slice_width - 0.5, axis=0)
-    at_edge4 = np.any(polygon[:, 1] == slice_height - 0.5, axis=0)
-    is_intersecting_edge = np.any(np.array([at_edge12, at_edge3, at_edge4]) == True)
-    return (False if is_intersecting_edge else True)

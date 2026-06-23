@@ -17,8 +17,100 @@ from shptools_BOULDERING import shp
 
 #from torchvision.ops import (nms as nms_torch, batched_nms as batched_nms_torch)
 
+def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
+                  min_area_threshold, downscale_pred):
+    """Convert a single ultralytics Result (one slice) into the detections DataFrame.
+
+    This is the per-slice core extracted from ``YOLOv8`` so the model can be called on a
+    *batch* of slices (see ``get_sliced_prediction``) instead of one at a time. The geometry
+    is intentionally identical to the original single-slice path: masks are thresholded at
+    0.5, optionally resized to ``slice_size`` with ``INTER_AREA``, and converted to polygons
+    via ``binary_mask_to_polygon`` (skimage). Only the batching of the GPU call changed.
+    """
+    shift_x = shift_amount[0]
+    shift_y = shift_amount[1]
+
+    # if no predictions
+    if prediction_result.boxes.data.size()[0] == 0:
+        return pd.DataFrame(columns=['score', 'polygon', 'category_id', 'category_name', 'is_within_slice'])
+
+    conf_mask = prediction_result.boxes.data[:, 4] >= detection_model.confidence_threshold
+    result_boxes = prediction_result.boxes.data[conf_mask]
+    if has_mask:
+        result_masks = prediction_result.masks.data[conf_mask]
+    else:
+        result_masks = torch.tensor([[] for _ in range(result_boxes.size()[0])])
+
+    scores = []
+    polygons = []
+    category_ids = []
+    category_names = []
+    is_polygon_within_slice_list = []
+
+    for prediction, bool_mask in zip(
+            result_boxes.cpu().detach().numpy(),
+            result_masks.cpu().detach().numpy()
+    ):
+
+        score = prediction[4]
+        category_id = int(prediction[5])
+        category_name = detection_model.category_mapping[str(category_id)]
+
+        # more accurate to have this operation before the eventual resizing
+        # takes a little bit of extra computational time
+        bool_mask[bool_mask >= 0.5] = 1
+        bool_mask[bool_mask < 0.5] = 0
+
+        if downscale_pred:
+            if bool_mask.shape[0] == slice_size:
+                pass
+            else:
+                bool_mask = cv2.resize(bool_mask, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+
+        # number of pixels
+        area = len(bool_mask[bool_mask == 1])
+
+        if area > min_area_threshold:
+            try:
+                polygon = binary_mask_to_polygon(bool_mask)
+                if downscale_pred:
+                    polygon_slice = polygon
+                else:
+                    polygon_slice = np.stack([(polygon[:, 0] / bool_mask.shape[0]) * slice_size,
+                                              (polygon[:, 1] / bool_mask.shape[0]) * slice_size], axis=-1)
+                min_edge_distance = 0.05 * slice_size
+                max_edge_distance = 0.95 * slice_size
+                is_polygon_within_slice = (np.logical_and(polygon_slice[:, 0].min() >= min_edge_distance,
+                                                          polygon_slice[:, 0].max() <= max_edge_distance) and
+                                           np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
+                                                          polygon_slice[:, 1].max() <= max_edge_distance))
+
+                if not is_polygon_within_slice:
+                    score = 0.10  # if at edge set score to a low value
+
+                # conversion to absolute coordinates,
+                shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
+
+                scores.append(score)
+                polygons.append(shifted_polygon)  # conversion of polygon to absolute coordinates
+                category_ids.append(category_id)
+                category_names.append(category_name)
+                is_polygon_within_slice_list.append(is_polygon_within_slice)
+            except Exception:
+                pass
+
+    data = {'score': scores, 'polygon': polygons,
+            'category_id': category_ids, 'category_name': category_names,
+            'is_within_slice': is_polygon_within_slice_list}
+
+    return pd.DataFrame(data)
+
+
 def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_threshold, downscale_pred):
     """
+    Single-image (single-slice) prediction. Kept for backward compatibility; the batched
+    pipeline in ``get_sliced_prediction`` calls ``_result_to_df`` directly.
+
     YOLOv8 expects numpy arrays to have BGR (height, width, 3).
 
     1. Let's say you want to detect very very small objects, the slice height and width should be
@@ -46,100 +138,10 @@ def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_
     predictions are computed.
     """
 
-    shift_x = shift_amount[0]
-    shift_y = shift_amount[1]
-
     prediction_results = detection_model.model(image, imgsz=detection_model.image_size, verbose=False,
                                                device=detection_model.device)
-
-    # if no predictions
-    if prediction_results[0].boxes.data.size()[0] == 0:
-        df = pd.DataFrame(columns=['score', 'polygon', 'category_id', 'category_name', 'is_within_slice'])
-    else:
-        if has_mask:
-            predictions = [
-                (result.boxes.data[result.boxes.data[:, 4] >= detection_model.confidence_threshold],
-                 result.masks.data[result.boxes.data[:, 4] >= detection_model.confidence_threshold],)
-                for result in prediction_results]
-
-        else:
-            predictions = []
-            for result in prediction_results:
-                result_boxes = result.boxes.data[result.boxes.data[:, 4] >= detection_model.confidence_threshold]
-                result_masks = torch.tensor([[] for _ in range(result_boxes.size()[0])])
-                predictions.append((result_boxes, result_masks))
-
-        # for one image
-        # bboxes = [], dropping it as I am calculating it later on.
-        scores = []
-        polygons = []
-        category_ids = []
-        category_names = []
-        is_polygon_within_slice_list = []
-
-        # names are very confusing I should fix that
-        for image_ind, image_predictions in enumerate(predictions):
-            image_predictions_in_xyxy_format = image_predictions[0]
-            image_predictions_masks = image_predictions[1]
-
-            for prediction, bool_mask in zip(
-                    image_predictions_in_xyxy_format.cpu().detach().numpy(),
-                    image_predictions_masks.cpu().detach().numpy()
-            ):
-
-                score = prediction[4]
-                category_id = int(prediction[5])
-                category_name = detection_model.category_mapping[str(category_id)]
-
-                # more accurate to have this operation before the eventual resizing
-                # takes a little bit of extra computational time
-                bool_mask[bool_mask >= 0.5] = 1
-                bool_mask[bool_mask < 0.5] = 0
-
-                if downscale_pred:
-                    if bool_mask.shape[0] == slice_size:
-                        None
-                    else:
-                        bool_mask = cv2.resize(bool_mask, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
-
-                # number of pixels
-                area = len(bool_mask[bool_mask == 1])
-
-                if area > min_area_threshold:
-                    try:
-                        polygon = binary_mask_to_polygon(bool_mask)
-                        if downscale_pred:
-                            polygon_slice = polygon
-                        else:
-                            polygon_slice = np.stack([(polygon[:, 0] / bool_mask.shape[0]) * slice_size,
-                                                      (polygon[:, 1] / bool_mask.shape[0]) * slice_size], axis=-1)
-                        min_edge_distance = 0.05 * slice_size
-                        max_edge_distance = 0.95 * slice_size
-                        is_polygon_within_slice = (np.logical_and(polygon_slice[:, 0].min() >= min_edge_distance,
-                                                                  polygon_slice[:, 0].max() <= max_edge_distance) and
-                                                   np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
-                                                                  polygon_slice[:, 1].max() <= max_edge_distance))
-
-                        if not is_polygon_within_slice:
-                            score = 0.10  # if at edge set score to a low value
-
-                        # conversion to absolute coordinates,
-                        shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
-
-                        scores.append(score)
-                        polygons.append(shifted_polygon)  # conversion of polygon to absolute coordinates
-                        category_ids.append(category_id)
-                        category_names.append(category_name)
-                        is_polygon_within_slice_list.append(is_polygon_within_slice)
-                    except:
-                        None
-
-        dict = {'score': scores, 'polygon': polygons,
-                'category_id': category_ids, 'category_name': category_names,
-                'is_within_slice': is_polygon_within_slice_list}
-
-        df = pd.DataFrame(dict)
-    return df
+    return _result_to_df(prediction_results[0], detection_model, has_mask, shift_amount, slice_size,
+                         min_area_threshold, downscale_pred)
 
 def get_sliced_prediction(in_raster,
                           detection_model=None,
@@ -156,7 +158,8 @@ def get_sliced_prediction(in_raster,
                           downscale_pred: bool = False,
                           postprocess: bool = True,
                           postprocess_match_threshold: float = 0.5,
-                          postprocess_class_agnostic: bool = False):
+                          postprocess_class_agnostic: bool = False,
+                          batch_size: int = 8):
     """
     Function for slice image + get predicion for each slice + combine predictions in full image.
 
@@ -220,14 +223,24 @@ def get_sliced_prediction(in_raster,
 
     num_slices = len(slice_image_result)
     shift_amounts = slice_image_result.starting_pixels
+    slice_images = slice_image_result.images
     frames = []
-    # perform sliced prediction
-    for i, image in tqdm(enumerate(slice_image_result.images), total=num_slices):
-        df = YOLOv8(detection_model, image, has_mask, shift_amounts[i], slice_size, min_area_threshold, downscale_pred)
-        if df.shape[0] > 0:
-            frames.append(df)
+    # perform sliced prediction in batches (batched GPU inference instead of one slice at a
+    # time). Per-slice geometry is unchanged; only the model call is grouped.
+    for start in tqdm(range(0, num_slices, batch_size), total=(num_slices + batch_size - 1) // batch_size):
+        batch_images = list(slice_images[start:start + batch_size])
+        prediction_results = detection_model.model(batch_images, imgsz=detection_model.image_size,
+                                                   verbose=False, device=detection_model.device)
+        for j, prediction_result in enumerate(prediction_results):
+            df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
+                               slice_size, min_area_threshold, downscale_pred)
+            if df.shape[0] > 0:
+                frames.append(df)
 
-    df_all = pd.concat(frames, ignore_index=True)
+    if len(frames) == 0:
+        df_all = pd.DataFrame(columns=['score', 'polygon', 'category_id', 'category_name', 'is_within_slice'])
+    else:
+        df_all = pd.concat(frames, ignore_index=True)
     gdf = add_geometries(in_raster, df_all)
 
     # keep edge predictions (within 10% of slice size from the true footprint edge)
