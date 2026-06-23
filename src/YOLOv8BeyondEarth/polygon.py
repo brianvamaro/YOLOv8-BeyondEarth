@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import shapely
 import skimage
@@ -107,6 +108,25 @@ def binary_mask_to_polygon(binary_mask):
     contours = np.subtract(contours, 1)
     contour = np.flip(contours[0], axis=1) # should be interconnected
     return contour
+
+def binary_mask_to_polygon_cv(binary_mask):
+    """Faster OpenCV alternative to ``binary_mask_to_polygon``.
+
+    Uses ``cv2.findContours`` (RETR_EXTERNAL, CHAIN_APPROX_SIMPLE) and keeps the largest
+    external contour. Returns an (N, 2) float array of (x, y) = (col, row) coordinates in the
+    same convention as ``binary_mask_to_polygon``, or ``None`` if no contour is found.
+
+    NOTE: this produces *different* (sparser) vertices than skimage. Its effect on boulder
+    orientation was measured to be negligible (~0.5 deg median) — see
+    ``notebooks/Goal2_orientation_cv2_vs_skimage.ipynb`` — but it is opt-in
+    (``contour_method="cv2"`` in ``get_sliced_prediction``), not the default.
+    """
+    mask_uint8 = (binary_mask.astype(np.uint8) * 255)
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    return contour.squeeze(1).astype(float)
 
 def check_mask_validity(binary_mask, min_area_threshold=4):
 

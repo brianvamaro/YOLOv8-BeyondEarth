@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, is_within_slice, shift_polygon,
+from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
+                                       is_within_slice, shift_polygon,
                                        add_geometries, bboxes_to_shp, outlines_to_shp)
 from lsnms import nms, wbc
 
@@ -18,15 +19,21 @@ from shptools_BOULDERING import shp
 #from torchvision.ops import (nms as nms_torch, batched_nms as batched_nms_torch)
 
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
-                  min_area_threshold, downscale_pred):
+                  min_area_threshold, downscale_pred, contour_method="skimage"):
     """Convert a single ultralytics Result (one slice) into the detections DataFrame.
 
     This is the per-slice core extracted from ``YOLOv8`` so the model can be called on a
-    *batch* of slices (see ``get_sliced_prediction``) instead of one at a time. The geometry
-    is intentionally identical to the original single-slice path: masks are thresholded at
-    0.5, optionally resized to ``slice_size`` with ``INTER_AREA``, and converted to polygons
-    via ``binary_mask_to_polygon`` (skimage). Only the batching of the GPU call changed.
+    *batch* of slices (see ``get_sliced_prediction``) instead of one at a time. Masks are
+    thresholded at 0.5, optionally resized to ``slice_size`` with ``INTER_AREA``, and converted
+    to polygons.
+
+    ``contour_method`` selects the mask->polygon extractor:
+    - ``"skimage"`` (default): ``binary_mask_to_polygon`` (skimage ``find_contours``) — the
+      original behaviour, bit-identical geometry.
+    - ``"cv2"``: ``binary_mask_to_polygon_cv`` (OpenCV) — much faster, sparser vertices;
+      negligible effect on orientation (see Goal-2 bridge notebook), opt-in.
     """
+    extract_polygon = binary_mask_to_polygon_cv if contour_method == "cv2" else binary_mask_to_polygon
     shift_x = shift_amount[0]
     shift_y = shift_amount[1]
 
@@ -72,7 +79,9 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
 
         if area > min_area_threshold:
             try:
-                polygon = binary_mask_to_polygon(bool_mask)
+                polygon = extract_polygon(bool_mask)
+                if polygon is None or len(polygon) < 3:
+                    continue
                 if downscale_pred:
                     polygon_slice = polygon
                 else:
@@ -106,7 +115,8 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     return pd.DataFrame(data)
 
 
-def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_threshold, downscale_pred):
+def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_threshold,
+           downscale_pred, contour_method="skimage"):
     """
     Single-image (single-slice) prediction. Kept for backward compatibility; the batched
     pipeline in ``get_sliced_prediction`` calls ``_result_to_df`` directly.
@@ -141,7 +151,7 @@ def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_
     prediction_results = detection_model.model(image, imgsz=detection_model.image_size, verbose=False,
                                                device=detection_model.device)
     return _result_to_df(prediction_results[0], detection_model, has_mask, shift_amount, slice_size,
-                         min_area_threshold, downscale_pred)
+                         min_area_threshold, downscale_pred, contour_method)
 
 def get_sliced_prediction(in_raster,
                           detection_model=None,
@@ -159,7 +169,8 @@ def get_sliced_prediction(in_raster,
                           postprocess: bool = True,
                           postprocess_match_threshold: float = 0.5,
                           postprocess_class_agnostic: bool = False,
-                          batch_size: int = 8):
+                          batch_size: int = 8,
+                          contour_method: str = "skimage"):
     """
     Function for slice image + get predicion for each slice + combine predictions in full image.
 
@@ -233,7 +244,7 @@ def get_sliced_prediction(in_raster,
                                                    verbose=False, device=detection_model.device)
         for j, prediction_result in enumerate(prediction_results):
             df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
-                               slice_size, min_area_threshold, downscale_pred)
+                               slice_size, min_area_threshold, downscale_pred, contour_method)
             if df.shape[0] > 0:
                 frames.append(df)
 

@@ -12,7 +12,8 @@ import pandas as pd
 import pytest
 
 from YOLOv8BeyondEarth.polygon import (
-    add_geometries, binary_mask_to_polygon, is_within_slice, bboxes_to_shp,
+    add_geometries, binary_mask_to_polygon, binary_mask_to_polygon_cv,
+    is_within_slice, bboxes_to_shp,
 )
 
 
@@ -105,6 +106,42 @@ def test_binary_mask_to_polygon_square():
     # by marching squares), area ~24.5.
     poly_shape = Polygon(poly)
     assert poly_shape.area == pytest.approx(24.5, abs=1.5)
+
+
+def _ellipse_orientation_deg(polygon_xy):
+    """Replicate the orientation pipeline lightly: densify (~0.5 px) then fit a least-squares
+    ellipse (skimage EllipseModel, as shptools.geometry.fitEllipse does); return long-axis
+    orientation in [0, 180) degrees and the a/b ratio."""
+    from shapely.geometry import Polygon as SPoly
+    from shapely import segmentize
+    from skimage.measure import EllipseModel
+    poly = segmentize(SPoly(polygon_xy), 0.5)
+    xy = np.asarray(poly.exterior.coords)
+    m = EllipseModel()
+    if not m.estimate(xy - xy.mean(axis=0)):
+        return None, None
+    _, _, a, b, theta = m.params
+    return np.degrees(theta) % 180.0, max(a, b) / min(a, b)
+
+
+def test_cv2_vs_skimage_orientation_regression():
+    """cv2 contour extraction must not change measured boulder orientation vs skimage.
+
+    Pins the Goal-2 bridge finding (median ~0.5 deg, max <4 deg on real boulders): on clean
+    synthetic elongated ellipses, both contour methods recover the same orientation.
+    """
+    from skimage.draw import ellipse
+    for ang in (15, 40, 65, 110, 150):
+        img = np.zeros((140, 140), dtype=np.uint8)
+        rr, cc = ellipse(70, 70, 14, 34, shape=img.shape, rotation=np.deg2rad(ang))
+        img[rr, cc] = 1
+        o_sk, ab_sk = _ellipse_orientation_deg(binary_mask_to_polygon(img))
+        o_cv, ab_cv = _ellipse_orientation_deg(binary_mask_to_polygon_cv(img))
+        assert o_sk is not None and o_cv is not None
+        d = abs(o_sk - o_cv) % 180.0
+        d = min(d, 180.0 - d)
+        assert d < 8.0, f"angle {ang}: skimage {o_sk:.1f} vs cv2 {o_cv:.1f} differ by {d:.1f} deg"
+        assert abs(ab_sk - ab_cv) < 0.3  # aspect ratio agreement
 
 
 def test_is_within_slice_edge_vs_interior():
