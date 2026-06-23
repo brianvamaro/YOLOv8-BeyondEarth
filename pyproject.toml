@@ -33,3 +33,10 @@ classifiers = [
 [project.urls]
 "Homepage" = "https://github.com/astroNils/YOLOv8-BeyondEarth"
 "Bug Tracker" = "https://github.com/astroNils/YOLOv8-BeyondEarth/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "slow: marks tests as slow / GPU / data-heavy (deselect with '-m \"not slow\"')",
+]
