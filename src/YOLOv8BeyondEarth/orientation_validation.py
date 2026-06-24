@@ -106,6 +106,114 @@ def regional_orientation_hist(raster_path, crop=1024, n_crops=24, scales=((1, 4)
     return centers, {s: agg[s] / max(n, 1) for s in scales}
 
 
+def detect_orientations(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
+                        aspect_min=1.0):
+    """Tile a raw image array into ``slice_size`` windows, run YOLO on each, and return a
+    DataFrame ``[angle180, aspect, diameter_px]`` for every detection (geographic long-axis
+    azimuth measured in the *image's own* frame).
+
+    A minimal reimplementation of the sliced pipeline (mask >=0.5 -> resize to slice -> largest
+    connected blob -> contour -> EllipseModel), without NMS/edge handling — enough to get an
+    orientation *distribution* for transform / rotation tests on a single array. ``img`` is a 2D
+    uint8/0-255 array; non-overlapping tiles keep double-counting negligible.
+    """
+    import cv2
+    import shapely
+    from scipy.ndimage import label, binary_fill_holes
+    from .polygon import binary_mask_to_polygon
+
+    H, W = img.shape
+    rows = []
+    for y0 in range(0, H - slice_size + 1, slice_size):
+        for x0 in range(0, W - slice_size + 1, slice_size):
+            sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
+            res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False, device=device)
+            r0 = res[0]
+            if r0.masks is None or len(r0.masks.data) == 0:
+                continue
+            for m in r0.masks.data.cpu().numpy():
+                mm = (m >= 0.5).astype(np.float32)
+                if mm.shape[0] != slice_size:
+                    mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+                mb = (mm >= 0.5).astype(np.uint8)
+                lab, n = label(mb)
+                if n == 0:
+                    continue
+                if n > 1:
+                    big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+                    mb = (lab == big).astype(np.uint8)
+                mb = binary_fill_holes(mb).astype(np.uint8)        # solid boulder -> single contour
+                poly = binary_mask_to_polygon(mb)
+                if poly is None or len(poly) < 5:
+                    continue
+                a, asp = ellipse_angle180(shapely.geometry.Polygon(np.c_[poly[:, 0], -poly[:, 1]]), 1.0)
+                if np.isfinite(asp) and asp >= aspect_min:
+                    rows.append((a, asp, 2 * np.sqrt(int(mb.sum()) / np.pi)))
+    return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+
+
+def true_mask_for_point(model, dataset, x, y, slice_size=256, imgsz=1024, conf=0.10, device=0,
+                        max_center_dist=None):
+    """Re-run YOLO on a ``slice_size`` window centred on map point ``(x, y)`` and return the
+    **true mask** (as the pipeline uses it) of the detection nearest the window centre — for the
+    §9 worked-example panels (mask → polygon → ellipse → orientation).
+
+    Reproduces the production path: feed a ``slice_size`` crop at ``imgsz``, threshold the mask at
+    0.5, resize to ``slice_size`` (the pipeline's ``downscale_pred``), then contour it. Geographic
+    long-axis azimuth + aspect are taken with the same :func:`ellipse_angle180` used everywhere
+    else (north-up square-pixel raster, so the pixel frame's azimuth equals the map azimuth).
+
+    Returns a dict ``{patch, mask, polygon (col,row), centroid (col,row), angle180, aspect,
+    ellipse=(xc,yc,a,b,theta) in image space, score}`` or ``None`` if nothing is detected /
+    contourable near the centre. ``model`` is an ultralytics ``YOLO``; ``dataset`` an open rasterio
+    handle.
+    """
+    import cv2
+    import shapely
+    from rasterio.windows import Window
+    from scipy.ndimage import label, binary_fill_holes
+    from skimage.measure import EllipseModel
+    from .polygon import binary_mask_to_polygon
+
+    col0, row0 = ~dataset.transform * (x, y)
+    c0, r0 = int(round(col0)), int(round(row0))
+    half = slice_size // 2
+    patch = dataset.read(1, window=Window(c0 - half, r0 - half, slice_size, slice_size),
+                         boundless=True, fill_value=0).astype(np.uint8)
+    rgb = np.stack([patch] * 3, axis=-1)                  # 3-channel grayscale (BGR==RGB)
+    res = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device)
+    r0res = res[0]
+    if r0res.masks is None or len(r0res.masks.data) == 0:
+        return None
+    md = r0res.masks.data.cpu().numpy()
+    bx = r0res.boxes.xywh.cpu().numpy()
+    d = np.hypot(bx[:, 0] - slice_size / 2, bx[:, 1] - slice_size / 2)
+    k = int(np.argmin(d))
+    if max_center_dist is not None and d[k] > max_center_dist:
+        return None
+    m = (md[k] >= 0.5).astype(np.float32)
+    if m.shape[0] != slice_size:
+        m = cv2.resize(m, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+    mask = (m >= 0.5).astype(np.uint8)
+    lab, nlab = label(mask)                               # keep only the largest connected blob
+    if nlab == 0:
+        return None
+    if nlab > 1:
+        biggest = 1 + int(np.argmax([(lab == j).sum() for j in range(1, nlab + 1)]))
+        mask = (lab == biggest).astype(np.uint8)
+    mask = binary_fill_holes(mask).astype(np.uint8)      # solid boulder -> single clean contour
+    poly = binary_mask_to_polygon(mask)                  # (col, row) in patch frame
+    if poly is None or len(poly) < 5:
+        return None
+    col, row = poly[:, 0], poly[:, 1]
+    ang, asp = ellipse_angle180(shapely.geometry.Polygon(np.c_[col, -row]), 1.0)  # y=North -> -row
+    em = EllipseModel()
+    ell = em.params if em.estimate(np.c_[col, row]) else None   # image-space draw params
+    cen = (float(ell[0]), float(ell[1])) if ell is not None else (float(col.mean()), float(row.mean()))
+    return dict(patch=patch, mask=mask, polygon=poly, centroid=cen, angle180=ang, aspect=asp,
+                ellipse=ell, score=float(r0res.boxes.conf[k]))
+
+
 def centroid_direction_hist(gpkg_path, scene_bounds, win=2000.0, n_win=12, k=8,
                             dmin=1.5, dmax=30.0, min_count=2000, seed=3, bin_deg=10):
     """Nearest-neighbour direction histogram of boulder centroids (positions only).
