@@ -152,6 +152,47 @@ def detect_orientations(model, img, slice_size=256, imgsz=1024, conf=0.10, devic
     return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
 
 
+def center_orientation(model, patch, imgsz=1024, conf=0.10, device=0, max_center_dist=40):
+    """Run YOLO on a square ``patch`` and return ``(angle180, aspect)`` of the detection nearest
+    the patch centre, or ``None``. The geographic azimuth is measured in the *patch's own* frame.
+
+    Used by the paired transform/equivariance test (§8.5): feed the same boulder's patch, its
+    flip, and its 90° rotation, then map the angles back to compare. Same mask handling as
+    :func:`true_mask_for_point` (>=0.5 -> resize -> largest blob -> fill holes -> contour).
+    """
+    import cv2
+    import shapely
+    from scipy.ndimage import label, binary_fill_holes
+    from .polygon import binary_mask_to_polygon
+
+    ss = patch.shape[0]
+    res = model(np.stack([patch] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False, device=device)
+    r0 = res[0]
+    if r0.masks is None or len(r0.masks.data) == 0:
+        return None
+    md = r0.masks.data.cpu().numpy()
+    bx = r0.boxes.xywh.cpu().numpy()
+    k = int(np.argmin(np.hypot(bx[:, 0] - ss / 2, bx[:, 1] - ss / 2)))
+    if np.hypot(bx[k, 0] - ss / 2, bx[k, 1] - ss / 2) > max_center_dist:
+        return None
+    m = (md[k] >= 0.5).astype(np.float32)
+    if m.shape[0] != ss:
+        m = cv2.resize(m, (ss, ss), interpolation=cv2.INTER_AREA)
+    mb = (m >= 0.5).astype(np.uint8)
+    lab, n = label(mb)
+    if n == 0:
+        return None
+    if n > 1:
+        big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+        mb = (lab == big).astype(np.uint8)
+    mb = binary_fill_holes(mb).astype(np.uint8)
+    poly = binary_mask_to_polygon(mb)
+    if poly is None or len(poly) < 5:
+        return None
+    ang, asp = ellipse_angle180(shapely.geometry.Polygon(np.c_[poly[:, 0], -poly[:, 1]]), 1.0)
+    return (ang, asp) if np.isfinite(ang) else None
+
+
 def true_mask_for_point(model, dataset, x, y, slice_size=256, imgsz=1024, conf=0.10, device=0,
                         max_center_dist=None):
     """Re-run YOLO on a ``slice_size`` window centred on map point ``(x, y)`` and return the
