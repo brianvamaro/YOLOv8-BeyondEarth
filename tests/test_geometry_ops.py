@@ -223,6 +223,23 @@ def test_ellipse_orientation_recovers_known_angle():
     assert abs(grid_fraction(uniform, tol_deg=10) - grid_fraction_uniform(10)) < 0.01
 
 
+def test_structure_tensor_orientation_convention():
+    """structure_tensor_orientation must use the same azimuth convention as the mask angle:
+    N-S line -> 0, E-W line -> 90, NW-SE diagonal -> 135 (North=0, East=90, clockwise)."""
+    from YOLOv8BeyondEarth.orientation import structure_tensor_orientation
+
+    ns = np.zeros((41, 41)); ns[:, 20] = 1.0           # vertical line in image = North-South
+    ew = np.zeros((41, 41)); ew[20, :] = 1.0           # horizontal line = East-West
+    nwse = np.eye(41)                                   # row==col: top-left(NW)->bottom-right(SE)
+    nesw = np.fliplr(np.eye(41))                        # NE-SW diagonal
+    assert min(abs(structure_tensor_orientation(ns)[0] - g) for g in (0, 180)) < 1.0
+    assert abs(structure_tensor_orientation(ew)[0] - 90) < 1.0
+    assert abs(structure_tensor_orientation(nwse)[0] - 135) < 1.0
+    assert abs(structure_tensor_orientation(nesw)[0] - 45) < 1.0
+    # a clearly elongated bright feature is more coherent than uniform noise
+    assert structure_tensor_orientation(ns)[1] > 0.5
+
+
 def test_is_within_slice_edge_vs_interior():
     interior = np.array([[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0]])
     assert is_within_slice(interior, 512, 512) is True

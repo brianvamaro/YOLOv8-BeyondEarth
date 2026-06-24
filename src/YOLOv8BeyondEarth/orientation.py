@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import shapely
 from skimage.measure import EllipseModel
+from scipy.ndimage import gaussian_filter
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -122,3 +123,50 @@ def plot_rose(ax, angle180, bins=36, color="tab:blue", title=None, density=True,
     if title:
         ax.set_title(title, fontsize=10)
     return ax
+
+
+# --- YOLO-free orientation from raw pixels (structure tensor) -------------------------------
+# These measure intensity-gradient structure directly from the imagery, with NO segmentation
+# mask in the loop. CAVEAT for sunlit planetary scenes: the dominant gradient is the
+# bright-cap -> shadow terminator, so the returned axis is pulled toward the illumination edge
+# (perpendicular to the sun line), NOT necessarily the rock's true long axis. Use these to
+# locate the *imaging* axes (illumination / shadow) and as a YOLO-free cross-check, not as
+# ground-truth boulder orientation. Azimuth convention matches ``ellipse_angle180`` (North=0,
+# East=90, clockwise, [0,180)). Validated on synthetic lines (N-S->0, E-W->90, NW-SE diag->135).
+
+def structure_tensor_orientation(patch, weight=None, smooth=1.0):
+    """Long-axis azimuth ([0,180) from North) and coherence ([0,1]) of a raw image patch via
+    the gradient structure tensor.
+
+    weight : optional same-shape per-pixel weights (e.g. a centred Gaussian to focus on a boulder).
+    smooth : Gaussian pre-smoothing sigma (px) applied before the gradient.
+    """
+    a = gaussian_filter(np.asarray(patch, dtype=float), smooth)
+    gy, gx = np.gradient(a)                       # gx = d/dcol (East), gy = d/drow (South)
+    w = np.ones_like(a) if weight is None else np.asarray(weight, dtype=float)
+    Jxx = float(np.sum(w * gx * gx)); Jyy = float(np.sum(w * gy * gy)); Jxy = float(np.sum(w * gx * gy))
+    evals, evecs = np.linalg.eigh(np.array([[Jxx, Jxy], [Jxy, Jyy]]))   # ascending eigenvalues
+    coh = float((evals[1] - evals[0]) / (evals[1] + evals[0] + 1e-12))
+    vx, vy = evecs[:, 0]                          # smallest-eigenvalue evec = structure (long) axis
+    az = float(np.degrees(np.arctan2(vx, -vy)) % 180.0)   # East=vx, North=-vy
+    return az, coh
+
+
+def orientation_field(img, grad_sigma=1.0, integ_sigma=4.0):
+    """Per-pixel structure-tensor azimuth-from-North ([0,180)) and coherence for a whole image.
+
+    Same convention/caveats as :func:`structure_tensor_orientation`. ``grad_sigma`` sets the
+    texture scale of the gradient; ``integ_sigma`` the neighbourhood the tensor is averaged over.
+    Returns ``(azimuth, coherence)`` arrays the shape of ``img``.
+    """
+    a = gaussian_filter(np.asarray(img, dtype=float), grad_sigma)
+    gy, gx = np.gradient(a)
+    Jxx = gaussian_filter(gx * gx, integ_sigma); Jyy = gaussian_filter(gy * gy, integ_sigma)
+    Jxy = gaussian_filter(gx * gy, integ_sigma)
+    tr = Jxx + Jyy
+    disc = np.sqrt(np.maximum((Jxx - Jyy) ** 2 + 4 * Jxy * Jxy, 0.0))
+    l_max = (tr + disc) / 2; l_min = (tr - disc) / 2
+    coh = (l_max - l_min) / (l_max + l_min + 1e-12)
+    vx = Jxy; vy = l_min - Jxx                    # eigenvector for the smaller eigenvalue
+    az = np.degrees(np.arctan2(vx, -vy)) % 180.0
+    return az, coh
