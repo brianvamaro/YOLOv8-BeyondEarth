@@ -194,6 +194,35 @@ def test_cv2_vs_skimage_orientation_regression():
         assert abs(ab_sk - ab_cv) < 0.3  # aspect ratio agreement
 
 
+def test_ellipse_orientation_recovers_known_angle():
+    """boulder_orientations must recover the long-axis azimuth of synthetic ellipses, and
+    grid_fraction must equal the uniform baseline for a uniform distribution."""
+    import geopandas as gpd
+    from shapely.affinity import scale, rotate
+    from shapely.geometry import Point
+    from YOLOv8BeyondEarth.orientation import (
+        boulder_orientations, grid_fraction, grid_fraction_uniform)
+
+    base = scale(Point(0, 0).buffer(1.0, quad_segs=64), xfact=4.0, yfact=1.0)  # 4:1 ellipse, major along x (East)
+    geoms, expected = [], []
+    for az in (0, 30, 60, 90, 135):
+        # azimuth from North clockwise -> rotate the East-major ellipse by (90 - az) CCW
+        geoms.append(rotate(base, 90 - az, origin=(0, 0)))
+        expected.append(az % 180)
+    gdf = gpd.GeoDataFrame({"id": range(len(geoms))}, geometry=geoms, crs="EPSG:32631")
+    df = boulder_orientations(gdf, res=0.1, n_workers=1)
+    assert len(df) == len(geoms)
+    for got, exp in zip(df.angle180.values, expected):
+        d = abs(got - exp) % 180.0
+        d = min(d, 180.0 - d)
+        assert d < 2.0, f"expected azimuth {exp}, got {got:.1f}"
+    assert (df.aspect_ra > 3.5).all()  # 4:1 ellipses
+
+    rng = np.random.default_rng(0)
+    uniform = rng.uniform(0, 180, 200_000)
+    assert abs(grid_fraction(uniform, tol_deg=10) - grid_fraction_uniform(10)) < 0.01
+
+
 def test_is_within_slice_edge_vs_interior():
     interior = np.array([[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0]])
     assert is_within_slice(interior, 512, 512) is True
