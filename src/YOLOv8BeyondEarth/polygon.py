@@ -65,11 +65,13 @@ def add_geometries(in_raster, df):
     ys = d * cols + e * rows + f
     coords = np.stack([xs, ys], axis=-1)
 
-    boulder_geometry = []
-    start = 0
-    for n in vertex_counts:
-        boulder_geometry.append(Polygon(coords[start:start + n]))
-        start += n
+    # Vectorized polygon construction from the stacked coords: build every linear ring in
+    # one call (per-vertex ring index), then assemble polygons. Equivalent to the previous
+    # per-polygon ``Polygon(coords)`` loop (shapely auto-closes open rings the same way), but
+    # avoids one Python-level shapely call per boulder — matters at ~1e6 detections.
+    ring_indices = np.repeat(np.arange(len(polygons)), vertex_counts)
+    rings = shapely.linearrings(coords, indices=ring_indices)
+    boulder_geometry = shapely.polygons(rings)
 
     gdf = gpd.GeoDataFrame(df, geometry=boulder_geometry, crs=in_crs.to_wkt())
     gdf["bbox"] = gdf.geometry.bounds.values.tolist()
@@ -98,15 +100,26 @@ def binary_mask_to_polygon(binary_mask):
         tolerance: Maximum distance from original points of polygon to approximated
             polygonal chain. If tolerance is 0, the original coordinate array is returned.
     """
-    polygon = []
+    # Crop to the object's bounding box before tracing. ``find_contours`` scans the whole
+    # array, so contouring a small boulder inside a full slice-size mask wastes most of the
+    # work; cropping then shifting the contour back is geometry-identical (the 0.5 isoline is
+    # local to the blob). Falls back to None for an all-zero mask.
+    ys, xs = np.nonzero(binary_mask)
+    if ys.size == 0:
+        return None
+    y0, x0 = ys.min(), xs.min()
+    sub = binary_mask[y0:ys.max() + 1, x0:xs.max() + 1]
+
     # pad mask to close contours of shapes which start and end at an edge
-    padded_binary_mask = np.pad(binary_mask, pad_width=1, mode='constant', constant_values=0)
+    padded_binary_mask = np.pad(sub, pad_width=1, mode='constant', constant_values=0)
     contours = skimage.measure.find_contours(padded_binary_mask, 0.5)
 
     # yolo can produce a mask where pixels are not interconnected
     # in this case the following line does not work
     contours = np.subtract(contours, 1)
-    contour = np.flip(contours[0], axis=1) # should be interconnected
+    contour = np.flip(contours[0], axis=1)  # (x, y) = (col, row) in the cropped frame
+    contour[:, 0] += x0  # shift back to full-mask coordinates -> identical geometry
+    contour[:, 1] += y0
     return contour
 
 def binary_mask_to_polygon_cv(binary_mask):
@@ -121,12 +134,22 @@ def binary_mask_to_polygon_cv(binary_mask):
     ``notebooks/Goal2_orientation_cv2_vs_skimage.ipynb`` — but it is opt-in
     (``contour_method="cv2"`` in ``get_sliced_prediction``), not the default.
     """
-    mask_uint8 = (binary_mask.astype(np.uint8) * 255)
+    # Crop to the object's bounding box before tracing (see binary_mask_to_polygon): cheaper
+    # and geometry-identical after shifting the contour back.
+    ys, xs = np.nonzero(binary_mask)
+    if ys.size == 0:
+        return None
+    y0, x0 = ys.min(), xs.min()
+    sub = binary_mask[y0:ys.max() + 1, x0:xs.max() + 1]
+
+    mask_uint8 = (sub.astype(np.uint8) * 255)
     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    contour = max(contours, key=cv2.contourArea)
-    return contour.squeeze(1).astype(float)
+    contour = max(contours, key=cv2.contourArea).squeeze(1).astype(float)
+    contour[:, 0] += x0  # (x, y) cropped-frame -> full-mask coordinates
+    contour[:, 1] += y0
+    return contour
 
 def check_mask_validity(binary_mask, min_area_threshold=4):
 

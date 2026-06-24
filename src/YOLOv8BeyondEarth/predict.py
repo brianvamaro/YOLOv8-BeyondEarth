@@ -1,8 +1,11 @@
+import os
 import cv2
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import torch
+
+from concurrent.futures import ThreadPoolExecutor
 
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
                                        is_within_slice, shift_polygon,
@@ -19,7 +22,7 @@ from shptools_BOULDERING import shp
 #from torchvision.ops import (nms as nms_torch, batched_nms as batched_nms_torch)
 
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
-                  min_area_threshold, downscale_pred, contour_method="skimage"):
+                  min_area_threshold, downscale_pred, contour_method="skimage", executor=None):
     """Convert a single ultralytics Result (one slice) into the detections DataFrame.
 
     This is the per-slice core extracted from ``YOLOv8`` so the model can be called on a
@@ -32,6 +35,12 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
       original behaviour, bit-identical geometry.
     - ``"cv2"``: ``binary_mask_to_polygon_cv`` (OpenCV) — much faster, sparser vertices;
       negligible effect on orientation (see Goal-2 bridge notebook), opt-in.
+
+    ``executor``: an optional ``ThreadPoolExecutor``. The per-detection work (resize, contour
+    extraction, geometry) is independent and dominated by GIL-releasing C code
+    (``find_contours``, ``cv2``, numpy), so mapping it across threads gives a large speedup on
+    dense slices. Results are collected in input order, so output is identical to the serial
+    path.
     """
     extract_polygon = binary_mask_to_polygon_cv if contour_method == "cv2" else binary_mask_to_polygon
     shift_x = shift_amount[0]
@@ -48,65 +57,71 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     else:
         result_masks = torch.tensor([[] for _ in range(result_boxes.size()[0])])
 
+    # Threshold the whole mask batch in one GPU op (equivalent to the old per-mask
+    # ``bool_mask[bool_mask>=0.5]=1; [<0.5]=0``) before moving to CPU. Kept as float32 {0.,1.}
+    # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
+    # sees -> geometry-neutral, just without two full-array writes per detection.
+    masks_np = (result_masks >= 0.5).to(torch.float32).cpu().detach().numpy()
+    boxes_np = result_boxes.cpu().detach().numpy()
+
+    min_edge_distance = 0.05 * slice_size
+    max_edge_distance = 0.95 * slice_size
+
+    def _process_detection(item):
+        """Mask -> (score, polygon, category_id, category_name, is_within_slice) or None.
+        Pure and free of shared mutable state, so it is safe to run across threads."""
+        prediction, bool_mask = item
+        category_id = int(prediction[5])
+
+        if downscale_pred and bool_mask.shape[0] != slice_size:
+            bool_mask = cv2.resize(bool_mask, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+
+        # number of pixels
+        area = np.count_nonzero(bool_mask == 1)
+        if area <= min_area_threshold:
+            return None
+
+        try:
+            polygon = extract_polygon(bool_mask)
+            if polygon is None or len(polygon) < 3:
+                return None
+            if downscale_pred:
+                polygon_slice = polygon
+            else:
+                polygon_slice = np.stack([(polygon[:, 0] / bool_mask.shape[0]) * slice_size,
+                                          (polygon[:, 1] / bool_mask.shape[0]) * slice_size], axis=-1)
+            is_polygon_within_slice = (np.logical_and(polygon_slice[:, 0].min() >= min_edge_distance,
+                                                      polygon_slice[:, 0].max() <= max_edge_distance) and
+                                       np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
+                                                      polygon_slice[:, 1].max() <= max_edge_distance))
+
+            # if at edge set score to a low value
+            score = prediction[4] if is_polygon_within_slice else 0.10
+            shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
+            category_name = detection_model.category_mapping[str(category_id)]
+            return (score, shifted_polygon, category_id, category_name, is_polygon_within_slice)
+        except Exception:
+            return None
+
+    items = list(zip(boxes_np, masks_np))
+    if executor is not None and len(items) > 1:
+        results = executor.map(_process_detection, items)
+    else:
+        results = map(_process_detection, items)
+
     scores = []
     polygons = []
     category_ids = []
     category_names = []
     is_polygon_within_slice_list = []
-
-    for prediction, bool_mask in zip(
-            result_boxes.cpu().detach().numpy(),
-            result_masks.cpu().detach().numpy()
-    ):
-
-        score = prediction[4]
-        category_id = int(prediction[5])
-        category_name = detection_model.category_mapping[str(category_id)]
-
-        # more accurate to have this operation before the eventual resizing
-        # takes a little bit of extra computational time
-        bool_mask[bool_mask >= 0.5] = 1
-        bool_mask[bool_mask < 0.5] = 0
-
-        if downscale_pred:
-            if bool_mask.shape[0] == slice_size:
-                pass
-            else:
-                bool_mask = cv2.resize(bool_mask, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
-
-        # number of pixels
-        area = len(bool_mask[bool_mask == 1])
-
-        if area > min_area_threshold:
-            try:
-                polygon = extract_polygon(bool_mask)
-                if polygon is None or len(polygon) < 3:
-                    continue
-                if downscale_pred:
-                    polygon_slice = polygon
-                else:
-                    polygon_slice = np.stack([(polygon[:, 0] / bool_mask.shape[0]) * slice_size,
-                                              (polygon[:, 1] / bool_mask.shape[0]) * slice_size], axis=-1)
-                min_edge_distance = 0.05 * slice_size
-                max_edge_distance = 0.95 * slice_size
-                is_polygon_within_slice = (np.logical_and(polygon_slice[:, 0].min() >= min_edge_distance,
-                                                          polygon_slice[:, 0].max() <= max_edge_distance) and
-                                           np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
-                                                          polygon_slice[:, 1].max() <= max_edge_distance))
-
-                if not is_polygon_within_slice:
-                    score = 0.10  # if at edge set score to a low value
-
-                # conversion to absolute coordinates,
-                shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
-
-                scores.append(score)
-                polygons.append(shifted_polygon)  # conversion of polygon to absolute coordinates
-                category_ids.append(category_id)
-                category_names.append(category_name)
-                is_polygon_within_slice_list.append(is_polygon_within_slice)
-            except Exception:
-                pass
+    for res in results:
+        if res is None:
+            continue
+        scores.append(res[0])
+        polygons.append(res[1])  # polygon in absolute (shifted) coordinates
+        category_ids.append(res[2])
+        category_names.append(res[3])
+        is_polygon_within_slice_list.append(res[4])
 
     data = {'score': scores, 'polygon': polygons,
             'category_id': category_ids, 'category_name': category_names,
@@ -160,8 +175,8 @@ def get_sliced_prediction(in_raster,
                           output_dir=None,
                           interim_file_name=None,  # ADDED OUTPUT FILE NAME TO (OPTIONALLY) SAVE SLICES
                           interim_dir=None,  # ADDED INTERIM DIRECTORY TO (OPTIONALLY) SAVE SLICES
-                          slice_size: int = None,
-                          inference_size: int = None,
+                          slice_size: int = 256,
+                          inference_size: int = 1024,
                           overlap_height_ratio: float = 0.2,
                           overlap_width_ratio: float = 0.2,
                           min_area_threshold: int = None,
@@ -170,7 +185,11 @@ def get_sliced_prediction(in_raster,
                           postprocess_match_threshold: float = 0.5,
                           postprocess_class_agnostic: bool = False,
                           batch_size: int = 8,
-                          contour_method: str = "skimage"):
+                          contour_method: str = "skimage",
+                          save_bbox: bool = True,
+                          save_prenms: bool = True,
+                          output_format: str = "shp",
+                          n_workers: int = None):
     """
     Function for slice image + get predicion for each slice + combine predictions in full image.
 
@@ -202,6 +221,19 @@ def get_sliced_prediction(in_raster,
             postprocessed after sliced prediction.
         postprocess_class_agnostic: bool
             If True, postprocess will ignore category ids.
+        save_bbox: bool
+            Write the bounding-box layers (pre- and post-NMS). Default ``True``. Set ``False``
+            to skip them when only the mask outlines are needed.
+        save_prenms: bool
+            Write the pre-NMS (un-suppressed) layers. Default ``True``. Set ``False`` to write
+            only the final post-NMS layer(s) — useful for dense full-image runs.
+        output_format: str
+            ``"shp"`` (default) or ``"gpkg"``. GeoPackage avoids the shapefile 2 GB / field
+            limits and is faster to write for very large (~1e6-feature) outputs.
+        n_workers: int
+            Threads for the per-detection mask->polygon post-processing. Default
+            ``min(8, os.cpu_count())``; pass ``1`` to force the serial path. Output is identical
+            regardless of worker count (order-preserving).
 
     Returns:
         A pd.DataFrame.
@@ -236,17 +268,28 @@ def get_sliced_prediction(in_raster,
     shift_amounts = slice_image_result.starting_pixels
     slice_images = slice_image_result.images
     frames = []
-    # perform sliced prediction in batches (batched GPU inference instead of one slice at a
-    # time). Per-slice geometry is unchanged; only the model call is grouped.
-    for start in tqdm(range(0, num_slices, batch_size), total=(num_slices + batch_size - 1) // batch_size):
-        batch_images = list(slice_images[start:start + batch_size])
-        prediction_results = detection_model.model(batch_images, imgsz=detection_model.image_size,
-                                                   verbose=False, device=detection_model.device)
-        for j, prediction_result in enumerate(prediction_results):
-            df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
-                               slice_size, min_area_threshold, downscale_pred, contour_method)
-            if df.shape[0] > 0:
-                frames.append(df)
+    # The mask->polygon post-processing is CPU-bound and embarrassingly parallel per detection;
+    # run it across a thread pool (find_contours / cv2 / numpy release the GIL). Output order is
+    # preserved, so results are identical to the serial path. Default to a modest worker count
+    # (returns diminish past ~8 and we don't want to oversubscribe alongside the GPU thread).
+    workers = n_workers if n_workers is not None else min(8, os.cpu_count() or 1)
+    executor = ThreadPoolExecutor(max_workers=workers) if workers and workers > 1 else None
+    try:
+        # perform sliced prediction in batches (batched GPU inference instead of one slice at a
+        # time). Per-slice geometry is unchanged; only the model call is grouped.
+        for start in tqdm(range(0, num_slices, batch_size), total=(num_slices + batch_size - 1) // batch_size):
+            batch_images = list(slice_images[start:start + batch_size])
+            prediction_results = detection_model.model(batch_images, imgsz=detection_model.image_size,
+                                                       verbose=False, device=detection_model.device)
+            for j, prediction_result in enumerate(prediction_results):
+                df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
+                                   slice_size, min_area_threshold, downscale_pred, contour_method,
+                                   executor=executor)
+                if df.shape[0] > 0:
+                    frames.append(df)
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
     if len(frames) == 0:
         df_all = pd.DataFrame(columns=['score', 'polygon', 'category_id', 'category_name', 'is_within_slice'])
@@ -265,12 +308,17 @@ def get_sliced_prediction(in_raster,
     gdf_line_buffer = shp.buffer(tmp_dir / "true-footprint-as-a-line.shp", slice_size * 0.10 * in_res,
                                  (tmp_dir / "footprint-buffer.shp"))
 
-    gdf_boulders = gdf.copy()
-    gdf_boulders["id"] = gdf_boulders.index
-    gdf_intersected = gpd.overlay(gdf_boulders, gdf_line_buffer, how="intersection", keep_geom_type=True)
-
+    # Flag boulders touching the footprint-edge buffer. We only need the boolean flag, not the
+    # materialized intersection geometries, so use a spatial join (intersects predicate)
+    # instead of gpd.overlay(how="intersection") — far cheaper and lighter on memory at ~1e6
+    # boulders. The buffer was round-tripped through a shapefile whose .prj uses the ESRI-WKT
+    # dialect of the same projection; normalize its CRS to the boulders' (identical grid) to
+    # avoid a spurious CRS-mismatch and keep the join on one coordinate system.
+    gdf_line_buffer = gdf_line_buffer.set_crs(gdf.crs, allow_override=True)
+    edge_idx = gpd.sjoin(gdf[["geometry"]], gdf_line_buffer[["geometry"]],
+                         predicate="intersects", how="inner").index.unique()
     gdf["is_at_edge"] = False
-    gdf.loc[gdf_intersected.id.values, "is_at_edge"] = True
+    gdf.loc[edge_idx, "is_at_edge"] = True
 
     # keep edge predictions close to the edge of the footprint of the raster, but otherwise remove edge predictions
     gdf = gdf.loc[np.logical_or(gdf.is_at_edge == True, gdf.is_within_slice == True)]
@@ -279,19 +327,24 @@ def get_sliced_prediction(in_raster,
     gdf = gdf.drop_duplicates(subset="geometry", ignore_index=True)
     gdf["id"] = gdf.index
 
-    # save shapefile before post-processing (include if downscaling is done or not...)
+    # save predictions before post-processing (include if downscaling is done or not...)
+    ext = ".gpkg" if output_format == "gpkg" else ".shp"
     bbox_filename = in_raster.stem + "-predictions-ct-" + str(int(confidence_threshold * 100)).zfill(3) + "-ss-" + str(
-        slice_size) + "-is-" + str(inference_size) + "-ov-" + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox.shp"
-    mask_filename = bbox_filename.replace("-bbox.shp", "-mask.shp")
+        slice_size) + "-is-" + str(inference_size) + "-ov-" + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox" + ext
+    mask_filename = bbox_filename.replace("-bbox" + ext, "-mask" + ext)
 
     if downscale_pred:
-        bbox_filename = bbox_filename.replace("-bbox.shp", "-downscaled-bbox.shp")
-        mask_filename = mask_filename.replace("-mask.shp", "-downscaled-mask.shp")
+        bbox_filename = bbox_filename.replace("-bbox" + ext, "-downscaled-bbox" + ext)
+        mask_filename = mask_filename.replace("-mask" + ext, "-downscaled-mask" + ext)
 
     out_bbox_shp = output_dir / bbox_filename
     out_mask_shp = output_dir / mask_filename
-    bboxes_to_shp(gdf, out_bbox_shp)
-    outlines_to_shp(gdf, out_mask_shp)
+    # The pre-NMS files are intermediate, and bbox files aren't needed by many workflows.
+    # Gate both so a dense full-image run can avoid writing ~1e6-feature layers it won't use.
+    if save_prenms:
+        if save_bbox:
+            bboxes_to_shp(gdf, out_bbox_shp)
+        outlines_to_shp(gdf, out_mask_shp)
 
 
     if postprocess:
@@ -305,10 +358,11 @@ def get_sliced_prediction(in_raster,
             keep = nms(boxes=np.stack(gdf.bbox.values), scores=gdf.score.values,
                        iou_threshold=postprocess_match_threshold, class_ids=gdf.category_id.values, rtree_leaf_size=32)
 
-        # saving post-processed shapefiles
+        # saving post-processed predictions (the NMS mask layer is the primary deliverable)
         gdf_nms = gdf.loc[keep]
-        bboxes_to_shp(gdf_nms, out_bbox_shp.with_name(out_bbox_shp.stem + "-nms.shp"))
-        outlines_to_shp(gdf_nms, out_mask_shp.with_name(out_mask_shp.stem + "-nms.shp"))
+        if save_bbox:
+            bboxes_to_shp(gdf_nms, out_bbox_shp.with_name(out_bbox_shp.stem + "-nms" + ext))
+        outlines_to_shp(gdf_nms, out_mask_shp.with_name(out_mask_shp.stem + "-nms" + ext))
         return gdf, gdf_nms
     else:
         return gdf, None

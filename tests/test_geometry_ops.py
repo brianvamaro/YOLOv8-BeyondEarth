@@ -108,6 +108,56 @@ def test_binary_mask_to_polygon_square():
     assert poly_shape.area == pytest.approx(24.5, abs=1.5)
 
 
+def test_binary_mask_to_polygon_crop_is_translation_invariant():
+    """The crop-to-bbox optimization must give the same contour (up to the placement offset)
+    regardless of how much empty border surrounds the object."""
+    obj = np.zeros((7, 7), dtype=np.float32)
+    obj[1:6, 1:6] = 1.0  # 5x5 block with a 1px border
+    small = binary_mask_to_polygon(obj)
+    # same object embedded near the corner of a much larger (slice-size-like) mask
+    big = np.zeros((256, 256), dtype=np.float32)
+    big[40:45, 60:65] = 1.0  # 5x5 block at (row 40, col 60)
+    big_poly = binary_mask_to_polygon(big)
+    # contour is (x=col, y=row); strip the placement offset and compare to the small version
+    rebased = big_poly - np.array([60 - 1, 40 - 1])  # account for the 1px border in `obj`
+    assert small.shape == rebased.shape
+    assert np.allclose(np.sort(small, axis=0), np.sort(rebased, axis=0), atol=0.0)
+
+
+def test_threaded_matches_serial_result_to_df():
+    """The ThreadPoolExecutor path in _result_to_df must produce byte-identical detections to
+    the serial path (order-preserving), so threading is geometry-neutral."""
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    import torch
+    from YOLOv8BeyondEarth.predict import _result_to_df
+
+    rng = np.random.default_rng(3)
+    n, sz = 40, 64
+    masks = np.zeros((n, sz, sz), dtype=np.float32)
+    boxes = np.zeros((n, 6), dtype=np.float32)
+    for i in range(n):
+        cy, cx = rng.integers(10, sz - 10), rng.integers(10, sz - 10)
+        r = int(rng.integers(3, 7))
+        masks[i, cy - r:cy + r, cx - r:cx + r] = 1.0
+        boxes[i] = [0, 0, 0, 0, rng.uniform(0.2, 0.9), 0]
+    result = SimpleNamespace(
+        boxes=SimpleNamespace(data=torch.from_numpy(boxes)),
+        masks=SimpleNamespace(data=torch.from_numpy(masks)),
+    )
+    model = SimpleNamespace(confidence_threshold=0.1, category_mapping={"0": "boulder"})
+    kw = dict(detection_model=model, has_mask=True, shift_amount=(100, 200), slice_size=sz,
+              min_area_threshold=6, downscale_pred=False, contour_method="skimage")
+    serial = _result_to_df(result, executor=None, **kw)
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        threaded = _result_to_df(result, executor=ex, **kw)
+    assert len(serial) == len(threaded) and len(serial) > 0
+    assert np.array_equal(serial.score.values, threaded.score.values)
+    assert serial.is_within_slice.tolist() == threaded.is_within_slice.tolist()
+    for ps, pt in zip(serial.polygon.values, threaded.polygon.values):
+        assert np.array_equal(ps, pt)
+
+
 def _ellipse_orientation_deg(polygon_xy):
     """Replicate the orientation pipeline lightly: densify (~0.5 px) then fit a least-squares
     ellipse (skimage EllipseModel, as shptools.geometry.fitEllipse does); return long-axis
