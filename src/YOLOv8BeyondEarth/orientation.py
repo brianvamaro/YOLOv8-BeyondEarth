@@ -104,6 +104,106 @@ def grid_fraction_uniform(tol_deg=10.0):
     return 2.0 * tol_deg / 90.0
 
 
+# --- Rose-diagram statistics: well-resolved subset, smoothed density, peak + bootstrap CI -----
+# Consolidates the small analysis helpers previously inlined across the Goal-2 / HiRISE-test
+# notebooks (well-resolved subset selection, smoothed axial density, the refined peak, its
+# bootstrap CI, axial distance). Azimuths are axial (mod 180); North=0, East=90.
+
+DPX_MIN = 8   # a boulder narrower than this many pixels (diameter_m / m_per_px) is too pixelated
+              # to carry a meaningful long-axis orientation, so it's dropped from distributions.
+
+
+def well_resolved_subset(df, res, aspect_min=1.35, dpx_min=DPX_MIN):
+    """Subset for orientation analysis: elongated AND well-resolved boulders.
+
+    elongated = ``aspect_ra > aspect_min`` (near-circular masks have no real long axis);
+    well-resolved = equivalent diameter >= ``dpx_min`` pixels (``diameter_m / res``), since the
+    long axis of a near-pixel-scale mask is dominated by discretisation. ``df`` must have
+    ``aspect_ra`` and ``diameter_m`` columns (as returned by :func:`boulder_orientations`).
+    """
+    return df[(df["aspect_ra"] > aspect_min) & (df["diameter_m"] / res >= dpx_min)]
+
+
+def axial_distance(angles, center):
+    """Axial (mod-180) angular distance from each azimuth to ``center``, in [0, 90]."""
+    a = np.asarray(angles, dtype=float) % 180.0
+    return np.abs(((a - center + 90.0) % 180.0) - 90.0)
+
+
+def _circular_smooth(counts, sigma=4.0):
+    """Wrap-around Gaussian smoothing of a length-N circular histogram (period N)."""
+    c = np.asarray(counts, dtype=float)
+    n = len(c)
+    x = np.arange(n)
+    d = np.minimum(np.abs(x - x[:, None]), n - np.abs(x - x[:, None]))
+    k = np.exp(-0.5 * (d / sigma) ** 2)
+    return (k / k.sum(1, keepdims=True)) @ c
+
+
+def azimuth_density(angles, sigma=4.0, nbins=180):
+    """Smoothed axial-azimuth density. Returns ``(bin_centers_deg, density_percent)``.
+
+    A ``nbins``-bin histogram over [0, 180) (1 deg wide at the default) with wrap-around Gaussian
+    smoothing (``sigma`` in bins), normalised to sum to 100%.
+    """
+    h, e = np.histogram(np.asarray(angles, dtype=float) % 180.0,
+                        bins=np.linspace(0.0, 180.0, nbins + 1))
+    d = _circular_smooth(h.astype(float), sigma)
+    centers = (e[:-1] + e[1:]) / 2.0
+    total = d.sum()
+    return centers, (d / total * 100.0 if total else d)
+
+
+def refine_peak(angles, sigma=4.0):
+    """Mode of the smoothed azimuth density with sub-bin parabolic interpolation; deg in [0,180)."""
+    c, d = azimuth_density(angles, sigma)
+    n = len(d)
+    i = int(np.argmax(d))
+    y0, y1, y2 = d[(i - 1) % n], d[i], d[(i + 1) % n]
+    den = y0 - 2 * y1 + y2
+    return float((c[i] + (0.5 * (y0 - y2) / den if den else 0.0)) % 180.0)
+
+
+def bootstrap_peak_ci(angles, n_boot=400, ci=(2.5, 97.5), sigma=4.0, seed=0):
+    """Refined peak azimuth and its bootstrap CI. Returns ``(peak, lo, hi)`` in degrees.
+
+    CAVEAT: the percentile CI is taken on the linear angle values, so it is only meaningful when
+    the peak sits away from the 0/180 wrap (true for the HiRISE diagonal peaks ~115-145).
+    """
+    a = np.asarray(angles, dtype=float) % 180.0
+    n = len(a)
+    if n == 0:
+        return np.nan, np.nan, np.nan
+    rng = np.random.default_rng(seed)
+    boot = np.array([refine_peak(a[rng.integers(0, n, n)], sigma) for _ in range(n_boot)])
+    lo, hi = np.percentile(boot, ci)
+    return refine_peak(a, sigma), float(lo), float(hi)
+
+
+def meridian_convergence(tif_path):
+    """Meridian convergence (deg) at a raster's centre: the grid-bearing of true North.
+
+    Convert a grid-frame azimuth to geographic with ``geo = grid - convergence``. Returns 0.0 for
+    equirectangular (``eqc``) north-up products by construction. Needs rasterio + pyproj (imported
+    lazily so the rest of this module stays dependency-light).
+    """
+    import rasterio
+    from pyproj import CRS, Transformer
+    with rasterio.open(tif_path) as ds:
+        crs = CRS.from_wkt(ds.crs.to_wkt())
+        if crs.to_dict().get("proj") == "eqc":
+            return 0.0
+        cx = (ds.bounds.left + ds.bounds.right) / 2.0
+        cy = (ds.bounds.top + ds.bounds.bottom) / 2.0
+    geog = crs.geodetic_crs
+    inv = Transformer.from_crs(geog, crs, always_xy=True)
+    lon, lat = Transformer.from_crs(crs, geog, always_xy=True).transform(cx, cy)
+    d = 0.0005
+    x1, y1 = inv.transform(lon, lat)
+    x2, y2 = inv.transform(lon, lat + d)
+    return float(np.degrees(np.arctan2(x2 - x1, y2 - y1)))
+
+
 def plot_rose(ax, angle180, bins=36, color="tab:blue", title=None, density=True, label=None):
     """Draw an axial rose (plots theta and theta+180) on a polar Axes (North up, clockwise).
 

@@ -240,6 +240,53 @@ def test_structure_tensor_orientation_convention():
     assert structure_tensor_orientation(ns)[1] > 0.5
 
 
+def test_axial_distance_wraps_mod180():
+    """axial_distance is the mod-180 distance in [0,90]: 10 vs 170 are 20 apart, 0 vs 90 are 90."""
+    from YOLOv8BeyondEarth.orientation import axial_distance
+    d = axial_distance([10.0, 170.0, 0.0, 135.0, 200.0], 0.0)  # 200 % 180 = 20
+    np.testing.assert_allclose(d, [10.0, 10.0, 0.0, 45.0, 20.0], atol=1e-9)
+    assert float(axial_distance([170.0], 10.0)[0]) == pytest.approx(20.0)
+
+
+def test_refine_peak_and_bootstrap_ci_recover_known_mode():
+    """refine_peak finds the mode of a concentrated axial distribution; the bootstrap CI is
+    narrow and brackets it. Uses a wrapped-normal cluster at 135."""
+    from YOLOv8BeyondEarth.orientation import refine_peak, bootstrap_peak_ci
+    rng = np.random.default_rng(0)
+    angles = (135.0 + rng.normal(0, 5, 20_000)) % 180.0
+    pk = refine_peak(angles)
+    assert abs(((pk - 135 + 90) % 180) - 90) < 1.5
+    peak, lo, hi = bootstrap_peak_ci(angles, n_boot=200)
+    assert lo <= peak <= hi
+    assert (hi - lo) < 3.0                      # well-determined -> tight CI
+
+
+def test_well_resolved_subset_filters_aspect_and_pixels():
+    """well_resolved_subset keeps only elongated (aspect>1.35) AND well-resolved (diameter>=dpx_min
+    px = diameter_m/res) boulders."""
+    from YOLOv8BeyondEarth.orientation import well_resolved_subset
+    df = pd.DataFrame({
+        "aspect_ra":  [2.0, 1.2, 2.0, 2.0],
+        "diameter_m": [10.0, 10.0, 1.0, 10.0],   # at res=0.5: dpx = 20, 20, 2, 20
+        "angle180":   [10.0, 20.0, 30.0, 40.0],
+    })
+    out = well_resolved_subset(df, res=0.5, dpx_min=8)
+    assert list(out.angle180) == [10.0, 40.0]    # row1 fails aspect, row2 fails dpx (2<8)
+
+
+def test_meridian_convergence_zero_for_equirectangular(tmp_path):
+    """Equirectangular (eqc) north-up products have zero meridian convergence by construction."""
+    from rasterio.transform import from_origin
+    from YOLOv8BeyondEarth.orientation import meridian_convergence
+    path = tmp_path / "eqc.tif"
+    transform = from_origin(0.0, 100000.0, 0.5, 0.5)
+    with rio.open(path, "w", driver="GTiff", height=32, width=32, count=1, dtype="uint8",
+                  crs="+proj=eqc +lat_ts=0 +lat_0=0 +lon_0=0 +R=3396190 +units=m +no_defs",
+                  transform=transform) as dst:
+        dst.write(np.zeros((1, 32, 32), dtype="uint8"))
+    assert meridian_convergence(path) == 0.0
+
+
 def test_is_within_slice_edge_vs_interior():
     interior = np.array([[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0]])
     assert is_within_slice(interior, 512, 512) is True
