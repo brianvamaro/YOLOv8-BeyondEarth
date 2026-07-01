@@ -12,6 +12,7 @@ from YOLOv8BeyondEarth.maskrcnn.dataset import (
 )
 from YOLOv8BeyondEarth.maskrcnn.train import build_maskrcnn, fit
 from YOLOv8BeyondEarth.maskrcnn.coco_eval import evaluate_coco_ap
+from YOLOv8BeyondEarth.maskrcnn.infer import sliced_predict, predict_scene
 
 __all__ = [
     "BoulderYOLODataset",
@@ -20,4 +21,6 @@ __all__ = [
     "build_maskrcnn",
     "fit",
     "evaluate_coco_ap",
+    "sliced_predict",
+    "predict_scene",
 ]
