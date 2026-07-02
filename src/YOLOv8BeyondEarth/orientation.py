@@ -87,6 +87,28 @@ def boulder_orientations(gdf, res, sample=None, seed=0, n_workers=8):
     return df.dropna(subset=["angle180"]).reset_index(drop=True)
 
 
+def attach_orientations(gdf, res, n_workers=8):
+    """Like :func:`boulder_orientations` but **preserves every input column** — returns a copy of
+    ``gdf`` with ``[angle180, aspect_ra, diameter_m]`` added (same rows, order, and index), so
+    per-detection metadata (e.g. YOLO ``score``, or a true-/false-positive label from a spatial match)
+    stays alongside the orientation. Failed fits get NaN ``angle180``/``aspect_ra``; filter downstream
+    with :func:`well_resolved_subset` (which drops them via the aspect/diameter cuts) or ``dropna``.
+    Used by the Test 7 detection-selection readouts, where the TP/FP split must travel with the angle.
+    """
+    geoms = gdf.geometry.values
+    diameter_m = 2.0 * np.sqrt(gdf.geometry.area.values / np.pi)
+    if n_workers and n_workers > 1 and len(geoms) > 1:
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            out = list(ex.map(lambda g: ellipse_angle180(g, res), geoms))
+    else:
+        out = [ellipse_angle180(g, res) for g in geoms]
+    df = gdf.copy()
+    df["angle180"] = np.array([o[0] for o in out])
+    df["aspect_ra"] = np.array([o[1] for o in out])
+    df["diameter_m"] = diameter_m
+    return df
+
+
 def grid_fraction(angle180, tol_deg=10.0):
     """Fraction of long-axis azimuths within ``tol_deg`` of a grid direction (0/90/180).
 
@@ -102,6 +124,31 @@ def grid_fraction(angle180, tol_deg=10.0):
 def grid_fraction_uniform(tol_deg=10.0):
     """The grid_fraction a perfectly uniform distribution would give (the unbiased baseline)."""
     return 2.0 * tol_deg / 90.0
+
+
+def diagonal_fraction(angle180, tol_deg=10.0):
+    """Fraction of long-axis azimuths within ``tol_deg`` of a pixel **diagonal** (45/135).
+
+    The diagonal analogue of :func:`grid_fraction` (which measures the 0/90 cardinals). In a
+    north-up scene the pixel anti-diagonal is 135°, so this is the direct measure of the HiRISE
+    YOLO lock. Uniform (unbiased) baseline is the same ``2*tol_deg/90`` (:func:`grid_fraction_uniform`).
+    Used by Test 3 (different-model) to show YOLO snaps to the diagonal while Mask R-CNN does not.
+    """
+    a = np.asarray(angle180, dtype=float) % 180.0
+    return float((np.minimum(axial_distance(a, 45.0), axial_distance(a, 135.0)) <= tol_deg).mean())
+
+
+def asymmetry_ratio(angle180, tol_deg=10.0):
+    """The 135/45 asymmetry: ``count(within tol of 135) / count(within tol of 45)``.
+
+    A process symmetric under 90° rotation / reflection gives ~1 (it cannot tell the NE–SW 45°
+    diagonal from the NW–SE 135° one); ``>1`` means the 135° diagonal genuinely dominates. Returns
+    ``nan`` if no azimuth falls near 45°.
+    """
+    a = np.asarray(angle180, dtype=float) % 180.0
+    n45 = int((axial_distance(a, 45.0) <= tol_deg).sum())
+    n135 = int((axial_distance(a, 135.0) <= tol_deg).sum())
+    return float(n135) / n45 if n45 else float("nan")
 
 
 # --- Rose-diagram statistics: well-resolved subset, smoothed density, peak + bootstrap CI -----
