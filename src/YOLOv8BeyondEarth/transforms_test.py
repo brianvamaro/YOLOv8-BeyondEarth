@@ -386,22 +386,115 @@ def mask_for_patch(model, patch, imgsz=1024, conf=0.10, device=0, max_center_dis
                 cy=float(poly[:, 1].mean()), angle180=float(ang), aspect=float(asp))
 
 
-def plot_mask_overlay(ax, res, title=None, axis_color="tab:red"):
+def plot_mask_overlay(ax, res, title=None, axis_color="tab:red", ref_angle=None, zoom_half=None):
     """Show a patch with its YOLO mask outline + fitted long-axis drawn on top (``res`` from
     :func:`mask_for_patch`). The long-axis line is drawn at ``angle180`` (azimuth from North=-row),
-    so you can read off whether it follows the rock or the image diagonal."""
+    so you can read off whether it follows the rock or the image diagonal. If ``ref_angle`` is given,
+    a dashed yellow line is drawn at that azimuth — used by :func:`plot_rotation_strip` to show where
+    the axis *would* point if it tracked the rock (so a snap is read as the red line peeling off the
+    dashed one). ``zoom_half`` (px) crops the view to a ``2*zoom_half`` window centred on the **patch
+    centre** (preserved under rotation, so every frame stays at the same scale and the rock stays put);
+    None shows the whole patch."""
     ax.imshow(res["patch"], cmap="gray", vmin=0, vmax=255)
     p = res["poly"]
     ax.plot(np.r_[p[:, 0], p[0, 0]], np.r_[p[:, 1], p[0, 1]], color="cyan", lw=1.2)
+    L = 0.45 * res["patch"].shape[0]
+    if ref_angle is not None:                         # "expected if it tracked the rock" reference
+        rphi = np.deg2rad(ref_angle)
+        ax.plot([res["cx"] - L * np.sin(rphi), res["cx"] + L * np.sin(rphi)],
+                [res["cy"] + L * np.cos(rphi), res["cy"] - L * np.cos(rphi)],
+                color="yellow", lw=1.4, ls="--", zorder=2)
     phi = np.deg2rad(res["angle180"])
     dcol, drow = np.sin(phi), -np.cos(phi)            # azimuth from North (up=-row), clockwise
-    L = 0.45 * res["patch"].shape[0]
     ax.plot([res["cx"] - L * dcol, res["cx"] + L * dcol],
-            [res["cy"] - L * drow, res["cy"] + L * drow], color=axis_color, lw=2)
-    ax.set_xlim(0, res["patch"].shape[1]); ax.set_ylim(res["patch"].shape[0], 0); ax.axis("off")
+            [res["cy"] - L * drow, res["cy"] + L * drow], color=axis_color, lw=2, zorder=3)
+    h, w = res["patch"].shape[:2]
+    if zoom_half is not None:                          # crop to a centred window (rotation-invariant)
+        cx0, cy0 = w / 2.0, h / 2.0
+        ax.set_xlim(cx0 - zoom_half, cx0 + zoom_half); ax.set_ylim(cy0 + zoom_half, cy0 - zoom_half)
+    else:
+        ax.set_xlim(0, w); ax.set_ylim(h, 0)
+    ax.axis("off")
     if title:
         ax.set_title(title, fontsize=9)
     return ax
+
+
+def boulder_rotation_strip(model, patch, alphas, max_center_dist=50, order=3):
+    """One boulder across rotations — readout A made concrete for a *single* rock. Detect the centred
+    boulder in ``patch`` (the α=0 reference), then in the patch rotated by each ``alpha``; back-map
+    each rotated angle (``+alpha``) and record the residual against the reference.
+
+    Returns a list of dicts (one per frame, α=0 first): ``{alpha, res, ang_back, residual, ref_rot}``
+    where ``res`` is the :func:`mask_for_patch` dict in *that* frame (or None if nothing centred),
+    ``ang_back = (measured + alpha) % 180`` the geographic angle, ``residual = |ref - ang_back|``, and
+    ``ref_rot = (ref - alpha) % 180`` where the long-axis should point in the rotated frame if it
+    tracked the rock (the dashed reference). A tracker keeps ``residual ≈ 0`` across α; a snapper's
+    residual grows because the mask re-draws on the image diagonal regardless of the rock."""
+    base = mask_for_patch(model, patch, max_center_dist=max_center_dist)
+    ref = None if base is None else base["angle180"]
+    out = [dict(alpha=0.0, res=base, ang_back=ref, residual=(np.nan if ref is None else 0.0),
+                ref_rot=ref)]
+    for a in alphas:
+        r = mask_for_patch(model, rotate_image(patch, a, order=order),
+                           max_center_dist=max_center_dist)
+        ref_rot = None if ref is None else (ref - a) % 180.0
+        if r is None:
+            out.append(dict(alpha=float(a), res=None, ang_back=None, residual=np.nan, ref_rot=ref_rot))
+            continue
+        back = (r["angle180"] + a) % 180.0
+        resid = np.nan if ref is None else float(_circular_diff(ref, back))
+        out.append(dict(alpha=float(a), res=r, ang_back=back, residual=resid, ref_rot=ref_rot))
+    return out
+
+
+def plot_rotation_strip(axes, strip, color="tab:red", zoom_half=None, drift_px=12.0,
+                        area_lo=0.6, area_hi=1.8):
+    """Plot a :func:`boulder_rotation_strip` as a row of mask overlays (one panel per rotation frame).
+    Each panel shows the rock in its rotated frame with the YOLO mask (cyan), the fitted long-axis
+    (``color``), and the dashed reference (where the axis would point if it tracked). Titles give α,
+    the back-mapped geographic angle, the residual, and the **mask area + centroid drift** so you can
+    see whether the detection is still the *same* boulder. A panel is **flagged** (red frame +
+    "mask unstable") when the centroid drifts > ``drift_px`` from the patch centre or the mask area
+    departs the α=0 reference by more than [``area_lo``, ``area_hi``]× — i.e. the segmentation no
+    longer tracks one boulder under rotation, itself a non-equivariance/``H_seg`` signature (distinct
+    from a stable mask whose axis merely snaps to the grid). ``zoom_half`` (px) crops every panel to
+    the same centred window (passed to :func:`plot_mask_overlay`)."""
+    import matplotlib.patches as mpatches
+
+    ref = strip[0]["res"] if strip else None
+    area0 = None if ref is None else float(np.asarray(ref["mask"]).sum())
+    for ax, fr in zip(np.atleast_1d(axes), strip):
+        r = fr["res"]
+        if r is None:
+            ax.axis("off"); ax.set_title(f"α={fr['alpha']:.0f}°\n(no detection)", fontsize=9)
+            continue
+        h, w = r["patch"].shape[:2]
+        area = float(np.asarray(r["mask"]).sum())
+        drift = float(np.hypot(r["cx"] - w / 2.0, r["cy"] - h / 2.0))
+        ratio = (area / area0) if area0 else np.nan
+        if fr["alpha"] == 0:
+            t = f"α=0   axis={r['angle180']:.0f}°  (reference)\narea={area:.0f}px"
+            plot_mask_overlay(ax, r, title=t, axis_color=color, zoom_half=zoom_half)
+            continue
+        unstable = (drift > drift_px) or (area0 is not None and (ratio < area_lo or ratio > area_hi))
+        t = (f"α={fr['alpha']:.0f}°   meas={r['angle180']:.0f}° → {fr['ang_back']:.0f}°   "
+             f"resid {fr['residual']:.0f}°\narea={area:.0f}px ({ratio:.1f}×)  drift={drift:.0f}px"
+             + ("   ⚠ mask unstable" if unstable else ""))
+        plot_mask_overlay(ax, r, title=t, axis_color=color, ref_angle=fr["ref_rot"],
+                          zoom_half=zoom_half)
+        if unstable:
+            ax.add_patch(mpatches.Rectangle((0, 0), 1, 1, transform=ax.transAxes, fill=False,
+                                            edgecolor="red", lw=3, zorder=10, clip_on=False))
+
+
+def crop_around(img, cx, cy, half=14):
+    """Square crop of ~``half``-radius pixels around ``(cx, cy)`` (clamped to the image), for zoomed
+    single-boulder insets of the synthetic fields. Returns a 2D array (a view into ``img``)."""
+    cx, cy = int(round(cx)), int(round(cy))
+    r0, r1 = max(cy - half, 0), min(cy + half, img.shape[0])
+    c0, c1 = max(cx - half, 0), min(cx + half, img.shape[1])
+    return img[r0:r1, c0:c1]
 
 
 # --- corroborating probes C (resolution), D (kernel), E (grid-corrected estimator) -----------
