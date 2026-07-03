@@ -243,6 +243,156 @@ def detect_mask_pairs(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
     return native, down
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _capture_process_mask(store):
+    """Temporarily wrap ``ultralytics.utils.ops.process_mask`` so each call ALSO appends the
+    per-detection **pre-threshold probability field** to ``store`` (Test 3e — the soft mask that
+    ultralytics discards: v8.4.75 thresholds the interpolated logits at 0 inside ``process_mask``,
+    so nothing softer than a byte mask ever reaches ``Results``).
+
+    The patched body replicates the original op-for-op (coeff @ protos -> box crop -> bilinear
+    upsample -> ``gt_(0)``), so the returned binary masks are unchanged; the stored array is
+    ``sigmoid(logits)`` gated by the interpolated box indicator (``>= 0.5``) — the gate matters
+    because ``crop_mask`` zeroes *logits* outside the box, and a zero logit is probability 0.5,
+    which would smear a phantom half-weight halo over the whole box. Within ~1 proto px of the box
+    edge the bilinear blend with the zeroed outside still pulls probabilities toward 0.5; the box
+    is the same for the hard and soft sides, so this edge zone is shared, not a confound.
+    """
+    import torch
+    import torch.nn.functional as F
+    import ultralytics.utils.ops as uops
+
+    orig = uops.process_mask
+
+    def patched(protos, masks_in, bboxes, shape, upsample=False):
+        c, mh, mw = protos.shape
+        logits = (masks_in @ protos.float().view(c, -1)).view(-1, mh, mw)
+        wr, hr = mw / shape[1], mh / shape[0]
+        ratios = torch.tensor([[wr, hr, wr, hr]], device=bboxes.device)
+        logits = uops.crop_mask(logits, bboxes * ratios)
+        ind = uops.crop_mask(torch.ones_like(logits), bboxes * ratios)
+        if upsample:
+            logits = F.interpolate(logits[None], shape, mode="bilinear")[0]
+            ind = F.interpolate(ind[None], shape, mode="bilinear")[0]
+        store.append((logits.sigmoid() * (ind >= 0.5)).cpu().numpy())
+        return logits.gt_(0.0).byte()
+
+    uops.process_mask = patched
+    try:
+        yield
+    finally:
+        uops.process_mask = orig
+
+
+def detect_soft_mask_triples(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
+                             soft_floor=0.02):
+    """Tile ``img`` like :func:`detect_binary_masks` and return, per detection, the aligned triple
+    ``(production, native, soft)`` from a **single forward pass** — Test 3e, isolating the 0.5
+    binarisation from the estimator:
+
+    production = the pipeline's binary mask (resize float to slice, re-threshold, largest blob,
+                 fill) — byte-identical handling to :func:`detect_binary_masks`; slice res.
+    native     = the binary mask at inference res (``imgsz``), before the production downscale
+                 (as :func:`detect_mask_pairs`); blob/fill applied. This is exactly
+                 ``soft >= 0.5`` up to the box-edge blend, at the same resolution as ``soft``.
+    soft       = the pre-threshold probability field captured by :func:`_capture_process_mask`
+                 (float, ``imgsz`` res, zero outside the detection box). NO blob selection or
+                 hole-fill — all in-box probability mass counts, which is what a soft readout
+                 would see in production.
+
+    All three are bbox-cropped independently (orientation is translation-invariant); ``soft`` is
+    cropped to its ``>= soft_floor`` support united with the native blob. A detection is kept only
+    if all three sides are non-empty, so the lists align pairwise.
+    """
+    import cv2
+    from scipy.ndimage import label, binary_fill_holes
+
+    def _clean_crop(mb):
+        lab, n = label(mb)
+        if n == 0:
+            return None
+        if n > 1:
+            big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+            mb = (lab == big).astype(np.uint8)
+        mb = binary_fill_holes(mb).astype(np.uint8)
+        ys, xs = np.nonzero(mb)
+        return mb[ys.min():ys.max() + 1, xs.min():xs.max() + 1].copy()
+
+    H, W = img.shape
+    prod_l, nat_l, soft_l = [], [], []
+    store = []
+    with _capture_process_mask(store):
+        for y0 in range(0, H - slice_size + 1, slice_size):
+            for x0 in range(0, W - slice_size + 1, slice_size):
+                store.clear()
+                sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
+                res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
+                            device=device)
+                r0 = res[0]
+                if r0.masks is None or len(r0.masks.data) == 0:
+                    continue
+                md = r0.masks.data.cpu().numpy()
+                if not store or store[-1].shape[0] != md.shape[0]:
+                    raise RuntimeError("process_mask capture out of sync with Results "
+                                       f"({[s.shape[0] for s in store]} vs {md.shape[0]} masks)")
+                for m, s in zip(md, store[-1]):
+                    nat = _clean_crop((m >= 0.5).astype(np.uint8))
+                    mm = (m >= 0.5).astype(np.float32)
+                    if mm.shape[0] != slice_size:
+                        mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+                    prod = _clean_crop((mm >= 0.5).astype(np.uint8))
+                    sup = (s >= soft_floor) | (m >= 0.5)
+                    if nat is None or prod is None or not sup.any():
+                        continue
+                    ys, xs = np.nonzero(sup)
+                    prod_l.append(prod)
+                    nat_l.append(nat)
+                    soft_l.append(s[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+                                  .astype(np.float32).copy())
+    return prod_l, nat_l, soft_l
+
+
+def angles_from_moments(masks):
+    """Orientation from **weighted second moments** — no contour, no ellipse fit, and no threshold
+    requirement, so it reads binary and soft (float-probability) masks with the SAME estimator.
+    Returns ``[angle180, aspect, diameter_px]`` in the frame of :func:`angles_from_masks`
+    (geographic azimuth from North in the image's own frame, [0, 180)); rows align with ``masks``
+    (degenerate inputs are NaN, not dropped) for pairwise comparison across mask flavours.
+
+    The long axis is the principal eigenvector of the weight-covariance of pixel centres,
+    ``aspect = sqrt(l1/l2)``, and ``diameter_px = 2*sqrt(sum(w)/pi)`` (for binary weights the
+    usual area-equivalent diameter; for soft weights the probability mass plays the role of area).
+    """
+    rows = []
+    for w in masks:
+        w = np.asarray(w, dtype=float)
+        tot = w.sum()
+        if tot <= 0:
+            rows.append((np.nan, np.nan, np.nan))
+            continue
+        ys, xs = np.mgrid[0:w.shape[0], 0:w.shape[1]]
+        yg = -ys.astype(float)                      # geographic y = -row (North up)
+        mx = (w * xs).sum() / tot
+        my = (w * yg).sum() / tot
+        cxx = (w * (xs - mx) ** 2).sum() / tot
+        cyy = (w * (yg - my) ** 2).sum() / tot
+        cxy = (w * (xs - mx) * (yg - my)).sum() / tot
+        half = np.hypot((cxx - cyy) / 2, cxy)
+        l1 = (cxx + cyy) / 2 + half
+        l2 = (cxx + cyy) / 2 - half
+        if l1 <= 0:
+            rows.append((np.nan, np.nan, np.nan))
+            continue
+        phi = 0.5 * np.arctan2(2 * cxy, cxx - cyy)  # major axis from +x, CCW, geographic frame
+        rows.append((float((90.0 - np.degrees(phi)) % 180.0),
+                     float(np.sqrt(l1 / max(l2, 1e-12))),
+                     float(2 * np.sqrt(tot / np.pi))))
+    return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+
+
 def angles_from_masks(masks, method="skimage"):
     """Trace each binary mask with the chosen tracer and return ``[angle180, aspect, diameter_px]``.
 
