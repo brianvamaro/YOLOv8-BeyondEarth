@@ -355,6 +355,93 @@ def detect_soft_mask_triples(model, img, slice_size=256, imgsz=1024, conf=0.10, 
     return prod_l, nat_l, soft_l
 
 
+def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
+                          max_box_blowup=1.5):
+    """Tile ``img`` like :func:`detect_binary_masks`, detect with YOLO, then **re-mask each
+    detection with SAM2 box prompts** — Test 3c, the option-G (detector-preserving re-masking)
+    prototype. Three aligned mask sets per kept detection, all from YOLO's OWN boxes:
+
+    yolo    = YOLO's production binary mask (float >=0.5 -> resize to slice -> largest blob ->
+              fill; byte-identical handling to :func:`detect_binary_masks`); slice res.
+    sam256  = SAM2 prompted with the box on the **native tile** (masks at slice res — SAM2's
+              decoder replacing YOLO's prototype head, same effective px budget).
+    sam1024 = SAM2 prompted on the tile **bilinearly upscaled to** ``imgsz`` (boxes scaled with
+              it) — the "more mask px per boulder" configuration that §3f's dose-response
+              motivates; masks at ``imgsz`` res (orientation is scale-free).
+
+    SAM2 masks get the same largest-blob + fill handling, plus a background-grab guard: a re-mask
+    larger than ``max_box_blowup`` x its prompt-box area is treated as failed. A detection is kept
+    only if all three sides yield a usable mask, so the lists align pairwise. Returns
+    ``(df, masks)`` with ``df = [cx, cy, score, area_yolo, area_sam256, area_sam1024]`` (centres
+    in GLOBAL image px, for truth-matching on known-orientation fields; areas in each side's own
+    px) and ``masks = {"yolo": [...], "sam256": [...], "sam1024": [...]}``. Per-side failure
+    counts (before completeness pairing) are in ``df.attrs["failed"]``.
+    """
+    import cv2
+    from scipy.ndimage import label, binary_fill_holes
+
+    def _clean(mb):
+        lab, n = label(mb)
+        if n == 0:
+            return None
+        if n > 1:
+            big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+            mb = (lab == big).astype(np.uint8)
+        return binary_fill_holes(mb).astype(np.uint8)
+
+    def _crop(mb):
+        ys, xs = np.nonzero(mb)
+        return mb[ys.min():ys.max() + 1, xs.min():xs.max() + 1].copy()
+
+    up = imgsz // slice_size
+    H, W = img.shape
+    rows, masks = [], {"yolo": [], "sam256": [], "sam1024": []}
+    failed = {"yolo": 0, "sam256": 0, "sam1024": 0}
+    for y0 in range(0, H - slice_size + 1, slice_size):
+        for x0 in range(0, W - slice_size + 1, slice_size):
+            sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
+            rgb = np.stack([sl] * 3, axis=-1)
+            r0 = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device)[0]
+            if r0.masks is None or len(r0.masks.data) == 0:
+                continue
+            boxes = r0.boxes.xyxy.cpu().numpy()
+            scores = r0.boxes.conf.cpu().numpy()
+            md = r0.masks.data.cpu().numpy()
+            rgb_up = cv2.resize(rgb, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
+            s256 = sam(rgb, bboxes=boxes, verbose=False, device=device)[0]
+            s1024 = sam(rgb_up, bboxes=boxes * up, verbose=False, device=device)[0]
+            s256 = s256.masks.data.cpu().numpy()
+            s1024 = s1024.masks.data.cpu().numpy()
+            for k in range(len(boxes)):
+                mm = (md[k] >= 0.5).astype(np.float32)
+                if mm.shape[0] != slice_size:
+                    mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+                box_area = ((boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1]))
+                sides = {}
+                for name, m, scale in (("yolo", (mm >= 0.5).astype(np.uint8), 1.0),
+                                       ("sam256", s256[k].astype(np.uint8), 1.0),
+                                       ("sam1024", s1024[k].astype(np.uint8), float(up))):
+                    mb = _clean(m)
+                    if mb is None or (name != "yolo"
+                                      and mb.sum() > max_box_blowup * box_area * scale ** 2):
+                        failed[name] += 1
+                        sides = None
+                        break
+                    sides[name] = mb
+                if sides is None:
+                    continue
+                for name in masks:
+                    masks[name].append(_crop(sides[name]))
+                rows.append((x0 + (boxes[k, 0] + boxes[k, 2]) / 2,
+                             y0 + (boxes[k, 1] + boxes[k, 3]) / 2, float(scores[k]),
+                             int(sides["yolo"].sum()), int(sides["sam256"].sum()),
+                             int(sides["sam1024"].sum())))
+    df = pd.DataFrame(rows, columns=["cx", "cy", "score",
+                                     "area_yolo", "area_sam256", "area_sam1024"])
+    df.attrs["failed"] = failed
+    return df, masks
+
+
 def angles_from_moments(masks):
     """Orientation from **weighted second moments** — no contour, no ellipse fit, and no threshold
     requirement, so it reads binary and soft (float-probability) masks with the SAME estimator.
