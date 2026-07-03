@@ -191,6 +191,58 @@ def detect_binary_masks(model, img, slice_size=256, imgsz=1024, conf=0.10, devic
     return masks
 
 
+def detect_mask_pairs(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):
+    """Like :func:`detect_binary_masks` but returns **(native, downscaled)** mask pairs per
+    detection from a single forward pass — Test 3g, isolating the production *downscale +
+    re-threshold* stage.
+
+    native     = ultralytics' binary mask at inference resolution (``imgsz``), i.e. BEFORE the
+                 production resize-back-to-slice; blob/fill applied at native res.
+    downscaled = the production path (resize float mask to ``slice_size`` with INTER_AREA,
+                 re-threshold >= 0.5, blob/fill) — byte-identical handling to
+                 :func:`detect_binary_masks` / :func:`detect_orientations`.
+
+    Both sides are bbox-cropped. A detection is kept only if BOTH sides yield a non-empty mask,
+    so the two lists align pairwise. Orientation is scale-free, so the 4x pixel-scale difference
+    between the sides does not bias the angle comparison.
+    """
+    import cv2
+    from scipy.ndimage import label, binary_fill_holes
+
+    def _clean_crop(mb):
+        lab, n = label(mb)
+        if n == 0:
+            return None
+        if n > 1:
+            big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+            mb = (lab == big).astype(np.uint8)
+        mb = binary_fill_holes(mb).astype(np.uint8)
+        ys, xs = np.nonzero(mb)
+        return mb[ys.min():ys.max() + 1, xs.min():xs.max() + 1].copy()
+
+    H, W = img.shape
+    native, down = [], []
+    for y0 in range(0, H - slice_size + 1, slice_size):
+        for x0 in range(0, W - slice_size + 1, slice_size):
+            sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
+            res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
+                        device=device)
+            r0 = res[0]
+            if r0.masks is None or len(r0.masks.data) == 0:
+                continue
+            for m in r0.masks.data.cpu().numpy():
+                mm = (m >= 0.5).astype(np.float32)
+                nat = _clean_crop((mm >= 0.5).astype(np.uint8))
+                if mm.shape[0] != slice_size:
+                    mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+                dn = _clean_crop((mm >= 0.5).astype(np.uint8))
+                if nat is None or dn is None:
+                    continue
+                native.append(nat)
+                down.append(dn)
+    return native, down
+
+
 def angles_from_masks(masks, method="skimage"):
     """Trace each binary mask with the chosen tracer and return ``[angle180, aspect, diameter_px]``.
 
