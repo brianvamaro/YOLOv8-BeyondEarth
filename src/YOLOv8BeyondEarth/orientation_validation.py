@@ -152,6 +152,74 @@ def detect_orientations(model, img, slice_size=256, imgsz=1024, conf=0.10, devic
     return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
 
 
+def detect_binary_masks(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):
+    """Tile ``img`` like :func:`detect_orientations` but return every detection's processed
+    **binary mask** (bbox-cropped) instead of tracing it — so different mask→polygon tracers can
+    be compared on the *same* masks (Test 3d, the contour-tracer chirality swap).
+
+    Mask handling is identical to :func:`detect_orientations` (>=0.5 -> resize to slice ->
+    largest blob -> fill holes). Cropping to the blob's bounding box (both tracers crop
+    internally anyway) keeps a cached run small; orientation is translation-invariant.
+    """
+    import cv2
+    from scipy.ndimage import label, binary_fill_holes
+
+    H, W = img.shape
+    masks = []
+    for y0 in range(0, H - slice_size + 1, slice_size):
+        for x0 in range(0, W - slice_size + 1, slice_size):
+            sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
+            res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
+                        device=device)
+            r0 = res[0]
+            if r0.masks is None or len(r0.masks.data) == 0:
+                continue
+            for m in r0.masks.data.cpu().numpy():
+                mm = (m >= 0.5).astype(np.float32)
+                if mm.shape[0] != slice_size:
+                    mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+                mb = (mm >= 0.5).astype(np.uint8)
+                lab, n = label(mb)
+                if n == 0:
+                    continue
+                if n > 1:
+                    big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+                    mb = (lab == big).astype(np.uint8)
+                mb = binary_fill_holes(mb).astype(np.uint8)
+                ys, xs = np.nonzero(mb)
+                masks.append(mb[ys.min():ys.max() + 1, xs.min():xs.max() + 1].copy())
+    return masks
+
+
+def angles_from_masks(masks, method="skimage"):
+    """Trace each binary mask with the chosen tracer and return ``[angle180, aspect, diameter_px]``.
+
+    The CPU-only second half of :func:`detect_orientations`, factored out so the SAME masks can be
+    measured under both tracers — skimage marching-squares (`binary_mask_to_polygon`) vs cv2
+    border-following (`binary_mask_to_polygon_cv`). Rows align with ``masks`` (failed traces/fits
+    are NaN, not dropped) so the two tracers can be compared **pairwise per mask**.
+
+    NOTE: unlike :func:`detect_orientations` this does NOT drop polygons with < 5 vertices — cv2's
+    CHAIN_APPROX_SIMPLE legitimately returns 4-corner outlines for the tiny blocky blobs that are
+    exactly the Test 3d subject, and ``ellipse_angle180`` densifies (segmentize) before fitting, so
+    a 4-vertex square is a valid input, not a degenerate one.
+    """
+    import shapely
+    from .polygon import binary_mask_to_polygon, binary_mask_to_polygon_cv
+    from .orientation import ellipse_angle180
+
+    trace = binary_mask_to_polygon if method == "skimage" else binary_mask_to_polygon_cv
+    rows = []
+    for mb in masks:
+        poly = trace(mb)
+        if poly is None or len(poly) < 3:
+            rows.append((np.nan, np.nan, np.nan))
+            continue
+        ang, asp = ellipse_angle180(shapely.geometry.Polygon(np.c_[poly[:, 0], -poly[:, 1]]), 1.0)
+        rows.append((ang, asp, 2 * np.sqrt(int(mb.sum()) / np.pi)))
+    return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+
+
 def center_orientation(model, patch, imgsz=1024, conf=0.10, device=0, max_center_dist=40):
     """Run YOLO on a square ``patch`` and return ``(angle180, aspect)`` of the detection nearest
     the patch centre, or ``None``. The geographic azimuth is measured in the *patch's own* frame.
