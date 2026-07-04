@@ -20,6 +20,55 @@ import pandas as pd
 from .orientation import ellipse_angle180, structure_tensor_orientation, orientation_field
 
 
+def matched_area_ratio(model_gdf, ref_gdf, rom=None, min_radius_m=1.0):
+    """Per-boulder mask-area ratio of ``model_gdf`` predictions against a ``ref_gdf`` reference
+    (human ROM outlines, or a second model), matched by nearest centroid — the mask-quality /
+    over-vs-under-segmentation readout for the Goal-2 re-masking work (Test 3c treatment stage).
+
+    Both GeoDataFrames must already be on the SAME grid (use ``set_crs(..., allow_override=True)``,
+    never ``to_crs`` — the Prieur shp vs project gpkg carry cosmetically-different CRS strings on the
+    same equirectangular grid; reprojecting throws a bogus datum shift). If ``rom`` (a GeoDataFrame
+    or geometry) is given, both sets are first clipped to boulders whose centroid falls inside it.
+
+    Each reference polygon is matched to the nearest model centroid, accepted if within
+    ``max(ref_equiv_radius, min_radius_m)`` (map units). Returns
+    ``(df, stats)`` where ``df`` has one row per matched reference boulder
+    (``ref_area, model_area, ratio, ref_dia``) and ``stats`` is a dict with match/recall/
+    over-detection fractions. Ratio > 1 ⇒ model masks larger than reference (YOLO overshoot);
+    < 1 ⇒ tighter/under-segmenting. NOTE: Mars human outlines include shadow, inflating ``ref_area``
+    — so the *true* boulder-area ratio is larger than reported here (read as a lower bound).
+    """
+    from scipy.spatial import cKDTree
+    import shapely
+
+    m, r = model_gdf.copy(), ref_gdf.copy()
+    if rom is not None:
+        geom = rom.union_all() if hasattr(rom, "union_all") else (
+            rom.unary_union if hasattr(rom, "unary_union") else rom)
+        m = m[m.geometry.centroid.within(geom)].copy()
+        r = r[r.geometry.centroid.within(geom)].copy()
+    for g in (m, r):
+        g["_area"] = g.geometry.area
+        g["_dia"] = 2 * np.sqrt(g["_area"].to_numpy() / np.pi)
+    mc = np.c_[m.geometry.centroid.x.to_numpy(), m.geometry.centroid.y.to_numpy()]
+    rc = np.c_[r.geometry.centroid.x.to_numpy(), r.geometry.centroid.y.to_numpy()]
+    tree = cKDTree(mc)
+    dist, idx = tree.query(rc, k=1)
+    ref_rad = r["_dia"].to_numpy() / 2
+    ok = dist <= np.maximum(ref_rad, min_radius_m)
+    ref_a = r["_area"].to_numpy()[ok]
+    mod_a = m["_area"].to_numpy()[idx[ok]]
+    df = pd.DataFrame(dict(ref_area=ref_a, model_area=mod_a, ratio=mod_a / ref_a,
+                           ref_dia=r["_dia"].to_numpy()[ok]))
+    # over-detection: model polys with no reference within their own radius
+    rdist, _ = cKDTree(rc).query(mc, k=1)
+    over = rdist > np.maximum(m["_dia"].to_numpy() / 2, min_radius_m)
+    stats = dict(n_ref=len(r), n_model=len(m), n_matched=int(ok.sum()),
+                 recall=float(ok.mean()), median_ratio=float(np.median(df.ratio)),
+                 over_detection_frac=float(over.mean()))
+    return df, stats
+
+
 def per_boulder_structure_tensor(gpkg_path, raster_path, res, n_fids=4000, aspect_min=1.35,
                                  pad_frac=1.5, pad_min_m=4.0, smooth=1.0, seed=1,
                                  n_total=None):
