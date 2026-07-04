@@ -25,6 +25,13 @@ def matched_area_ratio(model_gdf, ref_gdf, rom=None, min_radius_m=1.0):
     (human ROM outlines, or a second model), matched by nearest centroid — the mask-quality /
     over-vs-under-segmentation readout for the Goal-2 re-masking work (Test 3c treatment stage).
 
+    Reads ``ratio`` as **model area vs human-annotation area**, NOT vs true boulder area: on shadowed
+    scenes (e.g. Mars) the human outline's relation to the true rock is uncertain — near-boulder dark
+    pixels mix the boulder's own shadowed side (genuine boulder, which a sunlit-keyed model mask may
+    even under-capture) with cast ground shadow (not boulder), so the sign of the human-vs-truth bias
+    is unknown. Use a near-shadow-free scene (e.g. Moon Censorinus, incidence ~9°) or explicit shadow
+    handling to anchor the truth; here just report the model-vs-annotation ratio.
+
     Both GeoDataFrames must already be on the SAME grid (use ``set_crs(..., allow_override=True)``,
     never ``to_crs`` — the Prieur shp vs project gpkg carry cosmetically-different CRS strings on the
     same equirectangular grid; reprojecting throws a bogus datum shift). If ``rom`` (a GeoDataFrame
@@ -34,9 +41,9 @@ def matched_area_ratio(model_gdf, ref_gdf, rom=None, min_radius_m=1.0):
     ``max(ref_equiv_radius, min_radius_m)`` (map units). Returns
     ``(df, stats)`` where ``df`` has one row per matched reference boulder
     (``ref_area, model_area, ratio, ref_dia``) and ``stats`` is a dict with match/recall/
-    over-detection fractions. Ratio > 1 ⇒ model masks larger than reference (YOLO overshoot);
-    < 1 ⇒ tighter/under-segmenting. NOTE: Mars human outlines include shadow, inflating ``ref_area``
-    — so the *true* boulder-area ratio is larger than reported here (read as a lower bound).
+    over-detection fractions. Ratio > 1 ⇒ model masks larger than the reference annotation;
+    < 1 ⇒ tighter. (Whether > 1 means overshoot vs the *true* boulder depends on the reference's
+    own accuracy — see the shadow caveat above.)
     """
     from scipy.spatial import cKDTree
     import shapely
