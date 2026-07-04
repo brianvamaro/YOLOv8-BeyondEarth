@@ -114,10 +114,12 @@ def binary_mask_to_polygon(binary_mask):
     padded_binary_mask = np.pad(sub, pad_width=1, mode='constant', constant_values=0)
     contours = skimage.measure.find_contours(padded_binary_mask, 0.5)
 
-    # yolo can produce a mask where pixels are not interconnected
-    # in this case the following line does not work
-    contours = np.subtract(contours, 1)
-    contour = np.flip(contours[0], axis=1)  # (x, y) = (col, row) in the cropped frame
+    if not contours:
+        return None
+    # Pick the largest contour (by vertex count); handles disconnected masks where
+    # find_contours returns multiple arrays of different lengths.
+    contour_arr = max(contours, key=len) - 1  # largest contour; undo padding offset
+    contour = np.flip(contour_arr, axis=1)  # (x, y) = (col, row) in the cropped frame
     contour[:, 0] += x0  # shift back to full-mask coordinates -> identical geometry
     contour[:, 1] += y0
     return contour
