@@ -592,6 +592,158 @@ def grid_corrected_angles(gpkg_path, res, smooth_px=2.0, n=20000, aspect_min=1.0
     return pd.DataFrame(rows, columns=["angle_raw", "angle_smooth", "aspect"])
 
 
+def detect_with_positions(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):
+    """Like :func:`detect_orientations` but also returns centroid image coordinates and confidence.
+
+    Tiles ``img`` into ``slice_size`` windows (matching the treatment config), runs YOLO on each,
+    fits EllipseModel on each mask, and assembles one row per detection. Returns a DataFrame
+    ``[cx_img, cy_img, angle180, aspect, diameter_px, score]`` where ``cx_img``/``cy_img`` are
+    pixel coordinates in the full image frame. Used by :func:`recall_confidence_sweep` (§7b) to
+    match detections back to truth centroids.
+    """
+    import cv2
+    import shapely
+    from scipy.ndimage import label, binary_fill_holes
+    from .polygon import binary_mask_to_polygon
+    from .orientation import ellipse_angle180
+
+    H, W = img.shape[:2]
+    rows = []
+    for r0 in range(0, H, slice_size):
+        for c0 in range(0, W, slice_size):
+            tile = img[r0:r0 + slice_size, c0:c0 + slice_size]
+            if tile.shape[0] < 32 or tile.shape[1] < 32:
+                continue
+            res = model(np.stack([tile] * 3, axis=-1), imgsz=imgsz, conf=conf,
+                        verbose=False, device=device)
+            r = res[0]
+            if r.masks is None or len(r.masks.data) == 0:
+                continue
+            th, tw = tile.shape[:2]
+            md = r.masks.data.cpu().numpy()
+            bx = r.boxes.xywh.cpu().numpy()
+            scores = r.boxes.conf.cpu().numpy()
+            for k in range(len(md)):
+                m = (md[k] >= 0.5).astype(np.float32)
+                if m.shape[0] != th:
+                    m = cv2.resize(m, (tw, th), interpolation=cv2.INTER_AREA)
+                mb = (m >= 0.5).astype(np.uint8)
+                lb, n = label(mb)
+                if n == 0:
+                    continue
+                if n > 1:
+                    mb = (lb == 1 + int(np.argmax(
+                        [(lb == j).sum() for j in range(1, n + 1)]))).astype(np.uint8)
+                mb = binary_fill_holes(mb).astype(np.uint8)
+                poly = binary_mask_to_polygon(mb)
+                if poly is None or len(poly) < 5:
+                    continue
+                ang, asp = ellipse_angle180(
+                    shapely.geometry.Polygon(np.c_[poly[:, 0], -poly[:, 1]]), 1.0)
+                diam = 2.0 * np.sqrt(mb.sum() / np.pi)
+                rows.append((float(c0 + bx[k, 0]), float(r0 + bx[k, 1]),
+                             float(ang), float(asp), float(diam), float(scores[k])))
+    return pd.DataFrame(rows, columns=["cx_img", "cy_img", "angle180", "aspect",
+                                        "diameter_px", "score"])
+
+
+def recall_confidence_sweep(model, phi0_list, n_per_angle=300, size=1024,
+                             diam_px=(5, 9), aspect=(1.0, 1.12), cap=16, noise=12.0,
+                             shadow_frac=0.0, match_dist_mult=2.0, conf=0.10,
+                             device=0, seed=0):
+    """§7b probe: detection recall and mean confidence vs truth orientation angle.
+
+    Renders a field of synthetic boulders **all at a single known angle phi0** (in the marginal
+    or clean regime controlled by ``diam_px``/``aspect``/``cap``) and measures how many are
+    detected (recall) and at what confidence, then sweeps ``phi0`` across ``phi0_list``.
+
+    A flat recall curve = no detection-selection bias (H_seg-mask only); a dip at off-grid angles
+    = preferential detection of grid-aligned features (H_seg-recall). Run once with near-circular
+    / marginal params (the test) and once with elongated / clean params (the null, should be flat).
+
+    Matching: a detection is assigned to a truth centroid if it is the nearest detection within
+    ``match_dist_mult * max(diam_px)`` pixels (one match per truth, greedy nearest-first).
+
+    Returns DataFrame ``[phi0, n_truth, n_det, n_matched, recall, mean_conf_matched,
+    mean_conf_all]``.
+    """
+    match_dist = match_dist_mult * float(max(diam_px))
+    rows = []
+    for i, phi0 in enumerate(phi0_list):
+        angles = np.full(n_per_angle, float(phi0))
+        img, truth = render_boulder_field(size=size, n=n_per_angle, angles=angles,
+                                          diam_px=diam_px, aspect=aspect, cap=cap,
+                                          noise=noise, shadow_frac=shadow_frac,
+                                          seed=seed + i * 17)
+        det = detect_with_positions(model, img, conf=conf, device=device)
+        n_truth = len(truth)
+        if n_truth == 0 or len(det) == 0:
+            rows.append((float(phi0), n_truth, len(det), 0, 0.0, np.nan, np.nan))
+            continue
+        det_xy = det[["cx_img", "cy_img"]].values
+        det_sc = det["score"].values
+        used = np.zeros(len(det), dtype=bool)
+        matched, conf_matched = 0, []
+        for _, tb in truth.iterrows():
+            dists = np.hypot(det_xy[:, 0] - tb.cx, det_xy[:, 1] - tb.cy)
+            dists[used] = np.inf
+            j = int(np.argmin(dists))
+            if dists[j] <= match_dist:
+                matched += 1
+                conf_matched.append(float(det_sc[j]))
+                used[j] = True
+        recall = matched / n_truth
+        rows.append((float(phi0), n_truth, len(det), matched, recall,
+                     float(np.mean(conf_matched)) if conf_matched else np.nan,
+                     float(det.score.mean())))
+    return pd.DataFrame(rows, columns=["phi0", "n_truth", "n_det", "n_matched",
+                                        "recall", "mean_conf_matched", "mean_conf_all"])
+
+
+def iou_matched_rotation_residual(model, patches, alphas, iou_thresh=0.3,
+                                   max_center_dist=50, order=3, device=0):
+    """§7e: per-boulder rotation residual with IoU-based same-mask verification.
+
+    Extension of :func:`per_boulder_rotation_residual` that checks whether the α-frame detection
+    actually covers the *same* boulder as the α=0 detection (rather than a neighbour or fragment).
+    For each rotation, the α=0 mask is rotated into the α-frame and its IoU with the detected mask
+    is computed; only rows with ``iou >= iou_thresh`` are flagged ``is_same_mask=True``.
+
+    This separates two confounds in the plain residual:
+    - **dropout / identity drift** (IoU < thresh): the mask collapsed, merged with a neighbour, or
+      the detector fired elsewhere — the residual reflects a *different* detection, not axis-snap.
+    - **pure measurement** (IoU >= thresh): the same boulder was found; any residual is genuine
+      axis-snap (the mechanistically interesting part for Goal 2).
+
+    Returns DataFrame ``[idx, alpha, ang0, ang_back, residual, grid_dist0, iou, is_same_mask]``.
+    The dropout rate per ``alpha`` is ``(~is_same_mask).mean()`` on each alpha slice.
+    """
+    rows = []
+    for i, patch in enumerate(patches):
+        base = mask_for_patch(model, patch, max_center_dist=max_center_dist, device=device)
+        if base is None:
+            continue
+        a0 = float(base["angle180"])
+        mask0 = base["mask"].astype(np.float32)
+        gd0 = float(min(abs(a0 - g) for g in [0.0, 45.0, 90.0, 135.0, 180.0]))
+        for a in alphas:
+            rot_patch = rotate_image(patch, float(a), order=order)
+            r = mask_for_patch(model, rot_patch, max_center_dist=max_center_dist, device=device)
+            if r is None:
+                rows.append((i, float(a), a0, np.nan, np.nan, gd0, 0.0, False))
+                continue
+            mask0_rot = (rotate_image(mask0, float(a), order=1) >= 0.5).astype(np.uint8)
+            mask_r = r["mask"].astype(np.uint8)
+            inter = int((mask0_rot & mask_r).sum())
+            union = int((mask0_rot | mask_r).sum())
+            iou = float(inter / max(union, 1))
+            back = (r["angle180"] + a) % 180.0
+            resid = float(_circular_diff(a0, back))
+            rows.append((i, float(a), a0, float(back), resid, gd0, iou, iou >= iou_thresh))
+    return pd.DataFrame(rows, columns=["idx", "alpha", "ang0", "ang_back", "residual",
+                                        "grid_dist0", "iou", "is_same_mask"])
+
+
 def smooth_boundary(geom, res, smooth_px):
     """Boundary-smoothing primitive for readout E (and its §9 viz, so both use identical code).
     Densify ``geom`` to ``res`` spacing, circularly Gaussian-smooth the exterior (sigma ``smooth_px``
