@@ -16,6 +16,35 @@ from scipy.ndimage import gaussian_filter
 from concurrent.futures import ThreadPoolExecutor
 
 
+def _fit_ellipse(geom, res):
+    """Shared EllipseModel fit for a boulder polygon. Returns ``(xc, yc, a, b, theta)`` in the
+    polygon's own coordinates (centre restored), or ``None`` if the fit fails.
+
+    The polygon is first densified to ``res`` spacing (``shapely.segmentize``) so the fit is not
+    dominated by uneven vertex spacing — important to compare extractors with different vertex
+    densities (e.g. skimage vs cv2). ``theta`` is the skimage math-angle (radians) of the ``a``
+    semi-axis; ``a``/``b`` are the semi-axes (not necessarily major/minor-ordered).
+    """
+    if geom is None or geom.is_empty:
+        return None
+    g = shapely.segmentize(geom, res)
+    if g is None or g.is_empty:
+        return None
+    if g.geom_type == "MultiPolygon":
+        g = max(g.geoms, key=lambda p: p.area)         # largest part
+    if g.geom_type != "Polygon" or g.exterior is None:
+        return None
+    xy = np.asarray(g.exterior.coords)
+    centre = xy.mean(axis=0)
+    model = EllipseModel()
+    if not model.estimate(xy - centre):
+        return None
+    _, _, a, b, theta = model.params
+    if not (a > 0 and b > 0):
+        return None
+    return float(centre[0]), float(centre[1]), float(a), float(b), float(theta)
+
+
 def ellipse_angle180(geom, res):
     """Fit an EllipseModel to a boulder polygon and return ``(angle180, aspect_ratio)``.
 
@@ -26,28 +55,45 @@ def ellipse_angle180(geom, res):
     angle180 : long-axis azimuth from North, in [0, 180) degrees.
     aspect_ratio : major/minor semi-axis ratio (>= 1).
     """
-    if geom is None or geom.is_empty:
+    fit = _fit_ellipse(geom, res)
+    if fit is None:
         return np.nan, np.nan
-    g = shapely.segmentize(geom, res)
-    if g is None or g.is_empty:
-        return np.nan, np.nan
-    if g.geom_type == "MultiPolygon":
-        g = max(g.geoms, key=lambda p: p.area)         # largest part
-    if g.geom_type != "Polygon" or g.exterior is None:
-        return np.nan, np.nan
-    xy = np.asarray(g.exterior.coords)
-    xy = xy - xy.mean(axis=0)
-    model = EllipseModel()
-    if not model.estimate(xy):
-        return np.nan, np.nan
-    _, _, a, b, theta = model.params
-    if not (a > 0 and b > 0):
-        return np.nan, np.nan
+    _, _, a, b, theta = fit
     # major-axis direction, then convert math-angle theta -> azimuth-from-North in [0,180)
     theta_major = theta if a >= b else theta + np.pi / 2.0
     angle180 = np.degrees(np.arctan2(np.cos(theta_major), np.sin(theta_major))) % 180.0
     aspect = max(a, b) / min(a, b)
     return angle180, aspect
+
+
+def ellipse_obb(geom, res):
+    """Oriented bounding box from the unbiased EllipseModel fit of a boulder polygon.
+
+    Returns ``(corners, angle180, aspect_ratio)`` where ``corners`` is a ``(4, 2)`` array of the
+    rotated-rectangle vertices in the polygon's own coordinates, ordered consistently
+    (+major+minor, +major-minor, -major-minor, -major+minor). The box half-extents are the fitted
+    semi-axes ``a`` (major) and ``b`` (minor) — i.e. the ellipse's ``2a x 2b`` bounding rectangle,
+    aligned to the fitted long axis. This is the label geometry Solution H trains the OBB head on:
+    it inherits the EllipseModel's grid-neutrality, unlike a minimum-rotated-rectangle of the
+    pixelated polygon (which snaps to 0/90 — never use MRR for orientation labels). Returns
+    ``(None, nan, nan)`` if the fit fails.
+    """
+    fit = _fit_ellipse(geom, res)
+    if fit is None:
+        return None, np.nan, np.nan
+    xc, yc, a, b, theta = fit
+    # order semi-axes so (amaj, theta_major) is the long axis
+    if a >= b:
+        amaj, amin, theta_major = a, b, theta
+    else:
+        amaj, amin, theta_major = b, a, theta + np.pi / 2.0
+    u = amaj * np.array([np.cos(theta_major), np.sin(theta_major)])   # along major
+    v = amin * np.array([-np.sin(theta_major), np.cos(theta_major)])  # along minor
+    centre = np.array([xc, yc])
+    corners = np.array([centre + u + v, centre + u - v, centre - u - v, centre - u + v])
+    angle180 = np.degrees(np.arctan2(np.cos(theta_major), np.sin(theta_major))) % 180.0
+    aspect = amaj / amin
+    return corners, angle180, aspect
 
 
 def boulder_orientations(gdf, res, sample=None, seed=0, n_workers=8):
