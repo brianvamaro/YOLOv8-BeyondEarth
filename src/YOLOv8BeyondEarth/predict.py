@@ -76,9 +76,9 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         if downscale_pred and bool_mask.shape[0] != slice_size:
             bool_mask = cv2.resize(bool_mask, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
 
-        # number of pixels
+        # number of pixels; min_area_threshold=None (the documented default) means no area gate
         area = np.count_nonzero(bool_mask == 1)
-        if area <= min_area_threshold:
+        if area <= (min_area_threshold if min_area_threshold is not None else 0):
             return None
 
         try:
