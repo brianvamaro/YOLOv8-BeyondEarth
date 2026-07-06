@@ -1,13 +1,21 @@
+"""Standalone training script (not an importable library module).
+
+Run directly: ``python -m YOLOv8BeyondEarth.training`` (or execute the file). The paths below are
+machine-specific (``D:/BOULDERING/...``); edit them for the current host. Guarded by
+``__name__ == "__main__"`` so importing the package never chdirs or launches a training run.
+"""
 from ultralytics import YOLO
 import os
 
-os.chdir("D:/BOULDERING/data/yolov8/training/")
 
-#Instance
-model = YOLO('yolov8n-seg.yaml')  # build a new model from YAML
-model = YOLO('yolov8n-seg.pt')  # Transfer the weights from a pretrained model (recommended for training, here from ImageNet)
+def main():
+    os.chdir("D:/BOULDERING/data/yolov8/training/")
 
-results = model.train(data="D:/BOULDERING/data/yolov8/datasets/boulder2024/boulder2024.yaml",
+    #Instance
+    model = YOLO('yolov8n-seg.yaml')  # build a new model from YAML
+    model = YOLO('yolov8n-seg.pt')  # Transfer the weights from a pretrained model (recommended for training, here from ImageNet)
+
+    results = model.train(data="D:/BOULDERING/data/yolov8/datasets/boulder2024/boulder2024.yaml",
                       project="YOLOv8-training",
                       name="YOLOv8-200-epochs-19-02-2024-1024x1024",
                       save_dir="D:/BOULDERING/data/yolov8/training/",
@@ -43,3 +51,8 @@ results = model.train(data="D:/BOULDERING/data/yolov8/datasets/boulder2024/bould
                       mixup=0.0, # image mixup (probability)
                       copy_paste=0.0, # segment copy-paste (probability)
                       erasing=0.4) # let's upscale from 500 to 1024
+    return results
+
+
+if __name__ == "__main__":
+    main()

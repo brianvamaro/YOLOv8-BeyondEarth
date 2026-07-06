@@ -8,9 +8,9 @@ import torch
 from concurrent.futures import ThreadPoolExecutor
 
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
-                                       is_within_slice, shift_polygon,
+                                       shift_polygon,
                                        add_geometries, bboxes_to_shp, outlines_to_shp)
-from lsnms import nms, wbc
+from lsnms import nms
 
 from sahi.slicing import slice_image
 from tqdm import tqdm
@@ -204,8 +204,19 @@ def get_sliced_prediction(in_raster,
             minimum confidence threshold, values below will be automatically filtered away.
         has_mask: bool
         interim_dir: str or Path()
-        slice_sze: int
-            Height and width of each slice.  Defaults to ``None``.
+        slice_size: int
+            Height and width of each slice. Defaults to ``256``.
+        inference_size: int
+            Model input size (``imgsz``) each slice is inferred at. Defaults to ``1024``.
+        min_area_threshold: int or None
+            Drop detections whose mask area (pixels) is ``<=`` this. ``None`` (default) = no gate.
+        downscale_pred: bool
+            If ``True``, keep the mask at the model's native prototype resolution instead of
+            resizing polygons back up to ``slice_size``. Defaults to ``False``.
+        batch_size: int
+            Number of slices per batched GPU inference call. Defaults to ``8``.
+        contour_method: str
+            Mask->polygon extractor: ``"skimage"`` (default, bit-identical) or ``"cv2"`` (faster).
         overlap_height_ratio: float
             Fractional overlap in height of each window (e.g. an overlap of 0.2 for a window
             of size 512 yields an overlap of 102 pixels).
@@ -236,7 +247,8 @@ def get_sliced_prediction(in_raster,
             regardless of worker count (order-preserving).
 
     Returns:
-        A pd.DataFrame.
+        ``(gdf, gdf_nms)`` — a tuple of GeoDataFrames: all kept detections and the post-NMS
+        subset. ``gdf_nms`` is ``None`` when ``postprocess=False``.
     """
 
     # convert in_raster tif file to png file
