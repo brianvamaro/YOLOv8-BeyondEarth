@@ -164,3 +164,5 @@ cython_debug/
 
 # Local sample data / model weights (not committed)
 data/
+# Model weights auto-downloaded by ultralytics into CWD (e.g. sam2.1_b.pt) — never commit
+*.pt
