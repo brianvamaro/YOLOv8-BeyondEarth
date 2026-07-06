@@ -244,6 +244,34 @@ def orientation_summary(df, angle_col="angle180", group="treatment", tol_deg=10.
     return res
 
 
+def match_detections(gdf_a, gdf_b, max_dist):
+    """Spatially match two detection sets by centroid distance -> DataFrame ``[idx_a, idx_b, dist]``.
+
+    Greedy one-to-one matching: candidate pairs within ``max_dist`` (map units) are taken in
+    increasing-distance order; each detection matches at most once. This is the standing
+    "spatially-matched pairing" gate for real-scene before/after claims (docs/solutions/README.md) —
+    population shift confounded the retina/slice aggregate comparisons, so cross-treatment
+    orientation deltas must be computed on these pairs, not on the raw per-run populations.
+    ``idx_a``/``idx_b`` are positional indices into ``gdf_a``/``gdf_b`` (use ``.iloc``).
+    """
+    from scipy.spatial import cKDTree
+
+    ca = np.column_stack((gdf_a.geometry.centroid.x.values, gdf_a.geometry.centroid.y.values))
+    cb = np.column_stack((gdf_b.geometry.centroid.x.values, gdf_b.geometry.centroid.y.values))
+    if len(ca) == 0 or len(cb) == 0:
+        return pd.DataFrame(columns=["idx_a", "idx_b", "dist"])
+    pairs = cKDTree(ca).query_ball_tree(cKDTree(cb), r=max_dist)
+    cand = [(np.hypot(*(ca[i] - cb[j])), i, j) for i, js in enumerate(pairs) for j in js]
+    cand.sort()
+    used_a, used_b, rows = set(), set(), []
+    for d, i, j in cand:
+        if i in used_a or j in used_b:
+            continue
+        used_a.add(i); used_b.add(j)
+        rows.append((i, j, d))
+    return pd.DataFrame(rows, columns=["idx_a", "idx_b", "dist"])
+
+
 def time_cost_summary(df, group="treatment", per_unit="boulder"):
     """Per-group timing -> DataFrame: mean/median seconds per unit and the multiple vs the fastest
     group. ``per_unit`` is a label only (the rows are per whatever unit ``seconds`` was timed over)."""
