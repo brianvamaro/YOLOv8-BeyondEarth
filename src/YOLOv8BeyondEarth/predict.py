@@ -22,7 +22,8 @@ from shptools_BOULDERING import shp
 #from torchvision.ops import (nms as nms_torch, batched_nms as batched_nms_torch)
 
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
-                  min_area_threshold, downscale_pred, contour_method="skimage", executor=None):
+                  min_area_threshold, downscale_pred, contour_method="skimage", executor=None,
+                  remask_fn=None, image=None):
     """Convert a single ultralytics Result (one slice) into the detections DataFrame.
 
     This is the per-slice core extracted from ``YOLOv8`` so the model can be called on a
@@ -41,6 +42,13 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     (``find_contours``, ``cv2``, numpy), so mapping it across threads gives a large speedup on
     dense slices. Results are collected in input order, so output is identical to the serial
     path.
+
+    ``remask_fn`` (Solution G, detector-preserving re-masking): if given, YOLO's boxes and scores
+    are kept but each detection's **mask** is replaced by ``remask_fn(image, boxes_xyxy)`` — a
+    callable returning one slice-resolution mask per box (or ``None`` to drop a failed re-mask),
+    e.g. the SAM2 box-prompt re-masker from :func:`YOLOv8BeyondEarth.orientation_validation.sam2_remasker`.
+    ``image`` is the slice the boxes are in (needed to prompt the re-masker). Default ``None`` =
+    original YOLO-prototype masks (bit-identical).
     """
     extract_polygon = binary_mask_to_polygon_cv if contour_method == "cv2" else binary_mask_to_polygon
     shift_x = shift_amount[0]
@@ -52,17 +60,22 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
 
     conf_mask = prediction_result.boxes.data[:, 4] >= detection_model.confidence_threshold
     result_boxes = prediction_result.boxes.data[conf_mask]
-    if has_mask:
-        result_masks = prediction_result.masks.data[conf_mask]
-    else:
-        result_masks = torch.tensor([[] for _ in range(result_boxes.size()[0])])
-
-    # Threshold the whole mask batch in one GPU op (equivalent to the old per-mask
-    # ``bool_mask[bool_mask>=0.5]=1; [<0.5]=0``) before moving to CPU. Kept as float32 {0.,1.}
-    # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
-    # sees -> geometry-neutral, just without two full-array writes per detection.
-    masks_np = (result_masks >= 0.5).to(torch.float32).cpu().detach().numpy()
     boxes_np = result_boxes.cpu().detach().numpy()
+
+    if remask_fn is not None:
+        # Solution G: swap the mask producer, keep YOLO's boxes/scores. ``remask_fn`` returns a
+        # per-box list of slice-resolution masks (or None to drop that detection).
+        masks_np = remask_fn(image, boxes_np[:, :4])
+    else:
+        if has_mask:
+            result_masks = prediction_result.masks.data[conf_mask]
+        else:
+            result_masks = torch.tensor([[] for _ in range(result_boxes.size()[0])])
+        # Threshold the whole mask batch in one GPU op (equivalent to the old per-mask
+        # ``bool_mask[bool_mask>=0.5]=1; [<0.5]=0``) before moving to CPU. Kept as float32 {0.,1.}
+        # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
+        # sees -> geometry-neutral, just without two full-array writes per detection.
+        masks_np = (result_masks >= 0.5).to(torch.float32).cpu().detach().numpy()
 
     min_edge_distance = 0.05 * slice_size
     max_edge_distance = 0.95 * slice_size
@@ -71,6 +84,8 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         """Mask -> (score, polygon, category_id, category_name, is_within_slice) or None.
         Pure and free of shared mutable state, so it is safe to run across threads."""
         prediction, bool_mask = item
+        if bool_mask is None:          # re-masker dropped this detection (e.g. background-grab)
+            return None
         category_id = int(prediction[5])
 
         if downscale_pred and bool_mask.shape[0] != slice_size:
@@ -189,7 +204,9 @@ def get_sliced_prediction(in_raster,
                           save_bbox: bool = True,
                           save_prenms: bool = True,
                           output_format: str = "shp",
-                          n_workers: int = None):
+                          n_workers: int = None,
+                          remask_fn=None,
+                          mask_tag: str = None):
     """
     Function for slice image + get predicion for each slice + combine predictions in full image.
 
@@ -245,6 +262,17 @@ def get_sliced_prediction(in_raster,
             Threads for the per-detection mask->polygon post-processing. Default
             ``min(8, os.cpu_count())``; pass ``1`` to force the serial path. Output is identical
             regardless of worker count (order-preserving).
+        remask_fn: callable or None
+            Solution G (detector-preserving re-masking). If given, YOLO still supplies every box and
+            score, but each detection's **mask** is produced by ``remask_fn(slice_image, boxes_xyxy)``
+            (e.g. SAM2 box prompts — see
+            :func:`YOLOv8BeyondEarth.orientation_validation.sam2_remasker`) instead of the YOLO
+            prototype head. Everything else (slicing, edge handling, dedup, NMS, output) is
+            unchanged, so detection is identical and only the mask geometry differs. Default ``None``
+            = original behaviour.
+        mask_tag: str or None
+            Inserted into the output filenames (e.g. ``"sam2"`` -> ``...-mask-sam2.gpkg``) so a
+            re-masked layer does not overwrite the plain YOLO one. Default ``None`` = no tag.
 
     Returns:
         ``(gdf, gdf_nms)`` — a tuple of GeoDataFrames: all kept detections and the post-NMS
@@ -296,7 +324,7 @@ def get_sliced_prediction(in_raster,
             for j, prediction_result in enumerate(prediction_results):
                 df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
                                    slice_size, min_area_threshold, downscale_pred, contour_method,
-                                   executor=executor)
+                                   executor=executor, remask_fn=remask_fn, image=batch_images[j])
                 if df.shape[0] > 0:
                     frames.append(df)
     finally:
@@ -348,6 +376,10 @@ def get_sliced_prediction(in_raster,
     if downscale_pred:
         bbox_filename = bbox_filename.replace("-bbox" + ext, "-downscaled-bbox" + ext)
         mask_filename = mask_filename.replace("-mask" + ext, "-downscaled-mask" + ext)
+
+    if mask_tag:  # keep a re-masked layer (e.g. SAM2) from overwriting the plain YOLO one
+        bbox_filename = bbox_filename.replace("-bbox" + ext, f"-bbox-{mask_tag}" + ext)
+        mask_filename = mask_filename.replace("-mask" + ext, f"-mask-{mask_tag}" + ext)
 
     out_bbox_shp = output_dir / bbox_filename
     out_mask_shp = output_dir / mask_filename

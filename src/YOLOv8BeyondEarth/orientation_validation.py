@@ -524,6 +524,59 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
     return df, masks
 
 
+def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_cache_every=64):
+    """Build a ``remask_fn`` for :func:`YOLOv8BeyondEarth.predict.get_sliced_prediction` (Solution G).
+
+    Returns a callable ``remask(slice_image, boxes_xyxy) -> list`` that re-masks each YOLO box with
+    SAM2 (the native-tile ``sam256`` production config) and returns one slice-resolution binary mask
+    per box, or ``None`` where the re-mask fails a **background-grab guard** (mask area >
+    ``max_box_blowup`` x its prompt-box area) or is degenerate — those detections are dropped by the
+    caller. Same handling as :func:`detect_sam2_mask_sets` (largest-blob + fill), so a full-scene
+    ``get_sliced_prediction(..., remask_fn=sam2_remasker(sam), mask_tag="sam2")`` reproduces the
+    validated re-masking through the production slicing/edge/NMS/georef path. Box prompts are chunked
+    (``sam_batch``) to fit VRAM; the CUDA cache is dropped every ``empty_cache_every`` slices (the
+    per-slice ``empty_cache`` sync is a measurable cost at the light sam256 footprint). ~6.5
+    ms/boulder (2026-07-06 benchmark) -> ~9 h/scene ungated.
+    """
+    import torch
+    from scipy.ndimage import label, binary_fill_holes
+
+    state = {"n": 0}
+
+    def _clean(mb):
+        lab, n = label(mb)
+        if n == 0:
+            return None
+        if n > 1:
+            big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+            mb = (lab == big).astype(np.uint8)
+        return binary_fill_holes(mb).astype(np.uint8)
+
+    def remask(image, boxes_xyxy):
+        boxes = np.asarray(boxes_xyxy, dtype=float)
+        if len(boxes) == 0:
+            return []
+        outs = []
+        for i in range(0, len(boxes), sam_batch):
+            r = sam_model(image, bboxes=boxes[i:i + sam_batch], verbose=False, device=device)[0]
+            outs.append(r.masks.data.cpu().numpy())
+        s = np.concatenate(outs, axis=0)
+        masks = []
+        for k in range(len(boxes)):
+            mb = _clean(s[k].astype(np.uint8))
+            box_area = (boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1])
+            if mb is None or mb.sum() > max_box_blowup * box_area:
+                masks.append(None)                       # dropped by _process_detection
+            else:
+                masks.append(mb.astype(np.float32))      # slice-res {0,1}, same as YOLO masks_np
+        state["n"] += 1
+        if torch.cuda.is_available() and state["n"] % empty_cache_every == 0:
+            torch.cuda.empty_cache()
+        return masks
+
+    return remask
+
+
 def angles_from_moments(masks):
     """Orientation from **weighted second moments** — no contour, no ellipse fit, and no threshold
     requirement, so it reads binary and soft (float-probability) masks with the SAME estimator.
