@@ -412,10 +412,12 @@ def detect_soft_mask_triples(model, img, slice_size=256, imgsz=1024, conf=0.10, 
 
 
 def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
-                          max_box_blowup=1.5, sam_batch=96):
+                          max_box_blowup=1.5, sam_batch=96,
+                          configs=("yolo", "sam256", "sam1024"), empty_cache_every=1):
     """Tile ``img`` like :func:`detect_binary_masks`, detect with YOLO, then **re-mask each
     detection with SAM2 box prompts** — Test 3c, the option-G (detector-preserving re-masking)
-    prototype. Three aligned mask sets per kept detection, all from YOLO's OWN boxes:
+    prototype and its production path. Up to three aligned mask sets per kept detection, all from
+    YOLO's OWN boxes:
 
     yolo    = YOLO's production binary mask (float >=0.5 -> resize to slice -> largest blob ->
               fill; byte-identical handling to :func:`detect_binary_masks`); slice res.
@@ -425,16 +427,23 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
               it) — the "more mask px per boulder" configuration that §3f's dose-response
               motivates; masks at ``imgsz`` res (orientation is scale-free).
 
+    ``configs`` selects which sides to compute (default all three, the validation setting).
+    **Production uses ``configs=("yolo", "sam256")``** — the 2026-07-06 benchmark showed
+    sam256 ≈ sam1024 on orientation, and dropping the expensive 1024-px pass is ~6× faster
+    (6.5 vs 39 ms/boulder → ~9 h/scene ungated vs ~51 h). ``empty_cache_every`` controls how often
+    the CUDA cache is dropped (every tile by default; set higher, e.g. 64, for the sam256-only
+    production run — the per-tile ``empty_cache`` sync is a measurable cost and unnecessary at the
+    lighter sam256 memory footprint). Encoder-reuse via the SAM predictor's ``set_image`` was tried
+    and is **slower** (framework overhead per prompt call dominates the saved re-encode), so the
+    chunked ``sam(rgb, bboxes=...)`` path is kept.
+
     SAM2 masks get the same largest-blob + fill handling, plus a background-grab guard: a re-mask
     larger than ``max_box_blowup`` x its prompt-box area is treated as failed. A detection is kept
-    only if all three sides yield a usable mask, so the lists align pairwise. Box prompts are fed
-    to SAM2 in chunks of ``sam_batch`` (real HiRISE tiles carry 100+ detections; one giant prompt
-    batch OOMs an 8 GB card — the image encoder re-runs per chunk, so keep the chunk large), and
-    the CUDA cache is dropped after each tile to stop cross-tile accumulation. Returns
-    ``(df, masks)`` with ``df = [cx, cy, score, area_yolo, area_sam256, area_sam1024]`` (centres
-    in GLOBAL image px, for truth-matching on known-orientation fields; areas in each side's own
-    px) and ``masks = {"yolo": [...], "sam256": [...], "sam1024": [...]}``. Per-side failure
-    counts (before completeness pairing) are in ``df.attrs["failed"]``.
+    only if **every requested side** yields a usable mask, so the lists align pairwise. Box prompts
+    are fed to SAM2 in chunks of ``sam_batch`` (real HiRISE tiles carry 100+ detections; one giant
+    prompt batch OOMs an 8 GB card). Returns ``(df, masks)`` with ``df = [cx, cy, score] +
+    [area_<c> for c in configs]`` (centres in GLOBAL image px; areas in each side's own px) and
+    ``masks = {c: [...] for c in configs}``. Per-side failure counts are in ``df.attrs["failed"]``.
     """
     import cv2
     import torch
@@ -462,10 +471,13 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
 
     up = imgsz // slice_size
     H, W = img.shape
-    rows, masks = [], {"yolo": [], "sam256": [], "sam1024": []}
-    failed = {"yolo": 0, "sam256": 0, "sam1024": 0}
+    need_s256, need_s1024 = "sam256" in configs, "sam1024" in configs
+    masks = {c: [] for c in configs}
+    failed = {c: 0 for c in configs}
+    rows, tile_i = [], 0
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
+            tile_i += 1
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
             rgb = np.stack([sl] * 3, axis=-1)
             r0 = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device)[0]
@@ -474,18 +486,23 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
             boxes = r0.boxes.xyxy.cpu().numpy()
             scores = r0.boxes.conf.cpu().numpy()
             md = r0.masks.data.cpu().numpy()
-            rgb_up = cv2.resize(rgb, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
-            s256 = _sam_chunked(rgb, boxes)
-            s1024 = _sam_chunked(rgb_up, boxes * up)
+            s256 = _sam_chunked(rgb, boxes) if need_s256 else None
+            if need_s1024:
+                rgb_up = cv2.resize(rgb, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
+                s1024 = _sam_chunked(rgb_up, boxes * up)
             for k in range(len(boxes)):
                 mm = (md[k] >= 0.5).astype(np.float32)
                 if mm.shape[0] != slice_size:
                     mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
                 box_area = ((boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1]))
+                spec = {"yolo": ((mm >= 0.5).astype(np.uint8), 1.0)}
+                if need_s256:
+                    spec["sam256"] = (s256[k].astype(np.uint8), 1.0)
+                if need_s1024:
+                    spec["sam1024"] = (s1024[k].astype(np.uint8), float(up))
                 sides = {}
-                for name, m, scale in (("yolo", (mm >= 0.5).astype(np.uint8), 1.0),
-                                       ("sam256", s256[k].astype(np.uint8), 1.0),
-                                       ("sam1024", s1024[k].astype(np.uint8), float(up))):
+                for name in configs:
+                    m, scale = spec[name]
                     mb = _clean(m)
                     if mb is None or (name != "yolo"
                                       and mb.sum() > max_box_blowup * box_area * scale ** 2):
@@ -495,16 +512,14 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
                     sides[name] = mb
                 if sides is None:
                     continue
-                for name in masks:
+                for name in configs:
                     masks[name].append(_crop(sides[name]))
                 rows.append((x0 + (boxes[k, 0] + boxes[k, 2]) / 2,
-                             y0 + (boxes[k, 1] + boxes[k, 3]) / 2, float(scores[k]),
-                             int(sides["yolo"].sum()), int(sides["sam256"].sum()),
-                             int(sides["sam1024"].sum())))
-            if torch.cuda.is_available():
+                             y0 + (boxes[k, 1] + boxes[k, 3]) / 2, float(scores[k]))
+                            + tuple(int(sides[name].sum()) for name in configs))
+            if torch.cuda.is_available() and (tile_i % empty_cache_every == 0):
                 torch.cuda.empty_cache()
-    df = pd.DataFrame(rows, columns=["cx", "cy", "score",
-                                     "area_yolo", "area_sam256", "area_sam1024"])
+    df = pd.DataFrame(rows, columns=["cx", "cy", "score"] + [f"area_{c}" for c in configs])
     df.attrs["failed"] = failed
     return df, masks
 
