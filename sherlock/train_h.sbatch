@@ -1,0 +1,48 @@
+#!/bin/bash
+# train_h.sbatch -- Solution H retrain on Sherlock's GPU partition (mlapotre group).
+# Trains BOTH variants at the production recipe (imgsz 1024, 200 ep, m-scale, degrees=0):
+#   H-seg  (yolo26m-seg, boulder2024 seg labels)  and  H-obb (yolo26m-obb, EllipseModel OBB labels).
+# Override anything via env vars, e.g.:
+#   sbatch --export=ALL,VARIANT=obb,BATCH=16 YOLOv8-BeyondEarth/sherlock/train_h.sbatch
+#   sbatch --export=ALL,EPOCHS=200,IMGSZ=1024 YOLOv8-BeyondEarth/sherlock/train_h.sbatch
+#SBATCH --job-name=h-retrain
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=GPU_MEM:24GB
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=48:00:00
+#SBATCH --output=logs/h-retrain-%j.out
+#SBATCH --error=logs/h-retrain-%j.out
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=bamaro@stanford.edu
+
+set -euo pipefail
+mkdir -p logs
+ml python/3.12.1
+source "/home/groups/mlapotre/bamaro/envs/bouldernet26/bin/activate"
+
+# Repo root on Sherlock: the BoulderNet tree ($HOME/BoulderNet/{YOLOv8-BeyondEarth,data_prieur}).
+# train_h.py resolves data_prieur relative to this, so keep the two-level layout intact.
+REPO="${REPO:-$HOME/BoulderNet}"
+cd "$REPO/YOLOv8-BeyondEarth"
+
+# Heavy training outputs -> $SCRATCH (big/fast, not backed up); scp best.pt back to the laptop.
+OUT="${H_OUT:-$SCRATCH/bouldernet/h_training}"
+mkdir -p "$OUT"
+
+VARIANT="${VARIANT:-both}"; EPOCHS="${EPOCHS:-200}"; BATCH="${BATCH:-16}"
+IMGSZ="${IMGSZ:-1024}"; NAME="${NAME:-h_full}"
+
+echo "Host: $(hostname)  GPU: ${CUDA_VISIBLE_DEVICES:-none}"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+echo "variant=$VARIANT epochs=$EPOCHS batch=$BATCH imgsz=$IMGSZ out=$OUT"
+
+# The OBB dataset's images/ is a symlink tree built by build_obb_labels.py (its non-Windows path
+# uses os.symlink). If data_prieur/boulder2024_obb is missing/stale after staging, (re)build it:
+[ -d "$REPO/data_prieur/boulder2024_obb/train/images" ] || python scripts/build_obb_labels.py
+
+python scripts/train_h.py --variant "$VARIANT" --epochs "$EPOCHS" --batch "$BATCH" \
+    --imgsz "$IMGSZ" --project "$OUT" --name "$NAME" --device 0
+
+echo "done -- runs in $OUT/${NAME}_{seg,obb}; scp weights/best.pt back to the laptop."
