@@ -11,7 +11,7 @@
 #SBATCH --constraint=GPU_MEM:24GB
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
-#SBATCH --time=48:00:00
+#SBATCH --time=36:00:00
 #SBATCH --output=logs/h-retrain-%j.out
 #SBATCH --error=logs/h-retrain-%j.out
 #SBATCH --mail-type=END,FAIL

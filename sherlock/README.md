@@ -48,7 +48,7 @@ scp YOLOv8-BeyondEarth/data/weights/yolo26m-seg.pt \
 # ln -s data/weights/yolo26n.pt ~/BoulderNet/YOLOv8-BeyondEarth/yolo26n.pt
 ```
 (If the `gpu` batch nodes *do* have proxy internet, you can skip this — ultralytics will fetch them.
-Confirm with a 1-tile probe before the 48 h run.)
+Confirm with a 1-tile probe before the 36 h run.)
 
 ## Step 4 — stage the dataset
 ```bash
@@ -82,6 +82,7 @@ synthetic-truth |Δangle|) per `docs/solutions/H_yolo26_obb_retrain.md`.
   the stock `yolov8m-seg` baseline (0.762 box / 0.467 mask mAP50). Rotation aug and higher imgsz
   are deferred recipe-change arms.
 - **Checkpointing:** ultralytics writes `last.pt` each epoch; a pre-empted/timed-out job resumes
-  with `YOLO('.../last.pt').train(resume=True)` — add a resume path if 48 h isn't enough.
+  with `YOLO('.../last.pt').train(resume=True)` — add a resume path if 36 h isn't enough (set the
+  real `--time` from the `EPOCHS=3` probe: per-epoch × 200 + val, ~30% headroom).
 - **Detection parity must be measured in-env** (same ultralytics version); never compare
   `model.val()` numbers across ultralytics versions.
