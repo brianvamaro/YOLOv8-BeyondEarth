@@ -272,6 +272,74 @@ def match_detections(gdf_a, gdf_b, max_dist):
     return pd.DataFrame(rows, columns=["idx_a", "idx_b", "dist"])
 
 
+# --- size-band orientation readouts (the Stage-2 / G card axis) --------------------------------
+
+# Native-px size bands shared by the D/E three-arm and G re-masking benchmark cards. The artifact
+# lives in the low-px bands (the 3f dose-response), so the bands are fine-grained there and pool the
+# well-resolved tail. Edges are half-open [lo, hi); the last band is [14, inf).
+DEFAULT_SIZE_BANDS = ((3, 4), (4, 6), (6, 8), (8, 10), (10, 14), (14, np.inf))
+
+
+def _band_label(lo, hi):
+    return f"{lo}-{'inf' if not np.isfinite(hi) else hi}"
+
+
+def orientation_by_band(angle180, aspect, dpx, grid_axis="diagonal", aspect_min=1.35,
+                        tol_deg=10.0, bands=DEFAULT_SIZE_BANDS, min_n=30):
+    """Grid/diagonal fraction + 135/45 chirality per native-px size band, on the elongated subset.
+
+    The per-arm (D/E) and per-side (G) card readout: given aligned ``angle180`` / ``aspect`` /
+    ``dpx`` (native-px equivalent diameter) arrays, restrict to ``aspect > aspect_min`` and finite
+    angle, then report :func:`orientation.diagonal_fraction` (``grid_axis="diagonal"``, HiRISE
+    north-up 45/135) or :func:`orientation.grid_fraction` (``"cardinal"``, NAC 0/90) and
+    :func:`orientation.asymmetry_ratio` for the ``"all"`` row and each band with >= ``min_n``
+    members. Returns a DataFrame ``[band, n, frac, chirality]`` (``frac`` column is the fraction
+    either way; the caller knows the axis). ``uniform`` is on ``.attrs``.
+    """
+    frac = diagonal_fraction if grid_axis == "diagonal" else grid_fraction
+    a = np.asarray(angle180, float); asp = np.asarray(aspect, float); d = np.asarray(dpx, float)
+    el = (asp > aspect_min) & np.isfinite(a)
+    rows = [{"band": "all", "n": int(el.sum()),
+             "frac": frac(a[el], tol_deg), "chirality": asymmetry_ratio(a[el], tol_deg)}]
+    for lo, hi in bands:
+        m = el & (d >= lo) & (d < hi)
+        if m.sum() >= min_n:
+            rows.append({"band": _band_label(lo, hi), "n": int(m.sum()),
+                         "frac": frac(a[m], tol_deg), "chirality": asymmetry_ratio(a[m], tol_deg)})
+    res = pd.DataFrame(rows)
+    res.attrs["uniform"] = grid_fraction_uniform(tol_deg)
+    return res
+
+
+def remask_gating_sweep(dpx, aspect_gate, angle_base, angle_remask, taus,
+                        grid_axis="diagonal", aspect_min=1.35, tol_deg=10.0):
+    """Sweep a size gate for detector-preserving re-masking (Solution G production question).
+
+    Builds a *combined* rose that uses the re-masked angle where ``dpx < tau`` and the baseline
+    (YOLO) angle otherwise, for each threshold in ``taus`` — the operating curve for "re-mask only
+    the small subset". The elongated subset is selected by ``aspect_gate`` (the baseline aspect,
+    since the production gate is applied *before* re-masking). Returns a DataFrame
+    ``[tau, remask_frac, frac, chirality, n_elong]`` where ``remask_frac`` is over all detections.
+    Pass ``np.inf`` in ``taus`` for the re-mask-everything row. ``uniform`` is on ``.attrs``.
+    """
+    frac_fn = diagonal_fraction if grid_axis == "diagonal" else grid_fraction
+    d = np.asarray(dpx, float); asp = np.asarray(aspect_gate, float)
+    ab = np.asarray(angle_base, float); ar = np.asarray(angle_remask, float)
+    rows = []
+    for tau in taus:
+        use_remask = d < tau
+        ang = np.where(use_remask, ar, ab)
+        el = (asp > aspect_min) & np.isfinite(ang)
+        rows.append({"tau": ("inf" if not np.isfinite(tau) else tau),
+                     "remask_frac": float(use_remask.mean()),
+                     "frac": frac_fn(ang[el], tol_deg),
+                     "chirality": asymmetry_ratio(ang[el], tol_deg),
+                     "n_elong": int(el.sum())})
+    res = pd.DataFrame(rows)
+    res.attrs["uniform"] = grid_fraction_uniform(tol_deg)
+    return res
+
+
 def time_cost_summary(df, group="treatment", per_unit="boulder"):
     """Per-group timing -> DataFrame: mean/median seconds per unit and the multiple vs the fastest
     group. ``per_unit`` is a label only (the rows are per whatever unit ``seconds`` was timed over)."""
