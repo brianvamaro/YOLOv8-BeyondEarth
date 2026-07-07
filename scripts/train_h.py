@@ -61,7 +61,8 @@ def train_one(variant, args):
         seed=0,
         amp=True,                  # 8 GB VRAM headroom at imgsz 1024
         close_mosaic=10,
-        mask_ratio=1,              # seg-only knob; ignored by the obb task
+        mask_ratio=args.mask_ratio,  # seg-only; =1 (Prieur, no mask downsampling) OOMs a 24GB card
+                                     # on dense tiles -> use 4 (16x less mask-loss mem) if no big GPU
         max_det=2000,
         # augmentation (recipe): NO rotation (R-A deferred)
         degrees=0.0,
@@ -85,6 +86,8 @@ def main():
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--fraction", type=float, default=1.0, help="fraction of the train set (smoke: <1)")
     p.add_argument("--imgsz", type=int, default=1024, help="1024 = production; drop to 640 for an 8GB smoke")
+    p.add_argument("--mask-ratio", dest="mask_ratio", type=int, default=1,
+                   help="seg mask downsample; 1=Prieur (needs >24GB VRAM on dense tiles), 4=fits 24GB")
     p.add_argument("--device", default="0")
     p.add_argument("--project", default=None, help="output dir (default local data/h_training; set to $SCRATCH on a cluster)")
     p.add_argument("--name", default="h")

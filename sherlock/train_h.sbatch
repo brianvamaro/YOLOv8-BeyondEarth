@@ -36,7 +36,11 @@ OUT="${H_OUT:-$SCRATCH/bouldernet/h_training}"
 mkdir -p "$OUT"
 
 VARIANT="${VARIANT:-both}"; EPOCHS="${EPOCHS:-200}"; BATCH="${BATCH:-8}"
-IMGSZ="${IMGSZ:-1024}"; NAME="${NAME:-h_full}"
+IMGSZ="${IMGSZ:-1024}"; NAME="${NAME:-h_full}"; MASK_RATIO="${MASK_RATIO:-1}"
+# mask_ratio=1 (Prieur, faithful) OOMs a 24GB 3090 on dense tiles even at batch 1 (the seg mask loss
+# builds full-res [n_inst,1024,1024] tensors). Options: (a) request a >=40GB GPU and keep it 1
+# (--constraint=GPU_MEM:40GB overrides the header); (b) MASK_RATIO=4 to fit 24GB (16x less mask mem;
+# minor deviation from the baseline's mask_ratio=1). OBB ignores mask_ratio.
 # BATCH=8 default: on a 24 GB 3090, batch 16 at imgsz 1024 pins VRAM at ~23 GB and the
 # TaskAlignedAssigner spills to CPU every step (huge slowdown -> ~15 min/epoch). batch 8 keeps the
 # assigner on GPU. Prefer submitting seg and obb as SEPARATE jobs (VARIANT=seg / VARIANT=obb) so
@@ -57,6 +61,6 @@ sed -i "s|^path:.*|path: $REPO/data_prieur/boulder2024|" \
     "$REPO/data_prieur/boulder2024/boulder2024_local.yaml"
 
 python scripts/train_h.py --variant "$VARIANT" --epochs "$EPOCHS" --batch "$BATCH" \
-    --imgsz "$IMGSZ" --project "$OUT" --name "$NAME" --device 0
+    --imgsz "$IMGSZ" --mask-ratio "$MASK_RATIO" --project "$OUT" --name "$NAME" --device 0
 
 echo "done -- runs in $OUT/${NAME}_{seg,obb}; scp weights/best.pt back to the laptop."
