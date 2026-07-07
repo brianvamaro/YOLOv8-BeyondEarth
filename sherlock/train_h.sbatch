@@ -35,8 +35,12 @@ cd "$REPO/YOLOv8-BeyondEarth"
 OUT="${H_OUT:-$SCRATCH/bouldernet/h_training}"
 mkdir -p "$OUT"
 
-VARIANT="${VARIANT:-both}"; EPOCHS="${EPOCHS:-200}"; BATCH="${BATCH:-16}"
+VARIANT="${VARIANT:-both}"; EPOCHS="${EPOCHS:-200}"; BATCH="${BATCH:-8}"
 IMGSZ="${IMGSZ:-1024}"; NAME="${NAME:-h_full}"
+# BATCH=8 default: on a 24 GB 3090, batch 16 at imgsz 1024 pins VRAM at ~23 GB and the
+# TaskAlignedAssigner spills to CPU every step (huge slowdown -> ~15 min/epoch). batch 8 keeps the
+# assigner on GPU. Prefer submitting seg and obb as SEPARATE jobs (VARIANT=seg / VARIANT=obb) so
+# each fits comfortably under --time and a failure doesn't take both down.
 
 echo "Host: $(hostname)  GPU: ${CUDA_VISIBLE_DEVICES:-none}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
