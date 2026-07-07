@@ -1,5 +1,9 @@
 # Solution H on Sherlock — training the yolo26m seg + OBB retrain
 
+> **Running a new training? Read [`RUNBOOK.md`](RUNBOOK.md) first** — the known-good config, prep
+> checklist, and every gotcha we hit (with fixes) so you don't rediscover them. This file is the
+> step-by-step workflow; RUNBOOK is the lessons-learned reference.
+
 The 8 GB RTX 5070 (laptop) can't train `yolo26m` at the production `imgsz=1024` (OOM; the seg
 `mask_ratio=1` full-res masks OOM even at 640). The full 200-epoch run therefore goes to Sherlock's
 `gpu` partition. This mirrors the `hirise2ctx` setup (venv on `$GROUP_HOME`, `mlapotre` group, no
