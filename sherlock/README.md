@@ -94,6 +94,10 @@ synthetic-truth |Δangle|) per `docs/solutions/H_yolo26_obb_retrain.md`.
   real `--time` from the `EPOCHS=3` probe: per-epoch × 200 + val, ~30% headroom).
 - **Detection parity must be measured in-env** (same ultralytics version); never compare
   `model.val()` numbers across ultralytics versions.
+- **Headless OpenCV:** ultralytics pulls `opencv-python`, which needs `libGL.so.1` (absent on
+  Sherlock's headless nodes → `ImportError: libGL.so.1`). `setup_sherlock_env.sh` swaps in
+  `opencv-python-headless`. If you hit it on an existing env: `pip uninstall -y opencv-python &&
+  pip install --only-binary=:all: opencv-python-headless`.
 
 ## OnDemand quickstart (browser Files app + web Shell)
 The laptop builds two tarballs (in `BoulderNet/sherlock_upload/`): `bnet_code.tgz` (code + the three

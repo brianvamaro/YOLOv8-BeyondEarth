@@ -33,6 +33,13 @@ python -m pip install --upgrade pip wheel
 # skimage.measure.EllipseModel + shapely); both ship manylinux wheels. No geo/GDAL stack needed. ---
 pip install --only-binary=:all: "ultralytics==8.4.75" "shapely>=2.0" "scikit-image>=0.22"
 
+# HEADLESS OpenCV: ultralytics depends on `opencv-python`, whose native lib needs libGL.so.1 (system
+# OpenGL) -- absent on Sherlock's headless nodes -> "ImportError: libGL.so.1". Swap in the headless
+# build (no GUI/GL deps; ultralytics works fine with it). Must uninstall the GUI build first (the two
+# conflict if both installed).
+pip uninstall -y opencv-python opencv-contrib-python >/dev/null 2>&1 || true
+pip install --only-binary=:all: opencv-python-headless
+
 # --- Smoke test: torch sees CUDA and both YOLO26 archs build in-env (mirrors the local scouting
 # that closed the env question -- Segment26 27.1M / OBB26 23.6M on the RTX 5070). ---
 python - <<'PY'
