@@ -59,7 +59,9 @@ def train_one(variant, args):
         val=True,
         plots=True,
         seed=0,
-        amp=True,                  # 8 GB VRAM headroom at imgsz 1024
+        amp=args.amp,              # amp=True + offline AMP-check-skip caused NaN divergence in the
+                                   # first obb run (peaked ep45, collapsed by ep200) -> use --no-amp
+                                   # for clean reruns (numerically stable, ~1.3x slower)
         close_mosaic=10,
         mask_ratio=args.mask_ratio,  # seg-only; =1 (Prieur, no mask downsampling) OOMs a 24GB card
                                      # on dense tiles -> use 4 (16x less mask-loss mem) if no big GPU
@@ -88,6 +90,9 @@ def main():
     p.add_argument("--imgsz", type=int, default=1024, help="1024 = production; drop to 640 for an 8GB smoke")
     p.add_argument("--mask-ratio", dest="mask_ratio", type=int, default=1,
                    help="seg mask downsample; 1=Prieur (needs >24GB VRAM on dense tiles), 4=fits 24GB")
+    p.add_argument("--no-amp", dest="amp", action="store_false",
+                   help="disable AMP (use for clean reruns; amp=True diverged to NaN when the offline "
+                        "node skipped the AMP self-check)")
     p.add_argument("--device", default="0")
     p.add_argument("--project", default=None, help="output dir (default local data/h_training; set to $SCRATCH on a cluster)")
     p.add_argument("--name", default="h")

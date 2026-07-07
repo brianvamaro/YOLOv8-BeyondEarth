@@ -60,7 +60,10 @@ echo "variant=$VARIANT epochs=$EPOCHS batch=$BATCH imgsz=$IMGSZ out=$OUT"
 sed -i "s|^path:.*|path: $REPO/data_prieur/boulder2024|" \
     "$REPO/data_prieur/boulder2024/boulder2024_local.yaml"
 
+# AMP=0 disables mixed precision (numerically stable; the first obb run diverged to NaN with AMP on,
+# because the offline node skipped the AMP self-check). Default AMP=1 (on).
+AMP_FLAG=""; [ "${AMP:-1}" = "0" ] && AMP_FLAG="--no-amp"
 python scripts/train_h.py --variant "$VARIANT" --epochs "$EPOCHS" --batch "$BATCH" \
-    --imgsz "$IMGSZ" --mask-ratio "$MASK_RATIO" --project "$OUT" --name "$NAME" --device 0
+    --imgsz "$IMGSZ" --mask-ratio "$MASK_RATIO" $AMP_FLAG --project "$OUT" --name "$NAME" --device 0
 
 echo "done -- runs in $OUT/${NAME}_{seg,obb}; scp weights/best.pt back to the laptop."
