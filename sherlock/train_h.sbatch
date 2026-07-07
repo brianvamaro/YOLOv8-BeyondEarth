@@ -50,6 +50,12 @@ echo "variant=$VARIANT epochs=$EPOCHS batch=$BATCH imgsz=$IMGSZ out=$OUT"
 # uses os.symlink). If data_prieur/boulder2024_obb is missing/stale after staging, (re)build it:
 [ -d "$REPO/data_prieur/boulder2024_obb/train/images" ] || python scripts/build_obb_labels.py
 
+# The committed boulder2024_local.yaml carries a machine-specific absolute `path:` (a Windows path
+# on the laptop), which ultralytics can't resolve on Linux. Rewrite it to the cluster location so
+# the seg dataset's images are found. (The OBB yaml is generated on-cluster, so it's already correct.)
+sed -i "s|^path:.*|path: $REPO/data_prieur/boulder2024|" \
+    "$REPO/data_prieur/boulder2024/boulder2024_local.yaml"
+
 python scripts/train_h.py --variant "$VARIANT" --epochs "$EPOCHS" --batch "$BATCH" \
     --imgsz "$IMGSZ" --project "$OUT" --name "$NAME" --device 0
 
