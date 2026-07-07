@@ -2,6 +2,10 @@
 # train_h.sbatch -- Solution H retrain on Sherlock's GPU partition (mlapotre group).
 # Trains BOTH variants at the production recipe (imgsz 1024, 200 ep, m-scale, degrees=0):
 #   H-seg  (yolo26m-seg, boulder2024 seg labels)  and  H-obb (yolo26m-obb, EllipseModel OBB labels).
+# SUBMIT FROM ~/BoulderNet, and create the log dir FIRST -- SLURM opens --output BEFORE the script
+# runs (so the in-script `mkdir -p logs` is too late; a missing logs/ dir = instant exit 1, no log):
+#   mkdir -p ~/BoulderNet/logs   # once; setup_sherlock_env.sh also does this
+# Logs land in ~/BoulderNet/logs/ (relative to the submission dir, not the YOLOv8-BeyondEarth cd).
 # Override anything via env vars, e.g.:
 #   sbatch --export=ALL,VARIANT=obb,BATCH=16 YOLOv8-BeyondEarth/sherlock/train_h.sbatch
 #   sbatch --export=ALL,EPOCHS=200,IMGSZ=1024 YOLOv8-BeyondEarth/sherlock/train_h.sbatch
