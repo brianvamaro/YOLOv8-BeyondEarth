@@ -28,8 +28,10 @@ python -m pip install --upgrade pip wheel
 # the retrain matches the pipeline env (CLAUDE.md: 8.4.75 is pinned against the production stack).
 # --only-binary forbids source builds (Sherlock has old glibc / no system OpenBLAS), so pip picks
 # the newest glibc-compatible wheels. ultralytics' deps (numpy, opencv, pillow, scipy, matplotlib,
-# pandas, torch, torchvision) are all wheels -- no geo/GDAL stack needed for pure training. ---
-pip install --only-binary=:all: "ultralytics==8.4.75"
+# pandas, torch, torchvision) are all wheels. shapely + scikit-image are the EXTRA deps that the
+# on-cluster OBB-label rebuild needs (build_obb_labels.py -> orientation.ellipse_obb uses
+# skimage.measure.EllipseModel + shapely); both ship manylinux wheels. No geo/GDAL stack needed. ---
+pip install --only-binary=:all: "ultralytics==8.4.75" "shapely>=2.0" "scikit-image>=0.22"
 
 # --- Smoke test: torch sees CUDA and both YOLO26 archs build in-env (mirrors the local scouting
 # that closed the env question -- Segment26 27.1M / OBB26 23.6M on the RTX 5070). ---

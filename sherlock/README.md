@@ -19,7 +19,15 @@ $HOME/BoulderNet/
     # boulder2024_obb/  is REBUILT on Sherlock (step 4); do NOT rsync it (Windows junctions)
 ```
 
-## Step 1 — get the code up
+## Transfer — two options
+**A) OnDemand (browser Files app + web Shell)** — the recommended path here. Browser uploads choke
+on thousands of small files, so upload **two tarballs** (built by the laptop) and extract them in
+the OnDemand Shell. This bundles the code + all three weights + the dataset, so steps 1–4 below
+collapse into "upload 2 files, run 2 `tar` commands". See **"OnDemand quickstart"** at the bottom.
+
+**B) rsync/scp from a laptop terminal** — steps 1–4 below. Use if you have `rsync`/`ssh` set up.
+
+## Step 1 — get the code up (option B)
 ```bash
 # from the laptop, in C:/Users/brian/Documents/PhD/BoulderNet
 rsync -avz --exclude data/ YOLOv8-BeyondEarth/ bamaro@dtn.sherlock.stanford.edu:BoulderNet/YOLOv8-BeyondEarth/
@@ -86,3 +94,31 @@ synthetic-truth |Δangle|) per `docs/solutions/H_yolo26_obb_retrain.md`.
   real `--time` from the `EPOCHS=3` probe: per-epoch × 200 + val, ~30% headroom).
 - **Detection parity must be measured in-env** (same ultralytics version); never compare
   `model.val()` numbers across ultralytics versions.
+
+## OnDemand quickstart (browser Files app + web Shell)
+The laptop builds two tarballs (in `BoulderNet/sherlock_upload/`): `bnet_code.tgz` (code + the three
+`yolo26m*` weights) and `boulder2024.tar` (the seg dataset). Rebuild them anytime with:
+```bash
+# laptop, from C:/Users/brian/Documents/PhD/BoulderNet
+mkdir -p sherlock_upload
+tar czf sherlock_upload/bnet_code.tgz \
+  YOLOv8-BeyondEarth/scripts YOLOv8-BeyondEarth/sherlock YOLOv8-BeyondEarth/src \
+  YOLOv8-BeyondEarth/data/weights/yolo26m-seg.pt YOLOv8-BeyondEarth/data/weights/yolo26m-obb.pt \
+  YOLOv8-BeyondEarth/data/weights/yolo26n.pt
+tar cf  sherlock_upload/boulder2024.tar data_prieur/boulder2024
+```
+1. **Upload** both files via OnDemand **Files** (Dashboard → Files → Home Directory → Upload).
+2. **Shell** (Dashboard → Clusters → Sherlock Shell Access) — a login node; extract + build env + submit:
+```bash
+mkdir -p ~/BoulderNet && cd ~/BoulderNet
+tar xzf ~/bnet_code.tgz          # -> YOLOv8-BeyondEarth/{scripts,sherlock,src,data/weights}
+tar xf  ~/boulder2024.tar        # -> data_prieur/boulder2024
+ln -sf YOLOv8-BeyondEarth/data/weights/yolo26n.pt YOLOv8-BeyondEarth/yolo26n.pt   # AMP self-check
+bash YOLOv8-BeyondEarth/sherlock/setup_sherlock_env.sh    # pip on the login node; prints cuda_available False here (fine)
+sbatch --export=ALL,EPOCHS=3,VARIANT=obb,NAME=probe YOLOv8-BeyondEarth/sherlock/train_h.sbatch  # time it
+sbatch YOLOv8-BeyondEarth/sherlock/train_h.sbatch         # full run once the probe's per-epoch × 200 fits --time
+```
+3. **Monitor:** OnDemand **Jobs → Active Jobs**, or `squeue -u $USER` / `tail -f YOLOv8-BeyondEarth/logs/*.out` in the Shell.
+4. **Download** results via **Files**: browse to `$SCRATCH/bouldernet/h_training/h_full_{seg,obb}/weights/best.pt` and Download.
+Note: env build runs on the login node, so its smoke prints `cuda_available False` — expected; the
+real GPU check is in the sbatch job log (`nvidia-smi` at the top).
