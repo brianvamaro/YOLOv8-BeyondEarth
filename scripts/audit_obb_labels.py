@@ -11,8 +11,6 @@ split. Saves figures to docs/figures/solutionH/. Run: python scripts/audit_obb_l
 import os
 import sys
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 from shapely.geometry import Polygon
@@ -88,6 +86,9 @@ def overlay(split, n_examples=6):
 
 
 def main():
+    import matplotlib
+    matplotlib.use("Agg")                  # headless save, standalone only (not on import -> lets
+                                           # the notebook keep the inline backend for figure capture)
     os.makedirs(FIGDIR, exist_ok=True)
     split = sys.argv[1] if len(sys.argv) > 1 else "train"
     print(f"auditing split={split} ...")
