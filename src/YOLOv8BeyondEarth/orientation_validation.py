@@ -577,6 +577,39 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
     return remask
 
 
+def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):
+    """Solution H-obb orientation readout. Tile ``img`` exactly like :func:`detect_sam2_mask_sets`
+    (non-overlapping ``slice_size`` windows, each upscaled to ``imgsz``, same ``conf``), run the
+    trained **OBB** model per tile, and read each detection's long-axis azimuth **straight from the
+    predicted oriented box** (``result.obb.xyxyxyxy`` → :func:`orientation.obb_angle180`). There is
+    NO mask or polygon anywhere in the angle path — the whole point of the OBB arm.
+
+    Returns ``[angle180, aspect, diameter_px]`` in the same geographic frame as the mask readouts
+    (North=0, East=90, [0,180)), so the diagonal-fraction is directly comparable to YOLO's and G's
+    numbers on the same scene. ``diameter_px`` is the box's equivalent-area diameter in native px
+    (``2*sqrt(w*h/pi)`` from ``obb.xywhr``); use it with the elongated + well-resolved subset cut.
+    """
+    from .orientation import obb_angle180
+    H, W = img.shape
+    rows = []
+    for y0 in range(0, H - slice_size + 1, slice_size):
+        for x0 in range(0, W - slice_size + 1, slice_size):
+            sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
+            rgb = np.stack([sl] * 3, axis=-1)
+            r0 = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device)[0]
+            if r0.obb is None or len(r0.obb) == 0:
+                continue
+            corners = r0.obb.xyxyxyxy.cpu().numpy()      # (n, 4, 2) (col,row) in slice coords
+            wh = r0.obb.xywhr.cpu().numpy()[:, 2:4]       # (n, 2) w,h in native slice px
+            for k in range(len(corners)):
+                ang, asp = obb_angle180(corners[k])
+                if not np.isfinite(ang):
+                    continue
+                dpx = 2.0 * np.sqrt(max(float(wh[k, 0] * wh[k, 1]), 0.0) / np.pi)
+                rows.append((ang, asp, dpx))
+    return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+
+
 def angles_from_moments(masks):
     """Orientation from **weighted second moments** — no contour, no ellipse fit, and no threshold
     requirement, so it reads binary and soft (float-probability) masks with the SAME estimator.

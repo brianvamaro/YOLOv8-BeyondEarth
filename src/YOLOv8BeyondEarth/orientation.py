@@ -155,6 +155,30 @@ def attach_orientations(gdf, res, n_workers=8):
     return df
 
 
+def obb_angle180(corners):
+    """Long-axis azimuth + aspect of an oriented bounding box, from its 4 corners.
+
+    ``corners`` is a ``(4, 2)`` array of ``(col, row)`` image-pixel coordinates (e.g. ultralytics
+    ``result.obb.xyxyxyxy[k]``). Returns ``(angle180, aspect_ratio)`` in the SAME geographic
+    convention as :func:`ellipse_angle180` — azimuth from North (up), clockwise, [0, 180); North=0,
+    East=90 — via the ``y = -row`` flip used throughout the orientation-validation code (image rows
+    increase downward, so North is ``-row``). The long-axis direction ``(dcol, drow)`` maps to
+    ``angle180 = atan2(dcol, -drow) mod 180``. This is the Solution-H OBB orientation readout: the
+    angle comes straight from the predicted box, with NO mask/polygon step in the path.
+    """
+    c = np.asarray(corners, dtype=float)
+    e1 = c[1] - c[0]                       # consecutive edges of the rotated rectangle
+    e2 = c[2] - c[1]
+    l1, l2 = float(np.hypot(*e1)), float(np.hypot(*e2))
+    long_e, short_len, long_len = (e1, l2, l1) if l1 >= l2 else (e2, l1, l2)
+    if long_len <= 0:
+        return np.nan, np.nan
+    dcol, drow = float(long_e[0]), float(long_e[1])
+    angle180 = np.degrees(np.arctan2(dcol, -drow)) % 180.0
+    aspect = long_len / short_len if short_len > 0 else np.nan
+    return angle180, aspect
+
+
 def grid_fraction(angle180, tol_deg=10.0):
     """Fraction of long-axis azimuths within ``tol_deg`` of a grid direction (0/90/180).
 
