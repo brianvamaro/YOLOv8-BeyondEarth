@@ -66,8 +66,9 @@ def train_one(variant, args):
         mask_ratio=args.mask_ratio,  # seg-only; =1 (Prieur, no mask downsampling) OOMs a 24GB card
                                      # on dense tiles -> use 4 (16x less mask-loss mem) if no big GPU
         max_det=2000,
-        # augmentation (recipe): NO rotation (R-A deferred)
-        degrees=0.0,
+        # augmentation (recipe): rotation aug via --degrees (R-A). degrees=0 = original recipe;
+        # degrees=180 breaks the OBB head's axis-aligned collapse (the cardinal-prior salvage).
+        degrees=args.degrees,
         translate=0.1,
         scale=0.5,
         shear=0.0,
@@ -93,6 +94,9 @@ def main():
     p.add_argument("--no-amp", dest="amp", action="store_false",
                    help="disable AMP (use for clean reruns; amp=True diverged to NaN when the offline "
                         "node skipped the AMP self-check)")
+    p.add_argument("--degrees", type=float, default=0.0,
+                   help="rotation-aug range (R-A). 0=original recipe; 180 breaks the OBB head's "
+                        "axis-aligned collapse (the H-obb cardinal-prior salvage)")
     p.add_argument("--device", default="0")
     p.add_argument("--project", default=None, help="output dir (default local data/h_training; set to $SCRATCH on a cluster)")
     p.add_argument("--name", default="h")

@@ -63,7 +63,9 @@ sed -i "s|^path:.*|path: $REPO/data_prieur/boulder2024|" \
 # AMP=0 disables mixed precision (numerically stable; the first obb run diverged to NaN with AMP on,
 # because the offline node skipped the AMP self-check). Default AMP=1 (on).
 AMP_FLAG=""; [ "${AMP:-1}" = "0" ] && AMP_FLAG="--no-amp"
+DEGREES="${DEGREES:-0}"      # DEGREES=180 = R-A rotation aug (H-obb cardinal-prior salvage)
 python scripts/train_h.py --variant "$VARIANT" --epochs "$EPOCHS" --batch "$BATCH" \
-    --imgsz "$IMGSZ" --mask-ratio "$MASK_RATIO" $AMP_FLAG --project "$OUT" --name "$NAME" --device 0
+    --imgsz "$IMGSZ" --mask-ratio "$MASK_RATIO" --degrees "$DEGREES" $AMP_FLAG \
+    --project "$OUT" --name "$NAME" --device 0
 
 echo "done -- runs in $OUT/${NAME}_{seg,obb}; scp weights/best.pt back to the laptop."
