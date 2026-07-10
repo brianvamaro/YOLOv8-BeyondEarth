@@ -1,6 +1,6 @@
 """H-seg orientation via its MASKS (same ellipse readout as YOLO-seg). Does YOLO26-seg's better
-prototype module (mask mAP 0.47->0.62) reduce the diagonal lock vs stock YOLOv8m-seg (0.428)?
-Also H-seg's §4c-null (uniform-truth field). Caches CSVs to data/solutionH/."""
+prototype module (mask mAP50 0.467->0.569, same-protocol val) reduce the diagonal lock vs stock
+YOLOv8m-seg (0.428)? Also H-seg's §4c-null (uniform-truth field). Caches CSVs to data/solutionH/."""
 import sys, numpy as np, pandas as pd, rasterio
 sys.path.insert(0, "YOLOv8-BeyondEarth/src")
 from ultralytics import YOLO
@@ -31,5 +31,5 @@ print("\n--- H-seg §4c-null (uniform-truth field) ---")
 fimg, truth = render_boulder_field(size=2048, n=1600, diam_px=(10, 26), aspect=(1.6, 3.0), sun_az_deg=255.0, seed=1)
 dfn = detect_orientations(YOLO(models["H-seg (yolo26m)"], task="segment"), fimg, slice_size=256, imgsz=1024, conf=0.10)
 dfn.to_csv(f"{OUT}/seg_null_h.csv", index=False)
-print(line("truth (uniform)", truth.rename(columns={}).assign(aspect=2.0)))
+print(line("truth (uniform)", truth.assign(aspect=2.0)))
 print(line("H-seg OUT on truth", dfn))

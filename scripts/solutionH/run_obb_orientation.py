@@ -8,9 +8,9 @@ Produces (in data/solutionH/, gitignored):
                           for the boulder+box overlays
 
 Heavy GPU work lives here; the notebook loads these and only renders. Run from the repo root:
-  conda run -n bouldernet python YOLOv8-BeyondEarth/data/solutionH/run_obb_orientation.py
+  conda run -n bouldernet python YOLOv8-BeyondEarth/scripts/solutionH/run_obb_orientation.py
 """
-import sys, numpy as np, pandas as pd, rasterio
+import sys, numpy as np, rasterio
 sys.path.insert(0, "YOLOv8-BeyondEarth/src")
 from ultralytics import YOLO
 from YOLOv8BeyondEarth.orientation_validation import detect_obb_angles
