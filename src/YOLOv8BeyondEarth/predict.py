@@ -67,10 +67,8 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         # per-box list of slice-resolution masks (or None to drop that detection).
         masks_np = remask_fn(image, boxes_np[:, :4])
     else:
-        if has_mask:
-            result_masks = prediction_result.masks.data[conf_mask]
-        else:
-            result_masks = torch.tensor([[] for _ in range(result_boxes.size()[0])])
+        # has_mask=False is rejected by the public entry points (polygon pipeline needs masks)
+        result_masks = prediction_result.masks.data[conf_mask]
         # Threshold the whole mask batch in one GPU op (equivalent to the old per-mask
         # ``bool_mask[bool_mask>=0.5]=1; [<0.5]=0``) before moving to CPU. Kept as float32 {0.,1.}
         # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
@@ -177,6 +175,11 @@ def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_
     Note that the bboxes (in absolute coordinates) are calculated from the bounds of the polygons after the
     predictions are computed.
     """
+    if not has_mask:
+        raise NotImplementedError(
+            "has_mask=False (detection-only models) is not supported: the pipeline is polygon-based, "
+            "and without masks every detection would be silently dropped by the area gate. "
+            "Use a -seg model.")
 
     prediction_results = detection_model.model(image, imgsz=detection_model.image_size, verbose=False,
                                                device=detection_model.device)
@@ -220,6 +223,9 @@ def get_sliced_prediction(in_raster,
         confidence_threshold: float
             minimum confidence threshold, values below will be automatically filtered away.
         has_mask: bool
+            Whether the model produces masks. Must be ``True`` unless ``remask_fn`` is given
+            (the polygon pipeline needs a mask source) — ``False`` without a ``remask_fn``
+            raises ``NotImplementedError``.
         interim_dir: str or Path()
         slice_size: int
             Height and width of each slice. Defaults to ``256``.
@@ -278,6 +284,13 @@ def get_sliced_prediction(in_raster,
         ``(gdf, gdf_nms)`` — a tuple of GeoDataFrames: all kept detections and the post-NMS
         subset. ``gdf_nms`` is ``None`` when ``postprocess=False``.
     """
+
+    if not has_mask and remask_fn is None:
+        raise NotImplementedError(
+            "has_mask=False (detection-only models) is not supported without a remask_fn: the "
+            "pipeline is polygon-based, and without masks every detection would be silently dropped "
+            "by the area gate. Use a -seg model, or supply remask_fn (e.g. sam2_remasker) to build "
+            "masks from the boxes.")
 
     # convert in_raster tif file to png file
     in_raster = Path(in_raster)
