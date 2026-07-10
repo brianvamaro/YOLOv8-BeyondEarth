@@ -39,7 +39,7 @@ def train_one(variant, args):
     project = args.project or str(PROJECT)     # override to $SCRATCH on a cluster
     print(f"\n=== training H-{variant} ({task}) | weights={weights} | data={DATA[variant].name} "
           f"| epochs={args.epochs} batch={args.batch} imgsz={args.imgsz} fraction={args.fraction} "
-          f"| project={project} name={name} ===")
+          f"| amp={args.amp} degrees={args.degrees} | project={project} name={name} ===")
     return model.train(
         data=str(DATA[variant]),
         task=task,

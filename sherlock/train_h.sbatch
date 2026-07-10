@@ -64,6 +64,7 @@ sed -i "s|^path:.*|path: $REPO/data_prieur/boulder2024|" \
 # because the offline node skipped the AMP self-check). Default AMP=1 (on).
 AMP_FLAG=""; [ "${AMP:-1}" = "0" ] && AMP_FLAG="--no-amp"
 DEGREES="${DEGREES:-0}"      # DEGREES=180 = R-A rotation aug (H-obb cardinal-prior salvage)
+echo "resolved: AMP=${AMP:-1} amp_flag='${AMP_FLAG}' DEGREES=$DEGREES"   # self-report so the log confirms the flag took
 python scripts/train_h.py --variant "$VARIANT" --epochs "$EPOCHS" --batch "$BATCH" \
     --imgsz "$IMGSZ" --mask-ratio "$MASK_RATIO" --degrees "$DEGREES" $AMP_FLAG \
     --project "$OUT" --name "$NAME" --device 0

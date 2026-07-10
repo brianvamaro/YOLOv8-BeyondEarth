@@ -36,7 +36,8 @@ fix for each. Read this **before** launching a new training run so you don't red
 | 5 | `CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU` every step; ~15 min/epoch | `batch=16` at imgsz 1024 saturates the 24 GB 3090 (~23 G); assigner spills to CPU | `batch=8` (leaves headroom; assigner stays on GPU) |
 | 6 | seg OOMs even at batch 1 / **even on a 48 GB card**; `single_mask_loss` tries to alloc ~8 GB | `mask_ratio=1` builds full-res `[n_inst,1024,1024]` mask tensors; dense tiles have 100s–1000s of instances | `mask_ratio=4` (16× less mask-loss memory); fits 24 GB at batch 8 |
 | 7 | Job dies in ~15 s, exit 1, log path "not found" | SLURM opens `--output=logs/...` (relative to submit dir) **before** the script's `mkdir -p logs` | `mkdir -p ~/BoulderNet/logs` **before** `sbatch`; submit from `~/BoulderNet` |
-| 8 | `cls_loss → ~250`, val mAP → ~0, `EMA contains NaN/Inf`, run diverges late | `amp=True` + skipped offline AMP self-check = numerically unstable for this model | `--no-amp` (`AMP=0`) for definitive runs; `best.pt` still captures the pre-collapse peak |
+| 8 | `cls_loss → ~250`, val mAP → ~0, `EMA contains NaN/Inf`, run diverges **late** (slow erosion over ~150 ep) | `amp=True` + skipped offline AMP self-check = numerically unstable for this model | `--no-amp` (`AMP=0`) for definitive runs; `best.pt` still captures the pre-collapse peak |
+| 9 | **Sudden single-epoch NaN** (all losses `nan` in one epoch) then a hard OOM crash, on the `DEGREES=180` R-A obb arm; `TaskAlignedAssigner ... using CPU` spamming beforehand (job 33330690, ep37→38) | `batch=8` + rotation aug builds very dense tiles (a 1649-instance batch seen); the assigner OOMs → CPU-spills → a corrupt/degenerate rotated-OBB target yields a NaN grad in one step, then OOM-crashes the next. **Not AMP** — verified `amp: false` in `args.yaml`; this is memory, distinct from #8's slow AMP erosion | Give it headroom so the assigner never spills: `--constraint='GPU_MEM:48GB'` (keeps batch 8, comparable to the degrees=0 arm) **or** `BATCH=4`; add `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. If it still NaNs with *no* assigner-CPU warnings → the cause is rotation-aug OBB target degeneracy, not memory (address separately) |
 
 ## Config decisions & their trade-offs
 - **`mask_ratio=1` (Prieur, faithful) is not viable here.** It OOMs even on 48 GB because the densest
@@ -59,6 +60,7 @@ fix for each. Read this **before** launching a new training run so you don't red
 - Available `GPU_MEM` features: `11GB 12GB 16GB 24GB 32GB 48GB 80GB` (`sinfo -p gpu -o "%f" | tr ',' '\n' | grep GPU_MEM | sort -u`).
 - `squeue -u $USER` (`PD`=queued, `R`=running) · `scancel <JOBID>` · `scancel -u $USER` (all).
 - Which GPU a job got: `head -5 ~/BoulderNet/logs/h-retrain-<JOBID>.out` (sbatch logs `nvidia-smi`).
+- **Verify a flag actually took** (don't assume from the `--export`): `grep -i '^amp:' $SCRATCH/bouldernet/h_training/<name>_<variant>/args.yaml` — ultralytics writes the *resolved* args there. The sbatch also now echoes `resolved: AMP=... amp_flag=...` near the top of the log. An `AMP: running ... checks` line means AMP was **on** (only runs when `amp=True`).
 - Live GPU util: `srun --jobid=<JOBID> --overlap --pty nvidia-smi`.
 - Logs land in `~/BoulderNet/logs/` (relative to the submit dir), **not** `YOLOv8-BeyondEarth/logs/`.
 - Outputs → `$SCRATCH/bouldernet/h_training/<name>_<variant>/weights/best.pt`; download via OnDemand Files.
