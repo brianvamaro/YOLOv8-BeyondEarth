@@ -86,7 +86,8 @@ def bboxes_to_shp(gdf, out_shp):
 
 def outlines_to_shp(gdf, out_shp):
     gdf_copy = gdf.rename(columns={"category_id": "cat_id", "category_name": "cat_name", "is_within_slice": "isin_slice"})
-    gdf_copy.drop(columns=['bbox','polygon']).to_file(out_shp)
+    # errors="ignore": fused catalogs (fusion.fuse_predictions) may not carry bbox/polygon
+    gdf_copy.drop(columns=['bbox', 'polygon'], errors="ignore").to_file(out_shp)
 
 def close_contour(contour):
     if not np.array_equal(contour[0], contour[-1]):

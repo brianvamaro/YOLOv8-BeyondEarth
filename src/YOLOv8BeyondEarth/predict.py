@@ -23,7 +23,7 @@ from shptools_BOULDERING import shp
 
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
                   min_area_threshold, downscale_pred, contour_method="skimage", executor=None,
-                  remask_fn=None, image=None):
+                  remask_fn=None, image=None, coord_scale=1.0):
     """Convert a single ultralytics Result (one slice) into the detections DataFrame.
 
     This is the per-slice core extracted from ``YOLOv8`` so the model can be called on a
@@ -49,6 +49,12 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     e.g. the SAM2 box-prompt re-masker from :func:`YOLOv8BeyondEarth.orientation_validation.sam2_remasker`.
     ``image`` is the slice the boxes are in (needed to prompt the re-masker). Default ``None`` =
     original YOLO-prototype masks (bit-identical).
+
+    ``coord_scale``: multiplier applied to slice-frame polygon coordinates *before* the shift to
+    full-image coordinates. Used by the streamed-SR path (Goal 3): a slice upscaled ×f before
+    inference yields polygons in SR px, and ``coord_scale = 1/f`` maps them back onto the native
+    grid that ``shift_amount`` lives on. Edge logic runs in the (SR) slice frame, before scaling.
+    Default ``1.0`` = untouched (bit-identical).
     """
     extract_polygon = binary_mask_to_polygon_cv if contour_method == "cv2" else binary_mask_to_polygon
     shift_x = shift_amount[0]
@@ -110,6 +116,8 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
 
             # if at edge set score to a low value
             score = prediction[4] if is_polygon_within_slice else 0.10
+            if coord_scale != 1.0:   # streamed SR: SR px -> native px (shift is in native px)
+                polygon_slice = polygon_slice * coord_scale
             shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
             category_name = detection_model.category_mapping[str(category_id)]
             return (score, shifted_polygon, category_id, category_name, is_polygon_within_slice)
@@ -209,7 +217,8 @@ def get_sliced_prediction(in_raster,
                           output_format: str = "shp",
                           n_workers: int = None,
                           remask_fn=None,
-                          mask_tag: str = None):
+                          mask_tag: str = None,
+                          sr_factor: int = 1):
     """
     Function for slice image + get predicion for each slice + combine predictions in full image.
 
@@ -279,6 +288,16 @@ def get_sliced_prediction(in_raster,
         mask_tag: str or None
             Inserted into the output filenames (e.g. ``"sam2"`` -> ``...-mask-sam2.gpkg``) so a
             re-masked layer does not overwrite the plain YOLO one. Default ``None`` = no tag.
+        sr_factor: int
+            Streamed super-resolution (Goal 3's SR arm). ``sr_factor=f > 1`` slices the *native*
+            raster at ``slice_size / f`` px, Lanczos-upscales each slice ×``f`` to ``slice_size``
+            **inside the batch loop** (the ×f image is never materialized — a ×2 NAC scene would
+            be ~1.2e9 px), and maps polygons back to the native grid. ``slice_size`` keeps its
+            meaning of *model-input* slice px (matching the ``(slice_size, sr_factor)`` fusion
+            keys), so ``slice_size=256, sr_factor=2`` = the E-arm's "slice 256 SR px, 128-native
+            footprint" at the trained 4× internal resize. ``slice_size`` must be divisible by
+            ``sr_factor``. Output filenames carry ``-ss-256sr2-``. Default ``1`` = bit-identical
+            native path.
 
     Returns:
         ``(gdf, gdf_nms)`` — a tuple of GeoDataFrames: all kept detections and the post-NMS
@@ -291,6 +310,14 @@ def get_sliced_prediction(in_raster,
             "pipeline is polygon-based, and without masks every detection would be silently dropped "
             "by the area gate. Use a -seg model, or supply remask_fn (e.g. sam2_remasker) to build "
             "masks from the boxes.")
+
+    sr_factor = int(sr_factor)
+    if sr_factor < 1:
+        raise ValueError(f"sr_factor must be >= 1, got {sr_factor}")
+    if slice_size % sr_factor != 0:
+        raise ValueError(f"slice_size ({slice_size}) must be divisible by sr_factor "
+                         f"({sr_factor}) — the native slicing window is slice_size / sr_factor")
+    native_slice = slice_size // sr_factor   # window on the native grid; == slice_size when sr=1
 
     # convert in_raster tif file to png file
     in_raster = Path(in_raster)
@@ -310,8 +337,8 @@ def get_sliced_prediction(in_raster,
         image=out_png.as_posix(),  # need to be path to
         output_file_name=interim_file_name,  # ADDED OUTPUT FILE NAME TO (OPTIONALLY) SAVE SLICES
         output_dir=interim_dir,  # ADDED INTERIM DIRECTORY TO (OPTIONALLY) SAVE SLICES
-        slice_height=slice_size,
-        slice_width=slice_size,
+        slice_height=native_slice,
+        slice_width=native_slice,
         overlap_height_ratio=overlap_height_ratio,
         overlap_width_ratio=overlap_width_ratio,
         out_ext=".png",  # FORMAT OF (OPTIONALLY) SAVED SLICES
@@ -332,12 +359,21 @@ def get_sliced_prediction(in_raster,
         # time). Per-slice geometry is unchanged; only the model call is grouped.
         for start in tqdm(range(0, num_slices, batch_size), total=(num_slices + batch_size - 1) // batch_size):
             batch_images = list(slice_images[start:start + batch_size])
+            if sr_factor > 1:
+                # Streamed SR: upscale each native slice to slice_size (SR px) just before
+                # inference — same Lanczos kernel as the whole-crop SR rasters it must be
+                # equivalent to (prep_de_crops.py). shift_amounts stay on the native grid;
+                # coord_scale below maps polygons back onto it.
+                batch_images = [cv2.resize(img, (slice_size, slice_size),
+                                           interpolation=cv2.INTER_LANCZOS4)
+                                for img in batch_images]
             prediction_results = detection_model.model(batch_images, imgsz=detection_model.image_size,
                                                        verbose=False, device=detection_model.device)
             for j, prediction_result in enumerate(prediction_results):
                 df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
                                    slice_size, min_area_threshold, downscale_pred, contour_method,
-                                   executor=executor, remask_fn=remask_fn, image=batch_images[j])
+                                   executor=executor, remask_fn=remask_fn, image=batch_images[j],
+                                   coord_scale=1.0 / sr_factor)
                 if df.shape[0] > 0:
                     frames.append(df)
     finally:
@@ -358,7 +394,7 @@ def get_sliced_prediction(in_raster,
     in_meta = raster_metadata.get_profile(in_raster)
     gpd.GeoDataFrame(geometry=gdf_true_footprint.geometry.boundary.values, crs=in_meta["crs"].to_wkt()).to_file(
         tmp_dir / "true-footprint-as-a-line.shp")
-    gdf_line_buffer = shp.buffer(tmp_dir / "true-footprint-as-a-line.shp", slice_size * 0.10 * in_res,
+    gdf_line_buffer = shp.buffer(tmp_dir / "true-footprint-as-a-line.shp", native_slice * 0.10 * in_res,
                                  (tmp_dir / "footprint-buffer.shp"))
 
     # Flag boulders touching the footprint-edge buffer. We only need the boolean flag, not the
@@ -382,8 +418,9 @@ def get_sliced_prediction(in_raster,
 
     # save predictions before post-processing (include if downscaling is done or not...)
     ext = ".gpkg" if output_format == "gpkg" else ".shp"
-    bbox_filename = in_raster.stem + "-predictions-ct-" + str(int(confidence_threshold * 100)).zfill(3) + "-ss-" + str(
-        slice_size) + "-is-" + str(inference_size) + "-ov-" + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox" + ext
+    ss_str = str(slice_size) if sr_factor == 1 else f"{slice_size}sr{sr_factor}"
+    bbox_filename = in_raster.stem + "-predictions-ct-" + str(int(confidence_threshold * 100)).zfill(3) + "-ss-" + \
+        ss_str + "-is-" + str(inference_size) + "-ov-" + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox" + ext
     mask_filename = bbox_filename.replace("-bbox" + ext, "-mask" + ext)
 
     if downscale_pred:
@@ -423,3 +460,64 @@ def get_sliced_prediction(in_raster,
         return gdf, gdf_nms
     else:
         return gdf, None
+
+
+def get_multiscale_prediction(in_raster,
+                              detection_model=None,
+                              scales=(512, 256, (256, 2)),
+                              rule: str = "scale_aware",
+                              cluster_thr: float = None,
+                              metric: str = "diou",
+                              bands=None,
+                              output_dir=None,
+                              output_format: str = "gpkg",
+                              **kwargs):
+    """Goal 3: run ``get_sliced_prediction`` once per scale and fuse into one catalog.
+
+    ``scales`` uses the same keys as :func:`YOLOv8BeyondEarth.fusion.fuse_predictions`: an int
+    is a native slice size, a ``(slice_size, sr_factor)`` tuple is a streamed-SR arm. The
+    default is the plan's ladder {512 native, 256 native, SR×2 @ 128-native footprint}
+    (`docs/goal3_multiscale_fusion_plan.md`). Per-scale passes run with their own intra-scale
+    NMS on and per-scale file output off (``save_prenms=False, save_bbox=False``); the fused
+    mask layer is the one file written, as ``<stem>-predictions-fused-<rule>-...-mask.gpkg``,
+    with the suppression audit table next to it as ``...-audit.csv``.
+
+    ``cluster_thr=None`` uses the calibrated ``fusion.DEFAULT_CLUSTER_THR`` (a DIoU value —
+    pass an explicit threshold if ``metric="iou"``). ``bands``/``rule``/``metric`` are passed
+    through to ``fuse_predictions`` (``native_res`` for the bands rule is read off the raster).
+    Remaining ``**kwargs`` (confidence_threshold, inference_size, overlap ratios,
+    contour_method, batch_size, ...) go to every per-scale ``get_sliced_prediction`` call —
+    per-scale parameter tuning is deliberately not offered (plan §Open risks: population-shift
+    confound magnet).
+
+    Returns ``(fused, audit, per_scale)`` — the fused GeoDataFrame (provenance columns
+    included), the audit DataFrame, and the raw ``{scale: gdf_nms}`` dict for validation work.
+    """
+    from YOLOv8BeyondEarth.fusion import fuse_predictions, DEFAULT_CLUSTER_THR
+
+    in_raster = Path(in_raster)
+    output_dir = Path(output_dir)
+    for forbidden in ("slice_size", "sr_factor", "save_prenms", "save_bbox", "postprocess"):
+        if forbidden in kwargs:
+            raise ValueError(f"{forbidden} is owned by the wrapper — set scales=... instead")
+
+    per_scale = {}
+    for key in scales:
+        slice_size, sr_factor = (key if isinstance(key, (tuple, list)) else (key, 1))
+        _, gdf_nms = get_sliced_prediction(
+            in_raster, detection_model, slice_size=int(slice_size), sr_factor=int(sr_factor),
+            output_dir=output_dir, output_format=output_format,
+            save_prenms=False, save_bbox=False, postprocess=True, **kwargs)
+        per_scale[key] = gdf_nms
+
+    thr = DEFAULT_CLUSTER_THR if cluster_thr is None else cluster_thr
+    native_res = raster_metadata.get_resolution(in_raster)[0]
+    fused, audit = fuse_predictions(per_scale, cluster_thr=thr, metric=metric, rule=rule,
+                                    bands=bands, native_res=native_res)
+
+    ext = ".gpkg" if output_format == "gpkg" else ".shp"
+    scales_str = "-".join(str(s) if isinstance(s, int) else f"{s[0]}sr{s[1]}" for s in scales)
+    out_mask = output_dir / (in_raster.stem + f"-predictions-fused-{rule}-{scales_str}-mask" + ext)
+    outlines_to_shp(fused, out_mask)
+    audit.to_csv(out_mask.with_suffix("").as_posix() + "-audit.csv", index=False)
+    return fused, audit, per_scale
