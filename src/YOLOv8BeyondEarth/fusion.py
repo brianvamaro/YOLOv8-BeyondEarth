@@ -179,7 +179,7 @@ def _priority_order(pool, rule, in_band=None):
 # --- the main entry point -----------------------------------------------------------------------
 
 def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule="scale_aware",
-                     bands=None, native_res=None):
+                     bands=None, native_res=None, engulf_thr=None):
     """Fuse per-scale detection sets into one catalog. Returns ``(fused, audit)``.
 
     Parameters
@@ -196,6 +196,18 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
         equivalent-diameter interval in **native px**. Boundaries are ours to derive (Liu & Fa's
         bins are theirs — plan §Open risks).
     native_res : map units per native px — required for ``rule="bands"`` size banding.
+    engulf_thr : None | float in (0, 1] — opt-in fragment-consolidation post-pass (phase-3
+        finding, 2026-07-10). A partial mask of a big boulder (fine arm sees only a piece; the
+        footprint wall) sits almost wholly *inside* the whole-boulder mask but at DIoU far below
+        any sane cluster threshold (measured: poly containment median 0.99, DIoU median 0.14 on
+        the HiRISE dev crop, 84% of large-band cross-scale near-pairs) — the double-count mode
+        the duplicate-rate audit flagged at 8-25% in the >=10 px bands. With ``engulf_thr``
+        set, kept members whose polygon intersection / own polygon area >= the threshold w.r.t.
+        a larger kept member are suppressed into that member (container wins, regardless of
+        rule priority: at the large end whole masks are trustworthy and fragments are
+        footprint-wall artifacts). Suppressions land in the audit with ``engulfed=True``.
+        Default None = off (phase-1 pinned behaviour). Use :func:`matched_recall` with the same
+        ``engulf_thr`` so consolidated fragments count as represented.
 
     Returns
     -------
@@ -232,6 +244,11 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
     order = _priority_order(pool, rule, in_band=in_band)
     keeper, pair_val = _greedy_suppress(n, order, ii, jj, vals)
 
+    if engulf_thr is not None:
+        keeper, pair_val, engulfed = _engulf_pass(pool, keeper, pair_val, engulf_thr)
+    else:
+        engulfed = np.zeros(n, dtype=bool)
+
     kept_mask = keeper == -1
     fused = pool.loc[kept_mask].copy()
     counts = np.bincount(keeper[keeper >= 0], minlength=n)
@@ -248,13 +265,62 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
         "keeper_scale_key": scale_of[keeper[~kept_mask]],
         "metric": pair_val[~kept_mask],
         "cross_scale": scale_of[keeper[~kept_mask]] != dropped["scale_key"].to_numpy(),
+        "engulfed": engulfed[~kept_mask],
     })
     return fused, audit
 
 
+def _poly_containment(geoms_small, geoms_big):
+    """Vectorized intersection area / area of the first (smaller) geometry."""
+    inter = shapely.area(shapely.intersection(geoms_small, geoms_big))
+    a = shapely.area(geoms_small)
+    return np.where(a > 0, inter / a, 0.0)
+
+
+def _engulf_pass(pool, keeper, pair_val, engulf_thr):
+    """Fragment-consolidation post-pass: among KEPT members, suppress any whose polygon is
+    ``engulf_thr``-contained in a larger kept member's polygon (container wins). Greedy in
+    descending polygon area, so a suppressed fragment never suppresses others and chains
+    (fragment in fragment in whole) resolve to the outermost container."""
+    if not (0 < engulf_thr <= 1):
+        raise ValueError("engulf_thr must be in (0, 1]")
+    kept_idx = np.flatnonzero(keeper == -1)
+    geoms = pool.geometry.values
+    areas = shapely.area(geoms)
+    kg = geoms[kept_idx]
+    tree = shapely.STRtree(kg)
+    ai, bi = tree.query(kg, predicate="intersects")
+    off_diag = ai != bi
+    ai, bi = ai[off_diag], bi[off_diag]
+    engulfed = np.zeros(len(pool), dtype=bool)
+    if len(ai) == 0:
+        return keeper, pair_val, engulfed
+    # orient pairs small -> big, dedupe mirrored copies
+    small_first = areas[kept_idx[ai]] <= areas[kept_idx[bi]]
+    si = np.where(small_first, ai, bi)
+    bg = np.where(small_first, bi, ai)
+    uniq = np.unique(np.stack([si, bg], axis=1), axis=0)
+    si, bg = uniq[:, 0], uniq[:, 1]
+    contain = _poly_containment(kg[si], kg[bg])
+    sel = contain >= engulf_thr
+    keeper = keeper.copy()
+    pair_val = pair_val.copy()
+    # process containers in descending area so chains resolve to surviving containers
+    order = np.argsort(-areas[kept_idx[bg[sel]]], kind="stable")
+    for s, b, c in zip(kept_idx[si[sel]][order], kept_idx[bg[sel]][order],
+                       contain[sel][order]):
+        if keeper[b] == -1 and keeper[s] == -1 and s != b:
+            keeper[s] = b
+            pair_val[s] = c
+            engulfed[s] = True
+            # members previously suppressed into the fragment follow it to the container
+            keeper[keeper == s] = b
+    return keeper, pair_val, engulfed
+
+
 def _empty_audit():
     return pd.DataFrame(columns=["pool_index", "scale_key", "src_index", "score", "keeper",
-                                 "keeper_scale_key", "metric", "cross_scale"])
+                                 "keeper_scale_key", "metric", "cross_scale", "engulfed"])
 
 
 # --- validation helpers (the standing gates; see plan §Validation) -------------------------------
@@ -265,10 +331,14 @@ def equivalent_diameter_px(gdf, native_res):
     return np.sqrt(4.0 * gdf.geometry.area.to_numpy(dtype=float) / np.pi) / native_res
 
 
-def matched_recall(reference, fused, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou"):
+def matched_recall(reference, fused, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou",
+                   engulf_thr=None):
     """Parity gate: fraction of ``reference`` detections *represented* in ``fused`` — i.e. having
     any fused detection at metric >= cluster_thr (representation, not verbatim survival: a
     baseline member may be replaced or consolidated). Must be 1.0 for the 256-only baseline.
+    When the fusion ran with ``engulf_thr``, pass the same value here: a reference fragment is
+    also *represented* by a fused polygon that contains ``engulf_thr`` of it (the consolidation
+    case — the fragment's boulder is in the catalog, as its whole).
     Returns ``(recall, unmatched_positional_indices)`` — a non-empty second element on the
     baseline is a gate failure and points at the offending detections."""
     if len(reference) == 0:
@@ -283,7 +353,12 @@ def matched_recall(reference, fused, cluster_thr=DEFAULT_CLUSTER_THR, metric="di
     matched = np.zeros(len(reference), dtype=bool)
     if len(ri) > 0:
         vals = pairwise_box_metric(rb[ri], fb[fi], metric=metric)
-        matched[np.unique(ri[vals >= cluster_thr])] = True
+        ok = vals >= cluster_thr
+        if engulf_thr is not None:
+            contain = _poly_containment(reference.geometry.values[ri],
+                                        fused.geometry.values[fi])
+            ok |= contain >= engulf_thr
+        matched[np.unique(ri[ok])] = True
     return float(matched.mean()), np.flatnonzero(~matched)
 
 

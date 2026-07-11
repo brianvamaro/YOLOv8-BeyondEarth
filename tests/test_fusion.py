@@ -217,6 +217,57 @@ def test_bands_requires_bands_and_res():
         fuse_predictions({256: make_gdf([[0, 0, 4, 4]])}, rule="bands")
 
 
+# --- engulf pass (fragment consolidation, phase-3 finding) ----------------------------------------
+
+# The measured mode (HiRISE dev crop, 2026-07-10): a fine-arm partial mask of a big boulder sits
+# almost wholly inside the whole-boulder mask (poly containment median 0.99) but at DIoU ~0.14 —
+# below any sane cluster threshold — so DIoU clustering keeps both and the boulder is counted
+# twice. WHOLE = the coarse-arm complete mask; FRAG = the fine-arm partial, offset inside it.
+WHOLE = [0, 0, 20, 20]
+FRAG = [1, 1, 9, 9]      # fully contained, DIoU(WHOLE, FRAG) ~ -0.03
+
+
+def test_engulf_default_off_keeps_fragment_pairs():
+    gdfs = {256: make_gdf([WHOLE]), (256, 2): make_gdf([FRAG])}
+    fused, audit = fuse_predictions(gdfs)
+    assert len(fused) == 2 and len(audit) == 0  # pinned phase-1 behaviour
+
+
+def test_engulf_consolidates_fragment_into_container():
+    gdfs = {256: make_gdf([WHOLE]), (256, 2): make_gdf([FRAG])}
+    fused, audit = fuse_predictions(gdfs, engulf_thr=0.7)
+    assert len(fused) == 1
+    assert fused.iloc[0]["scale_key"] == "256"       # container wins, regardless of footprint
+    assert fused.iloc[0]["n_merged"] == 1
+    assert len(audit) == 1 and bool(audit.iloc[0]["engulfed"])
+    assert audit.iloc[0]["metric"] >= 0.7            # containment recorded, not DIoU
+    # parity: the suppressed fragment counts as represented under the engulf-aware match
+    rec_plain, _ = matched_recall(gdfs[(256, 2)], fused)
+    rec_engulf, unmatched = matched_recall(gdfs[(256, 2)], fused, engulf_thr=0.7)
+    assert rec_plain < 1.0 and rec_engulf == 1.0 and len(unmatched) == 0
+
+
+def test_engulf_chain_resolves_to_outermost_container():
+    inner = [2, 2, 6, 6]  # inside FRAG, which is inside WHOLE
+    gdfs = {512: make_gdf([WHOLE]), 256: make_gdf([FRAG]), (256, 2): make_gdf([inner])}
+    fused, audit = fuse_predictions(gdfs, engulf_thr=0.7)
+    assert len(fused) == 1 and fused.iloc[0]["scale_key"] == "512"
+    assert fused.iloc[0]["n_merged"] == 2
+    assert (audit["keeper_scale_key"] == "512").all()
+
+
+def test_engulf_leaves_side_by_side_boulders_alone():
+    # partial box overlap without mask containment must not consolidate
+    gdfs = {256: make_gdf([[0, 0, 10, 10]]), (256, 2): make_gdf([[6, 0, 14, 8]])}
+    fused, _ = fuse_predictions(gdfs, engulf_thr=0.7)
+    assert len(fused) == 2
+
+
+def test_engulf_thr_validated():
+    with pytest.raises(ValueError, match="engulf_thr"):
+        fuse_predictions({256: make_gdf([[0, 0, 4, 4]])}, engulf_thr=1.5)
+
+
 # --- validation helpers --------------------------------------------------------------------------
 
 def test_parity_gate_holds_by_construction():
