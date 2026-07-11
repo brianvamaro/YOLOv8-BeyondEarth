@@ -94,6 +94,23 @@ def close_contour(contour):
         contour = np.vstack((contour, contour[0]))
     return contour
 
+def _mask_bounds(binary_mask):
+    """Bounding box ``(y0, y1, x0, x1)`` (half-open) of the nonzero region, or ``None`` if empty.
+
+    Same bounds as ``np.nonzero(...)`` + min/max, but via ``any()`` row/column reductions and
+    ``argmax`` — no per-pixel index arrays are materialized. That scan was the single biggest
+    CPU line of the Goal-3 512 arm (26.8 s of a 128.5 s serial 4k-crop run vs find_contours'
+    1.7 s; ``data/solutionDE/profile_512_arm.py``, 2026-07-11): nonzero cost scales with
+    slice-size mask area per detection, which is exactly what the 512 arm quadruples.
+    """
+    rows = binary_mask.any(axis=1)
+    if not rows.any():
+        return None
+    cols = binary_mask.any(axis=0)
+    y0 = int(rows.argmax()); y1 = len(rows) - int(rows[::-1].argmax())
+    x0 = int(cols.argmax()); x1 = len(cols) - int(cols[::-1].argmax())
+    return y0, y1, x0, x1
+
 def binary_mask_to_polygon(binary_mask):
     """Converts a binary mask to polygon representation
     Args:
@@ -105,11 +122,11 @@ def binary_mask_to_polygon(binary_mask):
     # array, so contouring a small boulder inside a full slice-size mask wastes most of the
     # work; cropping then shifting the contour back is geometry-identical (the 0.5 isoline is
     # local to the blob). Falls back to None for an all-zero mask.
-    ys, xs = np.nonzero(binary_mask)
-    if ys.size == 0:
+    bounds = _mask_bounds(binary_mask)
+    if bounds is None:
         return None
-    y0, x0 = ys.min(), xs.min()
-    sub = binary_mask[y0:ys.max() + 1, x0:xs.max() + 1]
+    y0, y1, x0, x1 = bounds
+    sub = binary_mask[y0:y1, x0:x1]
 
     # pad mask to close contours of shapes which start and end at an edge
     padded_binary_mask = np.pad(sub, pad_width=1, mode='constant', constant_values=0)
@@ -139,11 +156,11 @@ def binary_mask_to_polygon_cv(binary_mask):
     """
     # Crop to the object's bounding box before tracing (see binary_mask_to_polygon): cheaper
     # and geometry-identical after shifting the contour back.
-    ys, xs = np.nonzero(binary_mask)
-    if ys.size == 0:
+    bounds = _mask_bounds(binary_mask)
+    if bounds is None:
         return None
-    y0, x0 = ys.min(), xs.min()
-    sub = binary_mask[y0:ys.max() + 1, x0:xs.max() + 1]
+    y0, y1, x0, x1 = bounds
+    sub = binary_mask[y0:y1, x0:x1]
 
     mask_uint8 = (sub.astype(np.uint8) * 255)
     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
