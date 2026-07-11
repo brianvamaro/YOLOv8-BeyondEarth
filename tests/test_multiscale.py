@@ -63,3 +63,34 @@ def test_wrapper_runs_ladder_fuses_and_writes(tmp_path, monkeypatch):
     back = gpd.read_file(out)
     assert {"scale_key", "slice_size", "sr_factor", "footprint", "n_merged",
             "isin_slice"} <= set(back.columns)
+
+
+def test_wrapper_256pref_engulf(tmp_path, monkeypatch):
+    """The phase-3 winner config plumbs through: bands rule + trivial banding + engulf_thr.
+    A 256 fragment inside the 512-only large boulder (DIoU below cluster_thr) must be
+    consolidated by the engulf pass, and the filename must carry the engulf tag."""
+
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        g = _fake_scale_outputs(slice_size, sr_factor)
+        if (slice_size, sr_factor) == (256, 1):   # fragment wholly inside the 512 large boulder
+            g = gpd.GeoDataFrame({"score": list(g.score) + [0.5], "category_id": 0,
+                                  "category_name": "boulder", "is_within_slice": True},
+                                 geometry=list(g.geometry) + [shapely.box(31, 1, 36, 6)])
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+
+    fused, audit, per_scale = P.get_multiscale_prediction(
+        tmp_path / "scene.tif", None, output_dir=tmp_path,
+        rule="bands", bands={256: (0, np.inf)}, engulf_thr=0.7)
+
+    assert len(fused) == 2                                    # shared (256 wins) + 512 large
+    kept = set(fused.scale_key)
+    assert kept == {"256", "512"}                             # 256pref: 256 beats finer SR arm
+    eng = audit[audit.engulfed]
+    assert len(eng) == 1 and eng.iloc[0].scale_key == "256"   # fragment engulfed by the 512
+    assert eng.iloc[0].keeper_scale_key == "512"
+    out = tmp_path / "scene-predictions-fused-bands-engulf70-512-256-256sr2-mask.gpkg"
+    assert out.exists()

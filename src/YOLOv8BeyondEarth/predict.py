@@ -469,6 +469,7 @@ def get_multiscale_prediction(in_raster,
                               cluster_thr: float = None,
                               metric: str = "diou",
                               bands=None,
+                              engulf_thr: float = None,
                               output_dir=None,
                               output_format: str = "gpkg",
                               **kwargs):
@@ -483,8 +484,12 @@ def get_multiscale_prediction(in_raster,
     with the suppression audit table next to it as ``...-audit.csv``.
 
     ``cluster_thr=None`` uses the calibrated ``fusion.DEFAULT_CLUSTER_THR`` (a DIoU value —
-    pass an explicit threshold if ``metric="iou"``). ``bands``/``rule``/``metric`` are passed
-    through to ``fuse_predictions`` (``native_res`` for the bands rule is read off the raster).
+    pass an explicit threshold if ``metric="iou"``). ``bands``/``rule``/``metric``/``engulf_thr``
+    are passed through to ``fuse_predictions`` (``native_res`` for the bands rule is read off the
+    raster). The phase-3 ablation winner ``256pref_engulf`` is ``rule="bands",
+    bands={256: (0, np.inf)}, engulf_thr=0.7`` — 256 masks win contested clusters, SR/512 act as
+    recall nets, fragments consolidate; when ``engulf_thr`` is set the fused filename carries an
+    ``-engulfNN`` tag.
     Remaining ``**kwargs`` (confidence_threshold, inference_size, overlap ratios,
     contour_method, batch_size, ...) go to every per-scale ``get_sliced_prediction`` call —
     per-scale parameter tuning is deliberately not offered (plan §Open risks: population-shift
@@ -513,11 +518,12 @@ def get_multiscale_prediction(in_raster,
     thr = DEFAULT_CLUSTER_THR if cluster_thr is None else cluster_thr
     native_res = raster_metadata.get_resolution(in_raster)[0]
     fused, audit = fuse_predictions(per_scale, cluster_thr=thr, metric=metric, rule=rule,
-                                    bands=bands, native_res=native_res)
+                                    bands=bands, native_res=native_res, engulf_thr=engulf_thr)
 
     ext = ".gpkg" if output_format == "gpkg" else ".shp"
+    rule_str = rule if engulf_thr is None else f"{rule}-engulf{int(round(engulf_thr * 100)):02d}"
     scales_str = "-".join(str(s) if isinstance(s, int) else f"{s[0]}sr{s[1]}" for s in scales)
-    out_mask = output_dir / (in_raster.stem + f"-predictions-fused-{rule}-{scales_str}-mask" + ext)
+    out_mask = output_dir / (in_raster.stem + f"-predictions-fused-{rule_str}-{scales_str}-mask" + ext)
     outlines_to_shp(fused, out_mask)
     audit.to_csv(out_mask.with_suffix("").as_posix() + "-audit.csv", index=False)
     return fused, audit, per_scale
