@@ -27,7 +27,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")
 INNER = os.path.join(REPO, "YOLOv8-BeyondEarth")
 DATA = os.path.join(INNER, "data")
 PRIEUR = os.path.join(REPO, "data_prieur", "raw_data")
-INF = os.path.join(DATA, "mars_hirise", "inference")
+INF = os.path.join(REPO, "data_prieur", "maskrcnn_runs", "test3_boulder2024", "inference")
 CACHE3 = os.path.join(DATA, "test3_cache")
 T3CT = os.path.join(CACHE3, "t3c_treatment")
 RAS_T = os.path.join(DATA, "mars_hirise", "raster", "ESP_017355_2260_RED.tif")
@@ -83,6 +83,9 @@ def main():
     with open(MASK_CACHE, "rb") as f:
         exD = pickle.load(f)
     print(f"loaded {len(exD)} cached example masks; {len(PICKD)} panels; m3ct n={len(m3ct)}")
+    if not os.path.exists(MRCNN_T):
+        raise FileNotFoundError(f"MRCNN treatment gpkg missing: {MRCNN_T}")
+    n_mrcnn = 0
 
     def axis_line(ax, cx, cy, ang, L, color):
         dx, dy = np.sin(np.radians(ang)) * L / 2, -np.cos(np.radians(ang)) * L / 2
@@ -116,6 +119,7 @@ def main():
                     px = (~src.transform) * (xy[:, 0], xy[:, 1])
                     ax.plot(px[0] - c0, px[1] - r0, color=C_MRCNN, lw=1.5, alpha=.7, label="MRCNN")
                     am, _asp = ellipse_angle180(geom, RES_T)
+                    n_mrcnn += 1
                     if np.isfinite(am):
                         mpx = (~src.transform) * (geom.centroid.x, geom.centroid.y)
                         axis_line(ax, mpx[0] - c0, mpx[1] - r0, am, L, C_MRCNN)
@@ -164,6 +168,9 @@ def main():
                  "long-axis lines (dashed) per source", fontsize=11)
     fig.tight_layout(rect=(0, .04, 1, 0.985))
     fig.subplots_adjust(hspace=0.28)
+    if n_mrcnn == 0:
+        raise RuntimeError("no MRCNN outline matched any panel — check MRCNN_T / bbox filtering")
+    print(f"MRCNN outlines drawn on {n_mrcnn}/{len(PICKD)} panels")
     fig.savefig(OUT, dpi=150)
     print("wrote:", OUT)
 
