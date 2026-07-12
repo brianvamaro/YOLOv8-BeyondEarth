@@ -8,7 +8,7 @@ SolutionH run scripts (data/solutionG, data/solutionH):
      mask configs: the quantification behind the G linear histograms.
   3. solutionH/ra_null.png             — the section 4c-null, d0 vs R-A vs uniform truth.
   4. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
-     overlaid (truth yellow, d0 red dashed, R-A cyan).
+     overlaid (truth orange, d0 red dashed, R-A cyan).
 These reproduce cells of notebooks/SolutionH_obb_retrain (the citable record) as standalone PNGs.
 Run: python scripts/solutionH/make_orientation_summary_figs.py
 """
@@ -138,10 +138,10 @@ def main():
     for cx, cy, a_px, b_px, ang in ex_d0["synth_truth"]:
         A = np.deg2rad(ang)
         dx, dy = np.sin(A) * a_px, -np.cos(A) * a_px
-        ax.plot([cx - dx, cx + dx], [cy - dy, cy + dy], "-", color="yellow", lw=1.8)
+        ax.plot([cx - dx, cx + dx], [cy - dy, cy + dy], "-", color="orange", lw=1.8)
     draw_obb(ax, ex_rot["synth_corners"], color="cyan", lw=1.3, ls="-")
     draw_obb(ax, ex_d0["synth_corners"], color="red", lw=1.7, ls="--")  # dashed on top: gaps keep cyan visible
-    ax.legend(handles=[Line2D([], [], color="yellow", lw=1.8, label="true long axis"),
+    ax.legend(handles=[Line2D([], [], color="orange", lw=1.8, label="true long axis"),
                        Line2D([], [], color="red", lw=1.5, ls="--", label="d0 box (degrees=0)"),
                        Line2D([], [], color="cyan", lw=1.3, label="R-A box (degrees=180)")],
               loc="upper right", fontsize=9, framealpha=0.85)
