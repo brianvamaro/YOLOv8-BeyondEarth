@@ -6,10 +6,13 @@ SolutionH run scripts (data/solutionG, data/solutionH):
      (rose + linear histogram per method, elongated subset).
   2. summary/G_axis_fractions.png      — per-axis (0/45/90/135) azimuth fractions for the three
      mask configs: the quantification behind the G linear histograms.
-  3. solutionH/ra_null.png             — the section 4c-null, d0 vs R-A vs uniform truth.
-  4. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
+  3. solutionH/d0_null.png             — the section 4c-null for the as-trained (degrees=0) head.
+  4. solutionH/ra_null.png             — the section 4c-null, d0 vs R-A vs uniform truth.
+  5. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
      overlaid (truth orange, d0 red dashed, R-A cyan).
 These reproduce cells of notebooks/SolutionH_obb_retrain (the citable record) as standalone PNGs.
+One palette across the document: YOLO-seg blue, SAM green (sam1024 orange), OBB-d0 red,
+OBB-R-A cyan, truth/uniform gray — matching the SolutionG notebook figures.
 Run: python scripts/solutionH/make_orientation_summary_figs.py
 """
 import os
@@ -30,6 +33,10 @@ FIG_H = os.path.join(REPO, "docs", "figures", "solutionH")
 UNI = grid_fraction_uniform()   # 0.222 — the isotropic reference, not a method
 
 ASPECT_MIN = 1.35               # elongated = meaningful long axis (matches well_resolved_subset)
+
+# one palette across the whole document (matches the SolutionG notebook figures)
+C_YOLO, C_SAM, C_SAM1024 = "tab:blue", "tab:green", "tab:orange"
+C_D0, C_RA, C_TRUTH = "tab:red", "tab:cyan", "0.4"
 
 
 def elongated(ang, asp):
@@ -75,9 +82,9 @@ def main():
     null_truth = pd.read_csv(os.path.join(HDIR, "obb_null_truth.csv"))
 
     # 1 — the headline three-way on the real crop
-    series = [("YOLOv8-seg mask (before)", elongated(gdet.angle_yolo, gdet.aspect_yolo), "tab:red"),
-              ("G — SAM2 re-mask (fix)", elongated(gdet.angle_sam256, gdet.aspect_sam256), "tab:green"),
-              ("H-obb R-A — OBB head, degrees=180", elongated(crop_rot.angle180, crop_rot.aspect), "tab:purple")]
+    series = [("YOLOv8-seg mask (before)", elongated(gdet.angle_yolo, gdet.aspect_yolo), C_YOLO),
+              ("G — SAM2 re-mask (fix)", elongated(gdet.angle_sam256, gdet.aspect_sam256), C_SAM),
+              ("H-obb R-A — OBB head, degrees=180", elongated(crop_rot.angle180, crop_rot.aspect), C_RA)]
     fig = plt.figure(figsize=(13.5, 6.4))
     for i, (name, a, col) in enumerate(series):
         axh = rose_and_hist(fig, 3, i, f"{name}\n(n={len(a):,})", a, col)
@@ -93,9 +100,9 @@ def main():
 
     # 2 — per-axis fractions for the three mask configs (the metric behind G's linear hists)
     axes_deg = (0, 45, 90, 135)
-    configs = [("yolo", elongated(gdet.angle_yolo, gdet.aspect_yolo), "tab:blue"),
-               ("sam256", elongated(gdet.angle_sam256, gdet.aspect_sam256), "tab:green"),
-               ("sam1024", elongated(gdet.angle_sam1024, gdet.aspect_sam1024), "tab:orange")]
+    configs = [("yolo", elongated(gdet.angle_yolo, gdet.aspect_yolo), C_YOLO),
+               ("sam256", elongated(gdet.angle_sam256, gdet.aspect_sam256), C_SAM),
+               ("sam1024", elongated(gdet.angle_sam1024, gdet.aspect_sam1024), C_SAM1024)]
     uni_axis = 2 * 10.0 / 180.0                       # 0.111 — one axis's share under uniformity
     fig, ax = plt.subplots(figsize=(8.5, 4.2))
     w = 0.26
@@ -113,10 +120,21 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "G_axis_fractions.png"), dpi=130, bbox_inches="tight")
 
-    # 3 — the section 4c-null: d0 vs R-A vs uniform truth
-    panels = [("H-obb d0 (degrees=0) OUTPUT", elongated(null_d0.angle180, null_d0.aspect), "tab:red"),
-              ("H-obb R-A (degrees=180) OUTPUT", elongated(null_rot.angle180, null_rot.aspect), "tab:orange"),
-              ("TRUTH (rendered, uniform)", null_truth.angle180.values % 180.0, "0.4")]
+    # 3 — the section 4c-null for the as-trained head alone (truth in -> d0 out)
+    truth_a = null_truth.angle180.values % 180.0
+    d0_a = elongated(null_d0.angle180, null_d0.aspect)
+    fig = plt.figure(figsize=(9, 6))
+    rose_and_hist(fig, 2, 0, "TRUTH (rendered, uniform)", truth_a, C_TRUTH)
+    rose_and_hist(fig, 2, 1, "H-obb d0 (degrees=0) OUTPUT", d0_a, C_D0)
+    fig.suptitle("§4c-null: uniform-truth IN (flat rose) → the as-trained OBB head snaps to 0/90 "
+                 f"(grid {grid_fraction(d0_a):.2f} vs {UNI:.2f})", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_H, "d0_null.png"), dpi=130, bbox_inches="tight")
+
+    # 4 — the section 4c-null: d0 vs R-A vs uniform truth
+    panels = [("H-obb d0 (degrees=0) OUTPUT", d0_a, C_D0),
+              ("H-obb R-A (degrees=180) OUTPUT", elongated(null_rot.angle180, null_rot.aspect), C_RA),
+              ("TRUTH (rendered, uniform)", truth_a, C_TRUTH)]
     fig = plt.figure(figsize=(13, 6))
     for i, (name, a, col) in enumerate(panels):
         rose_and_hist(fig, 3, i, name, a, col)
@@ -128,7 +146,7 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "ra_null.png"), dpi=130, bbox_inches="tight")
 
-    # 4 — the synthetic overlay: d0 and R-A boxes on the SAME field (same render seed)
+    # 5 — the synthetic overlay: d0 and R-A boxes on the SAME field (same render seed)
     from matplotlib.lines import Line2D
     ex_d0 = np.load(os.path.join(HDIR, "obb_examples.npz"))
     ex_rot = np.load(os.path.join(HDIR, "obb_examples_rot.npz"))
