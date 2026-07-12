@@ -4,6 +4,11 @@ No GPU / no inference — everything is read from the CSV/NPZ caches written by 
 SolutionH run scripts (data/solutionG, data/solutionH):
   1. summary/orientation_threeway.png  — YOLO-seg vs G/SAM vs H-obb R-A on the real HiRISE crop
      (rose + linear histogram per method, elongated subset).
+  1b. summary/synth_roses.png          — the synthetic uniform-truth null, all producers: uniform
+     truth / YOLO / SAM / OBB R-A (the known-truth analogue of orientation_threeway).
+  1c. summary/synth_examples.png       — per-boulder synthetic (the analogue of Fig 2 with a KNOWN
+     true shape): true ellipse + YOLO mask + SAM mask + OBB box, from data/solutionH/synth_examples.pkl
+     (built by gen_synth_examples.py; GPU).
   2. summary/G_hist_linear.png         — YOLO vs SAM (sam256) long-axis linear histogram.
   3. summary/G_axis_fractions.png      — per-axis (0/45/90/135) azimuth fractions, YOLO vs SAM:
      the quantification behind the linear histogram.
@@ -105,6 +110,85 @@ def main():
                  fontsize=12)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "orientation_threeway.png"), dpi=130, bbox_inches="tight")
+
+    # 1b — the SYNTHETIC uniform-truth null, all producers (the known-truth analogue of the
+    # three-way). YOLO/SAM come from the G synthetic set (shadow arm), OBB from its own §4c-null
+    # render — both uniform-truth by construction (the null property under test), pooled here.
+    sh = pd.read_csv(os.path.join(GDIR, "synth_rose", "synth_rose.csv"))
+    sh = sh[sh.cond == "shadow"]
+    ysyn = sh.yolo.values[np.isfinite(sh.yolo.values)] % 180.0
+    ssyn = sh.sam256.values[np.isfinite(sh.sam256.values)] % 180.0
+    panels_a = [("uniform truth (input)", sh.truth_angle.values % 180.0, C_TRUTH),
+                ("YOLO-seg", ysyn, C_YOLO),
+                ("SAM2 (sam256)", ssyn, C_SAM),
+                ("OBB R-A (degrees=180)", elongated(null_rot.angle180, null_rot.aspect), C_RA)]
+    fig = plt.figure(figsize=(15.5, 6.4))
+    for i, (name, a, col) in enumerate(panels_a):
+        rose_and_hist(fig, 4, i, name, a, col)
+        print(f"synth null {name:24} n={len(a):>6}  diag {diagonal_fraction(a):.3f}  "
+              f"grid {grid_fraction(a):.3f}")
+    fig.suptitle("Synthetic uniform-truth null — the same known-uniform input through each producer: "
+                 "YOLO manufactures the 135° diagonal, SAM2 stays ~uniform, the R-A OBB head leans cardinal",
+                 fontsize=12)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_SUMMARY, "synth_roses.png"), dpi=130, bbox_inches="tight")
+
+    # 1c — per-boulder SYNTHETIC examples (the analogue of Fig 2, with a KNOWN true shape).
+    # Each boulder is a self-contained crop (patch + patch-local masks/box/centre); the gen script
+    # selected the artifact cases (large |YOLO-true|) the way Fig 2 selected diagonal-locked ones.
+    import pickle
+    from skimage.measure import find_contours
+    with open(os.path.join(HDIR, "synth_examples.pkl"), "rb") as f:
+        se = pickle.load(f)
+    bs = se["boulders"]
+
+    def _ellipse_xy(cx, cy, a, b, ang):                   # true-ellipse boundary in (col, row)
+        th = np.deg2rad(ang)
+        u = np.array([np.sin(th), -np.cos(th)])           # long axis: azimuth from North, clockwise
+        v = np.array([np.cos(th), np.sin(th)])            # minor axis (perpendicular)
+        t = np.linspace(0, 2 * np.pi, 120)
+        p = np.array([cx, cy]) + np.outer(np.cos(t) * a, u) + np.outer(np.sin(t) * b, v)
+        return p[:, 0], p[:, 1]
+
+    def _axline(ax, cx, cy, ang, L, color):
+        dx, dy = np.sin(np.deg2rad(ang)) * L / 2, -np.cos(np.deg2rad(ang)) * L / 2
+        ax.plot([cx - dx, cx + dx], [cy - dy, cy + dy], color=color, lw=1.2, ls="--", alpha=.95)
+
+    ncol = 4
+    nrow = int(np.ceil(len(bs) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.15 * ncol, 3.15 * nrow))
+    for ax, r in zip(axes.ravel(), bs):
+        ax.imshow(r["patch"], cmap="gray")
+        L = 1.6 * r["true_dpx"]
+        ex, ey = _ellipse_xy(r["cx"], r["cy"], r["a_px"], r["b_px"], r["true_angle"])
+        ax.plot(ex, ey, color="yellow", lw=1.6, label="true")
+        _axline(ax, r["cx"], r["cy"], r["true_angle"], L, "yellow")
+        for key, col, lab in (("yolo_mask", C_YOLO, "YOLO"), ("sam_mask", C_SAM, "SAM2")):
+            cont = max(find_contours(r[key], 0.5), key=len)
+            ax.plot(cont[:, 1], cont[:, 0], color=col, lw=1.4, alpha=.9, label=lab)
+        _axline(ax, r["cx"], r["cy"], r["yolo_angle"], L, C_YOLO)
+        _axline(ax, r["cx"], r["cy"], r["sam_angle"], L, C_SAM)
+        if r["obb_corners"] is not None:
+            p = np.vstack([r["obb_corners"], r["obb_corners"][0]])
+            ax.plot(p[:, 0], p[:, 1], color=C_RA, lw=1.3, label="OBB R-A")
+        ttl = (f"{r['true_dpx']:.0f} px   T{r['true_angle']:.0f}° Y{r['yolo_angle']:.0f}° "
+               f"S{r['sam_angle']:.0f}°" + (f" O{r['obb_angle']:.0f}°" if np.isfinite(r["obb_angle"]) else ""))
+        ax.set_title(ttl, fontsize=8, pad=3)
+        ax.set_xticks([]); ax.set_yticks([])
+    for ax in axes.ravel()[len(bs):]:
+        ax.axis("off")
+    hl = {}
+    for ax in axes.ravel():
+        for h, l in zip(*ax.get_legend_handles_labels()):
+            hl.setdefault(l, h)
+    order = [l for l in ("true", "YOLO", "SAM2", "OBB R-A") if l in hl]
+    fig.legend([hl[l] for l in order], order, loc="lower center", ncol=4, fontsize=10)
+    fig.suptitle("Synthetic boulders where YOLO's mask mis-measures the axis (selected, like Fig 2): "
+                 "KNOWN true shape (yellow); YOLO mask (blue) snaps blocky toward the diagonal; "
+                 "SAM mask (green) recovers the truth; OBB R-A box (cyan). T=true Y=YOLO S=SAM O=OBB",
+                 fontsize=11)
+    fig.tight_layout(rect=(0, .03, 1, .975))
+    fig.savefig(os.path.join(FIG_SUMMARY, "synth_examples.png"), dpi=140, bbox_inches="tight")
 
     # G figures (summary-doc versions, sam256-only): linear hist, roses, diag-frac by band.
     # The SolutionG notebook keeps YOLO/sam256/sam1024; here we show only the production config.
@@ -235,8 +319,8 @@ def main():
     ax.axis("off")
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "ra_synth_overlay.png"), dpi=130, bbox_inches="tight")
-    print("wrote summary/:", "orientation_threeway, G_hist_linear, G_axis_fractions, G_roses, "
-          "G_synth_rose, G_diagfrac_by_band")
+    print("wrote summary/:", "orientation_threeway, synth_roses, synth_examples, G_hist_linear, "
+          "G_axis_fractions, G_roses, G_synth_rose, G_diagfrac_by_band")
     print("wrote solutionH/:", "ra_null, ra_synth_overlay")
 
 
