@@ -78,6 +78,8 @@ def add_geometries(in_raster, df):
     return gdf
 
 def bboxes_to_shp(gdf, out_shp):
+    if len(gdf) == 0:   # pyogrio cannot write a featureless layer; callers treat missing = empty
+        return
     gdf_copy = gdf.rename(columns={"category_id": "cat_id", "category_name": "cat_name", "is_within_slice": "isin_slice"})
     # vectorized box construction from the [minx, miny, maxx, maxy] bbox column
     bbox_arr = np.asarray(gdf_copy.bbox.tolist(), dtype=float).reshape(-1, 4)
@@ -85,6 +87,8 @@ def bboxes_to_shp(gdf, out_shp):
     gdf_copy.drop(columns=['bbox', 'polygon']).to_file(out_shp)
 
 def outlines_to_shp(gdf, out_shp):
+    if len(gdf) == 0:   # pyogrio cannot write a featureless layer; callers treat missing = empty
+        return
     gdf_copy = gdf.rename(columns={"category_id": "cat_id", "category_name": "cat_name", "is_within_slice": "isin_slice"})
     # errors="ignore": fused catalogs (fusion.fuse_predictions) may not carry bbox/polygon
     gdf_copy.drop(columns=['bbox', 'polygon'], errors="ignore").to_file(out_shp)

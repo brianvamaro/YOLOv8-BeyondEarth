@@ -442,6 +442,11 @@ def get_sliced_prediction(in_raster,
 
 
     if postprocess:
+        # Zero detections on the whole raster (sparse tiles): NMS input would be an empty
+        # stack. Short-circuit to an empty gdf_nms; the *_to_shp writers skip featureless
+        # layers, so callers treat a missing NMS file as an empty catalog.
+        if len(gdf) == 0:
+            return gdf, gdf.copy()
         # Non-maximum suppression (NMS)
         # regardless of the classes ids (right now is a class agnoistic not supported)
         if postprocess_class_agnostic:

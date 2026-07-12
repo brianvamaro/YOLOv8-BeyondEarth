@@ -65,6 +65,18 @@ def test_wrapper_runs_ladder_fuses_and_writes(tmp_path, monkeypatch):
             "isin_slice"} <= set(back.columns)
 
 
+def test_empty_layer_writers_skip(tmp_path):
+    """pyogrio cannot write featureless layers; the writers must skip and leave no file
+    (callers treat a missing NMS/fused layer as an empty catalog — the sparse-tile path)."""
+    from YOLOv8BeyondEarth.polygon import outlines_to_shp, bboxes_to_shp
+    empty = gpd.GeoDataFrame({"score": [], "category_id": [], "category_name": [],
+                              "is_within_slice": [], "bbox": [], "polygon": []}, geometry=[])
+    outlines_to_shp(empty, tmp_path / "empty-mask.gpkg")
+    bboxes_to_shp(empty, tmp_path / "empty-bbox.gpkg")
+    assert not (tmp_path / "empty-mask.gpkg").exists()
+    assert not (tmp_path / "empty-bbox.gpkg").exists()
+
+
 def test_wrapper_256pref_engulf(tmp_path, monkeypatch):
     """The phase-3 winner config plumbs through: bands rule + trivial banding + engulf_thr.
     A 256 fragment inside the 512-only large boulder (DIoU below cluster_thr) must be
