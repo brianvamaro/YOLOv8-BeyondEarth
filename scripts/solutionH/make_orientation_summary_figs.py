@@ -13,7 +13,7 @@ SolutionH run scripts (data/solutionG, data/solutionH):
   6. summary/G_diagfrac_by_band.png    — diagonal fraction by native-px size band, YOLO vs SAM.
   7. solutionH/ra_null.png             — the section 4c-null: uniform truth vs d0 vs R-A.
   8. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
-     overlaid (truth orange, d0 red dashed, R-A cyan).
+     overlaid (truth orange, d0 red solid, R-A cyan dashed on top).
 The G figures are the summary-doc's sam256-focused versions of the SolutionG notebook figures (the
 notebook keeps the full YOLO/sam256/sam1024 comparison and both synthetic arms as the record; the
 summary uses the chosen config/arm only). Everything reproduces cells of the SolutionG/SolutionH
@@ -224,11 +224,11 @@ def main():
         A = np.deg2rad(ang)
         dx, dy = np.sin(A) * a_px, -np.cos(A) * a_px
         ax.plot([cx - dx, cx + dx], [cy - dy, cy + dy], "-", color="orange", lw=1.8)
-    draw_obb(ax, ex_rot["synth_corners"], color="cyan", lw=1.3, ls="-")
-    draw_obb(ax, ex_d0["synth_corners"], color="red", lw=1.7, ls="--")  # dashed on top: gaps keep cyan visible
+    draw_obb(ax, ex_d0["synth_corners"], color="red", lw=1.3, ls="-")
+    draw_obb(ax, ex_rot["synth_corners"], color="cyan", lw=1.7, ls="--")  # dashed on top: gaps keep red visible
     ax.legend(handles=[Line2D([], [], color="orange", lw=1.8, label="true long axis"),
-                       Line2D([], [], color="red", lw=1.5, ls="--", label="d0 box (degrees=0)"),
-                       Line2D([], [], color="cyan", lw=1.3, label="R-A box (degrees=180)")],
+                       Line2D([], [], color="red", lw=1.3, label="d0 box (degrees=0)"),
+                       Line2D([], [], color="cyan", lw=1.7, ls="--", label="R-A box (degrees=180)")],
               loc="upper right", fontsize=9, framealpha=0.85)
     ax.set_title("Same synthetic uniform-truth field: d0 boxes snap axis-aligned, "
                  "R-A boxes track the tilt", fontsize=11)

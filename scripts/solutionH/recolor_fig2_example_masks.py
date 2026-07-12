@@ -5,7 +5,7 @@ The original is produced deep in notebooks/HiRISE_Test3_different_model (§3c II
 (YOLO detect + SAM2 re-mask per example) is disk-cached under data/test3_cache, so this reproduces
 the exact same 12 panels WITHOUT a GPU by loading that cache directly by its known key. Only the
 outline/axis colors change, to match the rest of the summary doc:
-    YOLO = blue, SAM2 = green, human = black (the reference), MRCNN = orange.
+    YOLO = blue, SAM2 = green, human = purple (the reference), MRCNN = orange.
 (In the original, SAM2 was red and human was green — inconsistent with red=OBB-d0 elsewhere.)
 
 The color literals in the notebook source were updated to match, so a future notebook rebuild
@@ -44,7 +44,7 @@ PICKD = [4799, 4114, 550, 4698, 567, 2102, 935, 1246, 4474, 3221, 481, 4407]
 MASK_CACHE = os.path.join(CACHE3, "t3c_example_masks_diag_" + "-".join(map(str, PICKD)) + ".pkl")
 
 # document palette
-C_YOLO, C_SAM, C_HUMAN, C_MRCNN = "tab:blue", "tab:green", "k", "tab:orange"
+C_YOLO, C_SAM, C_HUMAN, C_MRCNN = "tab:blue", "tab:green", "tab:purple", "tab:orange"
 
 
 def main():
