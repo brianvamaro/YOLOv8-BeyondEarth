@@ -1,18 +1,23 @@
-"""Build the three figures for docs/orientation_results_summary.md from cached run outputs.
+"""Build the figures for docs/orientation_results_summary.md from cached run outputs.
 
 No GPU / no inference — everything is read from the CSV/NPZ caches written by the SolutionG and
 SolutionH run scripts (data/solutionG, data/solutionH):
   1. summary/orientation_threeway.png  — YOLO-seg vs G/SAM vs H-obb R-A on the real HiRISE crop
      (rose + linear histogram per method, elongated subset).
-  2. summary/G_axis_fractions.png      — per-axis (0/45/90/135) azimuth fractions for the three
-     mask configs: the quantification behind the G linear histograms.
-  3. solutionH/d0_null.png             — the section 4c-null for the as-trained (degrees=0) head.
-  4. solutionH/ra_null.png             — the section 4c-null, d0 vs R-A vs uniform truth.
-  5. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
+  2. summary/G_hist_linear.png         — YOLO vs SAM (sam256) long-axis linear histogram.
+  3. summary/G_axis_fractions.png      — per-axis (0/45/90/135) azimuth fractions, YOLO vs SAM:
+     the quantification behind the linear histogram.
+  4. summary/G_roses.png               — YOLO vs SAM axial roses.
+  5. summary/G_diagfrac_by_band.png    — diagonal fraction by native-px size band, YOLO vs SAM.
+  6. solutionH/d0_null.png             — the section 4c-null for the as-trained (degrees=0) head.
+  7. solutionH/ra_null.png             — the section 4c-null, d0 vs R-A vs uniform truth.
+  8. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
      overlaid (truth orange, d0 red dashed, R-A cyan).
-These reproduce cells of notebooks/SolutionH_obb_retrain (the citable record) as standalone PNGs.
-One palette across the document: YOLO-seg blue, SAM green (sam1024 orange), OBB-d0 red,
-OBB-R-A cyan, truth/uniform gray — matching the SolutionG notebook figures.
+Figs 2/4/5 are the summary-doc's sam256-focused versions of the SolutionG notebook figures (the
+notebook keeps the full YOLO/sam256/sam1024 comparison as the equivalence record; the summary uses
+the chosen native config only). Everything reproduces cells of the SolutionG/SolutionH notebooks.
+One palette across the document: YOLO-seg blue, SAM green, OBB-d0 red, OBB-R-A cyan,
+truth/uniform gray — matching the SolutionG notebook figures.
 Run: python scripts/solutionH/make_orientation_summary_figs.py
 """
 import os
@@ -21,6 +26,7 @@ import matplotlib
 import numpy as np
 import pandas as pd
 
+from YOLOv8BeyondEarth.benchmark import orientation_by_band, DEFAULT_SIZE_BANDS
 from YOLOv8BeyondEarth.orientation import (plot_rose, diagonal_fraction, grid_fraction,
                                            asymmetry_ratio, grid_fraction_uniform, axial_distance)
 
@@ -35,7 +41,7 @@ UNI = grid_fraction_uniform()   # 0.222 — the isotropic reference, not a metho
 ASPECT_MIN = 1.35               # elongated = meaningful long axis (matches well_resolved_subset)
 
 # one palette across the whole document (matches the SolutionG notebook figures)
-C_YOLO, C_SAM, C_SAM1024 = "tab:blue", "tab:green", "tab:orange"
+C_YOLO, C_SAM = "tab:blue", "tab:green"
 C_D0, C_RA, C_TRUTH = "tab:red", "tab:cyan", "0.4"
 
 
@@ -98,29 +104,71 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "orientation_threeway.png"), dpi=130, bbox_inches="tight")
 
-    # 2 — per-axis fractions for the three mask configs (the metric behind G's linear hists)
+    # G figures (summary-doc versions, sam256-only): linear hist, roses, diag-frac by band.
+    # The SolutionG notebook keeps YOLO/sam256/sam1024; here we show only the production config.
+    yolo_a = elongated(gdet.angle_yolo, gdet.aspect_yolo)
+    sam_a = elongated(gdet.angle_sam256, gdet.aspect_sam256)
+    gseries = [("YOLO-seg", yolo_a, C_YOLO), ("SAM2 (sam256)", sam_a, C_SAM)]
+
+    # 2 — linear histogram over [0, 180°), diagonals shaded
+    fig, ax = plt.subplots(figsize=(8.5, 4))
+    for name, a, col in gseries:
+        ax.hist(a, bins=36, range=(0, 180), density=True, histtype="step", lw=2,
+                color=col, label=f"{name} (diag-frac {diagonal_fraction(a):.3f})")
+    ax.axhline(1 / 180, ls="--", color="gray", lw=1, label="uniform")
+    for d in (45, 135):
+        ax.axvspan(d - 10, d + 10, color="red", alpha=0.07)
+    ax.set_xlim(0, 180); ax.set_xticks([0, 45, 90, 135, 180])
+    ax.set_xlabel("long-axis azimuth from North (deg)"); ax.set_ylabel("density")
+    ax.set_title("YOLO's 135° diagonal lock → SAM2 flattens it (elongated subset, HiRISE)")
+    ax.legend(fontsize=9); fig.tight_layout()
+    fig.savefig(os.path.join(FIG_SUMMARY, "G_hist_linear.png"), dpi=130, bbox_inches="tight")
+
+    # 3 — per-axis fractions (the metric behind the linear histogram)
     axes_deg = (0, 45, 90, 135)
-    configs = [("yolo", elongated(gdet.angle_yolo, gdet.aspect_yolo), C_YOLO),
-               ("sam256", elongated(gdet.angle_sam256, gdet.aspect_sam256), C_SAM),
-               ("sam1024", elongated(gdet.angle_sam1024, gdet.aspect_sam1024), C_SAM1024)]
     uni_axis = 2 * 10.0 / 180.0                       # 0.111 — one axis's share under uniformity
     fig, ax = plt.subplots(figsize=(8.5, 4.2))
-    w = 0.26
-    for j, (name, a, col) in enumerate(configs):
+    w = 0.34
+    for j, (name, a, col) in enumerate(gseries):
         fr = [axis_fraction(a, c) for c in axes_deg]
-        ax.bar(np.arange(4) + (j - 1) * w, fr, width=w, color=col, label=name)
-        print(f"axis-frac  {name:8}  " + "  ".join(f"{c}°={f:.3f}" for c, f in zip(axes_deg, fr)))
+        ax.bar(np.arange(4) + (j - 0.5) * w, fr, width=w, color=col, label=name)
+        print(f"axis-frac  {name:14}  " + "  ".join(f"{c}°={f:.3f}" for c, f in zip(axes_deg, fr)))
     for j in (1, 3):                                  # highlight the diagonal (artifact) axes
         ax.axvspan(j - 0.5, j + 0.5, color="red", alpha=0.06)
     ax.axhline(uni_axis, color="k", ls="--", lw=1.0, label=f"uniform ({uni_axis:.3f}/axis)")
     ax.set_xticks(np.arange(4)); ax.set_xticklabels([f"{c}°" for c in axes_deg])
     ax.set_xlabel("pixel axis (±10°); diagonals shaded"); ax.set_ylabel("fraction of azimuths")
     ax.set_title("Per-axis share of long-axis azimuths, matched detections (elongated subset)")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "G_axis_fractions.png"), dpi=130, bbox_inches="tight")
 
-    # 3 — the section 4c-null for the as-trained head alone (truth in -> d0 out)
+    # 4 — axial roses, YOLO vs SAM
+    fig, axes = plt.subplots(1, 2, subplot_kw={"projection": "polar"}, figsize=(9, 4.4))
+    for ax, (name, a, col) in zip(axes, gseries):
+        plot_rose(ax, a, bins=36, color=col, title=f"{name}  (diag-frac {diagonal_fraction(a):.3f})")
+    fig.suptitle("Long-axis rose (North up, clockwise; elongated aspect>1.35): "
+                 "YOLO diagonal lock → SAM2 dissolved")
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_SUMMARY, "G_roses.png"), dpi=130, bbox_inches="tight")
+
+    # 5 — diagonal fraction by native-px size band
+    bt = {s: orientation_by_band(gdet[f"angle_{s}"], gdet[f"aspect_{s}"], gdet["dpx_native"],
+                                 grid_axis="diagonal") for s in ("yolo", "sam256")}
+    common = [b for b in bt["yolo"].band if b != "all" and b in set(bt["sam256"].band)]
+    x = np.arange(len(common)); w = 0.34
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for j, (s, name, col) in enumerate([("yolo", "YOLO-seg", C_YOLO), ("sam256", "SAM2 (sam256)", C_SAM)]):
+        vals = [bt[s].set_index("band").loc[b, "frac"] for b in common]
+        ax.bar(x + (j - 0.5) * w, vals, w, color=col, label=name)
+    ax.axhline(UNI, ls="--", color="gray", label=f"uniform {UNI:.3f}")
+    ax.set_xticks(x); ax.set_xticklabels(common); ax.set_xlabel("native-px size band")
+    ax.set_ylabel("diagonal fraction")
+    ax.set_title("YOLO's diagonal excess is in the 6–14 px bulk; SAM2 removes it everywhere")
+    ax.legend(fontsize=9); fig.tight_layout()
+    fig.savefig(os.path.join(FIG_SUMMARY, "G_diagfrac_by_band.png"), dpi=130, bbox_inches="tight")
+
+    # 6 — the section 4c-null for the as-trained head alone (truth in -> d0 out)
     truth_a = null_truth.angle180.values % 180.0
     d0_a = elongated(null_d0.angle180, null_d0.aspect)
     fig = plt.figure(figsize=(9, 6))
@@ -131,7 +179,7 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "d0_null.png"), dpi=130, bbox_inches="tight")
 
-    # 4 — the section 4c-null: d0 vs R-A vs uniform truth
+    # 7 — the section 4c-null: d0 vs R-A vs uniform truth
     panels = [("H-obb d0 (degrees=0) OUTPUT", d0_a, C_D0),
               ("H-obb R-A (degrees=180) OUTPUT", elongated(null_rot.angle180, null_rot.aspect), C_RA),
               ("TRUTH (rendered, uniform)", truth_a, C_TRUTH)]
@@ -146,7 +194,7 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "ra_null.png"), dpi=130, bbox_inches="tight")
 
-    # 5 — the synthetic overlay: d0 and R-A boxes on the SAME field (same render seed)
+    # 8 — the synthetic overlay: d0 and R-A boxes on the SAME field (same render seed)
     from matplotlib.lines import Line2D
     ex_d0 = np.load(os.path.join(HDIR, "obb_examples.npz"))
     ex_rot = np.load(os.path.join(HDIR, "obb_examples_rot.npz"))
@@ -168,8 +216,9 @@ def main():
     ax.axis("off")
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "ra_synth_overlay.png"), dpi=130, bbox_inches="tight")
-    print("wrote:", os.path.join(FIG_SUMMARY, "orientation_threeway.png"), "and G_axis_fractions.png")
-    print("wrote:", os.path.join(FIG_H, "ra_null.png"), "and ra_synth_overlay.png")
+    print("wrote summary/:", "orientation_threeway, G_hist_linear, G_axis_fractions, G_roses, "
+          "G_diagfrac_by_band")
+    print("wrote solutionH/:", "d0_null, ra_null, ra_synth_overlay")
 
 
 if __name__ == "__main__":
