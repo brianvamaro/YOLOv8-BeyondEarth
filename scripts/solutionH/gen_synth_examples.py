@@ -100,7 +100,7 @@ def _field_records(field_seed, model, sam, obb, cv2, cKDTree, render_boulder_fie
         ya = float(angles_from_moments([ymasks[k]])["angle180"].iloc[0])
         sa = float(angles_from_moments([smasks[k]])["angle180"].iloc[0])
         cx, cy, dpx = float(truth.cx[j]), float(truth.cy[j]), float(truth.diam_px[j])
-        pad = max(int(round(dpx * 1.15)) + 7, 20)                  # self-contained crop + context margin
+        pad = max(int(round(dpx)) + 2, 12)                         # tight crop (~2x diam), matches Fig 2
         c0, r0c = max(int(cx) - pad, 0), max(int(cy) - pad, 0)
         sl = (slice(r0c, r0c + 2 * pad), slice(c0, c0 + 2 * pad))
         recs[j] = dict(patch=img[sl].copy(), cx=cx - c0, cy=cy - r0c,
