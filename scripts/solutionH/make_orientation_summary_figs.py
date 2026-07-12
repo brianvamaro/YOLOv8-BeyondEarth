@@ -8,14 +8,16 @@ SolutionH run scripts (data/solutionG, data/solutionH):
   3. summary/G_axis_fractions.png      — per-axis (0/45/90/135) azimuth fractions, YOLO vs SAM:
      the quantification behind the linear histogram.
   4. summary/G_roses.png               — YOLO vs SAM axial roses.
-  5. summary/G_diagfrac_by_band.png    — diagonal fraction by native-px size band, YOLO vs SAM.
-  6. solutionH/d0_null.png             — the section 4c-null for the as-trained (degrees=0) head.
-  7. solutionH/ra_null.png             — the section 4c-null, d0 vs R-A vs uniform truth.
+  5. summary/G_synth_rose.png          — SAM on synthetic uniform-truth boulders (shadowed arm
+     only, matching the OBB-null render convention): the "SAM adds no artifact" control.
+  6. summary/G_diagfrac_by_band.png    — diagonal fraction by native-px size band, YOLO vs SAM.
+  7. solutionH/ra_null.png             — the section 4c-null: uniform truth vs d0 vs R-A.
   8. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
      overlaid (truth orange, d0 red dashed, R-A cyan).
-Figs 2/4/5 are the summary-doc's sam256-focused versions of the SolutionG notebook figures (the
-notebook keeps the full YOLO/sam256/sam1024 comparison as the equivalence record; the summary uses
-the chosen native config only). Everything reproduces cells of the SolutionG/SolutionH notebooks.
+The G figures are the summary-doc's sam256-focused versions of the SolutionG notebook figures (the
+notebook keeps the full YOLO/sam256/sam1024 comparison and both synthetic arms as the record; the
+summary uses the chosen config/arm only). Everything reproduces cells of the SolutionG/SolutionH
+notebooks.
 One palette across the document: YOLO-seg blue, SAM green, OBB-d0 red, OBB-R-A cyan,
 truth/uniform gray — matching the SolutionG notebook figures.
 Run: python scripts/solutionH/make_orientation_summary_figs.py
@@ -152,7 +154,33 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "G_roses.png"), dpi=130, bbox_inches="tight")
 
-    # 5 — diagonal fraction by native-px size band
+    # 5 — synthetic uniform-truth control, shadowed arm only (same render convention as the
+    # OBB null): does SAM ADD a directional artifact? (uniform in -> uniform out)
+    synth = pd.read_csv(os.path.join(GDIR, "synth_rose", "synth_rose.csv"))
+    d = synth[synth.cond == "shadow"]
+    t = d.truth_angle.values % 180.0
+    fig, ax = plt.subplots(figsize=(8.5, 4))
+    ax.hist(t, bins=36, range=(0, 180), density=True, histtype="stepfilled",
+            color="gray", alpha=0.25, label=f"truth (uniform, n={len(t)})")
+    for s, name, col in (("yolo", "YOLO-seg", C_YOLO), ("sam256", "SAM2 (sam256)", C_SAM)):
+        a = d[s].values
+        a = a[np.isfinite(a)] % 180.0
+        ax.hist(a, bins=36, range=(0, 180), density=True, histtype="step", lw=2,
+                color=col, label=f"{name} (diag {diagonal_fraction(a):.3f})")
+        print(f"synth-ctl  {name:14}  n={len(a):>5}  diag {diagonal_fraction(a):.3f}  "
+              f"chir {asymmetry_ratio(a):.2f}")
+    ax.axhline(1 / 180, ls="--", color="k", lw=0.8)
+    for dg in (45, 135):
+        ax.axvspan(dg - 10, dg + 10, color="red", alpha=0.06)
+    ax.set_xlim(0, 180); ax.set_xticks([0, 45, 90, 135, 180])
+    ax.set_xlabel("long-axis azimuth (deg)"); ax.set_ylabel("density")
+    ax.set_title("Synthetic boulders (shadowed, elongated), UNIFORM truth: "
+                 "YOLO manufactures a diagonal excess; SAM2 stays ~uniform")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_SUMMARY, "G_synth_rose.png"), dpi=130, bbox_inches="tight")
+
+    # 6 — diagonal fraction by native-px size band
     bt = {s: orientation_by_band(gdet[f"angle_{s}"], gdet[f"aspect_{s}"], gdet["dpx_native"],
                                  grid_axis="diagonal") for s in ("yolo", "sam256")}
     common = [b for b in bt["yolo"].band if b != "all" and b in set(bt["sam256"].band)]
@@ -168,29 +196,20 @@ def main():
     ax.legend(fontsize=9); fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "G_diagfrac_by_band.png"), dpi=130, bbox_inches="tight")
 
-    # 6 — the section 4c-null for the as-trained head alone (truth in -> d0 out)
+    # 7 — the section 4c-null: uniform truth in (left) -> d0 out vs R-A out
     truth_a = null_truth.angle180.values % 180.0
     d0_a = elongated(null_d0.angle180, null_d0.aspect)
-    fig = plt.figure(figsize=(9, 6))
-    rose_and_hist(fig, 2, 0, "TRUTH (rendered, uniform)", truth_a, C_TRUTH)
-    rose_and_hist(fig, 2, 1, "H-obb d0 (degrees=0) OUTPUT", d0_a, C_D0)
-    fig.suptitle("§4c-null: uniform-truth IN (flat rose) → the as-trained OBB head snaps to 0/90 "
-                 f"(grid {grid_fraction(d0_a):.2f} vs {UNI:.2f})", fontsize=12)
-    fig.tight_layout()
-    fig.savefig(os.path.join(FIG_H, "d0_null.png"), dpi=130, bbox_inches="tight")
-
-    # 7 — the section 4c-null: d0 vs R-A vs uniform truth
-    panels = [("H-obb d0 (degrees=0) OUTPUT", d0_a, C_D0),
-              ("H-obb R-A (degrees=180) OUTPUT", elongated(null_rot.angle180, null_rot.aspect), C_RA),
-              ("TRUTH (rendered, uniform)", truth_a, C_TRUTH)]
+    panels = [("TRUTH (rendered, uniform)", truth_a, C_TRUTH),
+              ("H-obb d0 (degrees=0) OUTPUT", d0_a, C_D0),
+              ("H-obb R-A (degrees=180) OUTPUT", elongated(null_rot.angle180, null_rot.aspect), C_RA)]
     fig = plt.figure(figsize=(13, 6))
     for i, (name, a, col) in enumerate(panels):
         rose_and_hist(fig, 3, i, name, a, col)
         print(f"4c-null    {name:38} n={len(a):>6}  diag {diagonal_fraction(a):.3f}  "
               f"grid {grid_fraction(a):.3f}")
-    fig.suptitle("§4c-null (uniform-truth in → what comes out): rotation aug cuts the head's own "
-                 f"cardinal prior ~70% (grid 0.58 → 0.32) but stays short of uniform ({UNI:.2f})",
-                 fontsize=12)
+    fig.suptitle("§4c-null (uniform-truth in → what comes out): as trained the head snaps to a hard "
+                 "0/90 cross (grid 0.58); rotation aug cuts its prior ~70% (0.32) but stays short of "
+                 f"uniform ({UNI:.2f})", fontsize=12)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "ra_null.png"), dpi=130, bbox_inches="tight")
 
@@ -217,8 +236,8 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "ra_synth_overlay.png"), dpi=130, bbox_inches="tight")
     print("wrote summary/:", "orientation_threeway, G_hist_linear, G_axis_fractions, G_roses, "
-          "G_diagfrac_by_band")
-    print("wrote solutionH/:", "d0_null, ra_null, ra_synth_overlay")
+          "G_synth_rose, G_diagfrac_by_band")
+    print("wrote solutionH/:", "ra_null, ra_synth_overlay")
 
 
 if __name__ == "__main__":
