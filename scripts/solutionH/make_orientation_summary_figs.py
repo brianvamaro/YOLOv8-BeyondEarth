@@ -19,6 +19,8 @@ SolutionH run scripts (data/solutionG, data/solutionH):
   7. solutionH/ra_null.png             — the section 4c-null: uniform truth vs d0 vs R-A.
   8. solutionH/ra_synth_overlay.png    — one synthetic uniform-truth tile, d0 and R-A boxes
      overlaid (truth orange, d0 red solid, R-A cyan dashed on top).
+  9. summary/threeway_min6.png, summary/synth_roses_min6.png — appendix: the Fig-3/Fig-4
+     populations with a >= 6 px minimum equivalent diameter (size-floor robustness check).
 The G figures are the summary-doc's sam256-focused versions of the SolutionG notebook figures (the
 notebook keeps the full YOLO/sam256/sam1024 comparison and both synthetic arms as the record; the
 summary uses the chosen config/arm only). Everything reproduces cells of the SolutionG/SolutionH
@@ -316,8 +318,46 @@ def main():
     ax.axis("off")
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_H, "ra_synth_overlay.png"), dpi=130, bbox_inches="tight")
+    # 9 — appendix: Fig 3 and Fig 4 with a >= 6 px size floor (robustness to the smallest blobs)
+    MIN6 = 6.0
+    g6 = gdet[gdet.dpx_native >= MIN6]
+    r6 = crop_rot[crop_rot.diameter_px >= MIN6]
+    series6 = [("YOLOv8-seg mask (before)", elongated(g6.angle_yolo, g6.aspect_yolo), C_YOLO),
+               ("G — SAM2 re-mask (fix)", elongated(g6.angle_sam256, g6.aspect_sam256), C_SAM),
+               ("H-obb R-A — OBB head, degrees=180", elongated(r6.angle180, r6.aspect), C_RA)]
+    fig = plt.figure(figsize=(13.5, 6.4))
+    for i, (name, a, col) in enumerate(series6):
+        axh = rose_and_hist(fig, 3, i, f"{name}\n(n={len(a):,})", a, col)
+        if i == 0:
+            axh.set_ylabel("density")
+        print(f"real >=6px {name:38} n={len(a):>6}  diag {diagonal_fraction(a):.3f}  "
+              f"grid {grid_fraction(a):.3f}")
+    fig.suptitle("Same HiRISE crop, elongated subset with a ≥ 6 px minimum equivalent diameter "
+                 "(cf. Fig 3, which has no size floor)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_SUMMARY, "threeway_min6.png"), dpi=130, bbox_inches="tight")
+
+    sh6 = sh[sh.dpx >= MIN6]
+    nr6 = null_rot[null_rot.diameter_px >= MIN6]
+    y6 = sh6.yolo.values[np.isfinite(sh6.yolo.values)] % 180.0
+    s6 = sh6.sam256.values[np.isfinite(sh6.sam256.values)] % 180.0
+    panels6 = [("uniform truth (input)", sh6.truth_angle.values % 180.0, C_TRUTH),
+               ("YOLO-seg", y6, C_YOLO),
+               ("SAM2 (sam256)", s6, C_SAM),
+               ("OBB R-A (degrees=180)", elongated(nr6.angle180, nr6.aspect), C_RA)]
+    fig = plt.figure(figsize=(15.5, 6.4))
+    for i, (name, a, col) in enumerate(panels6):
+        rose_and_hist(fig, 4, i, f"{name}\n(n={len(a):,})", a, col)
+        print(f"syn  >=6px {name:24} n={len(a):>6}  diag {diagonal_fraction(a):.3f}  "
+              f"grid {grid_fraction(a):.3f}")
+    fig.suptitle("Synthetic uniform-truth null with a ≥ 6 px minimum equivalent diameter "
+                 "(cf. Fig 4, which has no floor on the YOLO/SAM arm)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_SUMMARY, "synth_roses_min6.png"), dpi=130, bbox_inches="tight")
+
     print("wrote summary/:", "orientation_threeway, synth_roses, synth_examples, G_hist_linear, "
-          "G_axis_fractions, G_roses, G_synth_rose, G_diagfrac_by_band")
+          "G_axis_fractions, G_roses, G_synth_rose, G_diagfrac_by_band, threeway_min6, "
+          "synth_roses_min6")
     print("wrote solutionH/:", "ra_null, ra_synth_overlay")
 
 
