@@ -105,9 +105,8 @@ def main():
             axh.set_ylabel("density")
         print(f"real crop  {name:38} n={len(a):>6}  diag {diagonal_fraction(a):.3f}  "
               f"grid {grid_fraction(a):.3f}  chir {asymmetry_ratio(a):.2f}")
-    fig.suptitle("Same HiRISE crop, elongated subset — YOLO locks to the 135° diagonal; "
-                 "SAM2 re-masking dissolves it; the rotation-aug OBB head keeps a mild cardinal lean",
-                 fontsize=12)
+    fig.suptitle("Same HiRISE crop, elongated subset — long-axis azimuths per producer "
+                 "(rose + linear histogram)", fontsize=12)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "orientation_threeway.png"), dpi=130, bbox_inches="tight")
 
@@ -127,8 +126,7 @@ def main():
         rose_and_hist(fig, 4, i, name, a, col)
         print(f"synth null {name:24} n={len(a):>6}  diag {diagonal_fraction(a):.3f}  "
               f"grid {grid_fraction(a):.3f}")
-    fig.suptitle("Synthetic uniform-truth null — the same known-uniform input through each producer: "
-                 "YOLO manufactures the 135° diagonal, SAM2 stays ~uniform, the R-A OBB head leans cardinal",
+    fig.suptitle("Synthetic uniform-truth null — the same known-uniform input through each producer",
                  fontsize=12)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_SUMMARY, "synth_roses.png"), dpi=130, bbox_inches="tight")
@@ -183,10 +181,9 @@ def main():
             hl.setdefault(l, h)
     order = [l for l in ("true", "YOLO", "SAM2", "OBB R-A") if l in hl]
     fig.legend([hl[l] for l in order], order, loc="lower center", ncol=4, fontsize=10)
-    fig.suptitle("Synthetic boulders where YOLO's mask mis-measures the axis (selected, like Fig 2): "
-                 "KNOWN true shape (yellow); YOLO mask (blue) snaps blocky toward the diagonal; "
-                 "SAM mask (green) recovers the truth; OBB R-A box (cyan). T=true Y=YOLO S=SAM O=OBB",
-                 fontsize=11)
+    fig.suptitle("Synthetic boulders, selected where |YOLO − true| is largest (cf. Fig 2): "
+                 "true shape (yellow), YOLO mask (blue), SAM2 mask (green), OBB R-A box (cyan). "
+                 "Header angles: T=true, Y=YOLO, S=SAM, O=OBB", fontsize=11)
     fig.tight_layout(rect=(0, .03, 1, .975))
     fig.savefig(os.path.join(FIG_SUMMARY, "synth_examples.png"), dpi=140, bbox_inches="tight")
 
