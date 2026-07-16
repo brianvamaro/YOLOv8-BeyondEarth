@@ -633,19 +633,23 @@ def sam2_rotation_sweep(model, sam, crops, alphas, aspect_min=1.35, small_px=8.0
     producer (SAM2 decoder vs YOLO prototype head), not the rotation kernel.
 
     Returns ``{side: DataFrame}`` with one row per alpha:
-    ``[alpha, n, raw_peak, geo_peak, geo_lo, geo_hi, grid_raw, grid_geo, diag_raw, diag_geo, n_sm,
-    grid_raw_sm, grid_geo_sm]``. The ``raw_peak``/``geo_*`` columns match
-    :func:`transforms_test.population_rotation_sweep` so :func:`transforms_test.rotation_slope` /
-    :func:`plot_rotation_sweep` apply unchanged (geo-slope 0 = tracks content, +1 = re-imposed on the
-    grid). ``grid_raw``/``grid_geo`` are the cardinal :func:`orientation.grid_fraction` in the image
-    and geographic frames: a **grid-locked** producer pins the cardinal excess to pixels (``grid_raw``
-    flat, ``grid_geo`` varies with α); a **content-locked** one does the reverse (``grid_geo`` flat).
-    ``diag_*`` is the 45/135 analogue (YOLO's axis). ``*_sm`` restricts to the small (< ``small_px``
-    native-px) subset where T1's cardinal excess lives — the sharpest test of whether *that* residual
-    grid-locks.
+    ``[alpha, n, raw_peak, geo_peak, geo_lo, geo_hi, grid_raw, grid_geo, diag_raw, diag_geo, fl_raw,
+    fl_geo, n_sm, grid_raw_sm, grid_geo_sm, fl_raw_sm, fl_geo_sm]``. The ``raw_peak``/``geo_*``
+    columns match :func:`transforms_test.population_rotation_sweep` so
+    :func:`transforms_test.rotation_slope` / :func:`plot_rotation_sweep` apply unchanged (geo-slope
+    0 = tracks content, +1 = re-imposed on the grid). ``grid_raw``/``grid_geo`` are the cardinal
+    :func:`orientation.grid_fraction` in the image and geographic frames: a **grid-locked** producer
+    pins the cardinal excess to pixels (``grid_raw`` flat, ``grid_geo`` varies with α); a
+    **content-locked** one does the reverse (``grid_geo`` flat). ``diag_*`` is the 45/135 analogue
+    (YOLO's axis) and ``fl_*`` the half-plane :func:`orientation.half_plane_fraction` (``f_lower``,
+    0–90 vs 90–180) in each frame — same frame logic: a pixel-locked half-plane imbalance keeps
+    ``fl_raw`` off-0.5 while ``fl_geo`` relaxes, a ground-locked one the reverse (the rotation
+    complement to T4a's mirror-flip test). ``*_sm`` restricts to the small (< ``small_px`` native-px)
+    subset where T1's cardinal excess lives — the sharpest test of whether *that* residual grid-locks.
     """
     from .transforms_test import rotate_image
-    from .orientation import bootstrap_peak_ci, grid_fraction, diagonal_fraction
+    from .orientation import (bootstrap_peak_ci, grid_fraction, diagonal_fraction,
+                              half_plane_fraction)
 
     out = {s: [] for s in sides}
     realigned_total = 0
@@ -668,8 +672,7 @@ def sam2_rotation_sweep(model, sam, crops, alphas, aspect_min=1.35, small_px=8.0
             else:
                 raw_ang = np.array([]); dpx = np.array([])
             if len(raw_ang) == 0:
-                out[s].append((float(a), 0, np.nan, np.nan, np.nan, np.nan,
-                               np.nan, np.nan, np.nan, np.nan, 0, np.nan, np.nan))
+                out[s].append((float(a), 0) + (np.nan,) * 10 + (0,) + (np.nan,) * 4)
                 continue
             geo_ang = (raw_ang + a) % 180.0
             raw, lo, hi = bootstrap_peak_ci(raw_ang, n_boot=n_boot, sigma=sigma, seed=seed)
@@ -677,14 +680,17 @@ def sam2_rotation_sweep(model, sam, crops, alphas, aspect_min=1.35, small_px=8.0
             row = [float(a), len(raw_ang), float(raw), float((raw + a) % 180.0),
                    float((lo + a) % 180.0), float((hi + a) % 180.0),
                    grid_fraction(raw_ang), grid_fraction(geo_ang),
-                   diagonal_fraction(raw_ang), diagonal_fraction(geo_ang), int(sm.sum())]
+                   diagonal_fraction(raw_ang), diagonal_fraction(geo_ang),
+                   half_plane_fraction(raw_ang), half_plane_fraction(geo_ang), int(sm.sum())]
             if sm.sum() >= 20:
-                row += [grid_fraction(raw_ang[sm]), grid_fraction(geo_ang[sm])]
+                row += [grid_fraction(raw_ang[sm]), grid_fraction(geo_ang[sm]),
+                        half_plane_fraction(raw_ang[sm]), half_plane_fraction(geo_ang[sm])]
             else:
-                row += [np.nan, np.nan]
+                row += [np.nan, np.nan, np.nan, np.nan]
             out[s].append(tuple(row))
     cols = ["alpha", "n", "raw_peak", "geo_peak", "geo_lo", "geo_hi", "grid_raw", "grid_geo",
-            "diag_raw", "diag_geo", "n_sm", "grid_raw_sm", "grid_geo_sm"]
+            "diag_raw", "diag_geo", "fl_raw", "fl_geo", "n_sm", "grid_raw_sm", "grid_geo_sm",
+            "fl_raw_sm", "fl_geo_sm"]
     res = {s: pd.DataFrame(out[s], columns=cols) for s in sides}
     for s in sides:
         res[s].attrs["realigned_chunks"] = realigned_total
