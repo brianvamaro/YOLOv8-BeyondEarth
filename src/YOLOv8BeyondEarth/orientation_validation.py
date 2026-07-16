@@ -449,12 +449,32 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
     import torch
     from scipy.ndimage import label, binary_fill_holes
 
-    def _sam_chunked(rgb_img, bxs):
-        outs = []
+    realigned = {"chunks": 0}
+
+    def _sam_masks(rgb_img, bxs):
+        """One SAM mask per box in ``bxs`` **in order**, as a list of (H, W) arrays or ``None``.
+
+        SAM2 normally returns exactly one mask per prompted box, but on some tiles (observed on
+        rotated / edge crops) a batched call returns a *different* count — a dropped or merged prompt.
+        Indexing a stacked array by box then either crashes or, worse, **silently misaligns** every
+        mask after the drop. So on any per-chunk count mismatch we re-prompt that chunk one box at a
+        time, which pins each mask to its box (``None`` where a box yields no mask). The count-matched
+        path is unchanged (same masks, same order) — a no-op for the validated G runs where it never
+        fires — so this only adds a slow fallback on the rare offending tile."""
+        out = []
         for i in range(0, len(bxs), sam_batch):
-            r = sam(rgb_img, bboxes=bxs[i:i + sam_batch], verbose=False, device=device)[0]
-            outs.append(r.masks.data.cpu().numpy())
-        return np.concatenate(outs, axis=0)
+            chunk = bxs[i:i + sam_batch]
+            r = sam(rgb_img, bboxes=chunk, verbose=False, device=device)[0]
+            mdc = None if r.masks is None else r.masks.data.cpu().numpy()
+            if mdc is not None and len(mdc) == len(chunk):
+                out.extend(list(mdc))
+            else:
+                realigned["chunks"] += 1
+                for b in chunk:
+                    rb = sam(rgb_img, bboxes=b[None], verbose=False, device=device)[0]
+                    mb = None if rb.masks is None else rb.masks.data.cpu().numpy()
+                    out.append(mb[0] if (mb is not None and len(mb)) else None)
+        return out
 
     def _clean(mb):
         lab, n = label(mb)
@@ -486,10 +506,10 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
             boxes = r0.boxes.xyxy.cpu().numpy()
             scores = r0.boxes.conf.cpu().numpy()
             md = r0.masks.data.cpu().numpy()
-            s256 = _sam_chunked(rgb, boxes) if need_s256 else None
+            s256 = _sam_masks(rgb, boxes) if need_s256 else None
             if need_s1024:
                 rgb_up = cv2.resize(rgb, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
-                s1024 = _sam_chunked(rgb_up, boxes * up)
+                s1024 = _sam_masks(rgb_up, boxes * up)
             for k in range(len(boxes)):
                 mm = (md[k] >= 0.5).astype(np.float32)
                 if mm.shape[0] != slice_size:
@@ -497,13 +517,14 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
                 box_area = ((boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1]))
                 spec = {"yolo": ((mm >= 0.5).astype(np.uint8), 1.0)}
                 if need_s256:
-                    spec["sam256"] = (s256[k].astype(np.uint8), 1.0)
+                    spec["sam256"] = (None if s256[k] is None else s256[k].astype(np.uint8), 1.0)
                 if need_s1024:
-                    spec["sam1024"] = (s1024[k].astype(np.uint8), float(up))
+                    spec["sam1024"] = (None if s1024[k] is None else s1024[k].astype(np.uint8),
+                                       float(up))
                 sides = {}
                 for name in configs:
                     m, scale = spec[name]
-                    mb = _clean(m)
+                    mb = None if m is None else _clean(m)
                     if mb is None or (name != "yolo"
                                       and mb.sum() > max_box_blowup * box_area * scale ** 2):
                         failed[name] += 1
@@ -521,6 +542,7 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
                 torch.cuda.empty_cache()
     df = pd.DataFrame(rows, columns=["cx", "cy", "score"] + [f"area_{c}" for c in configs])
     df.attrs["failed"] = failed
+    df.attrs["realigned_chunks"] = realigned["chunks"]
     return df, masks
 
 
@@ -541,7 +563,7 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
     import torch
     from scipy.ndimage import label, binary_fill_holes
 
-    state = {"n": 0}
+    state = {"n": 0, "realigned": 0}
 
     def _clean(mb):
         lab, n = label(mb)
@@ -552,18 +574,36 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
             mb = (lab == big).astype(np.uint8)
         return binary_fill_holes(mb).astype(np.uint8)
 
+    def _sam_masks(image, boxes):
+        """One SAM mask per box **in order** (list, ``None`` where a box yields none). SAM2 usually
+        returns one mask per prompted box, but a batched call can return a *different* count on some
+        slices — indexing a stacked array then silently misaligns every later box. On a per-chunk
+        count mismatch we re-prompt that chunk one box at a time so alignment is exact. The
+        count-matched path is unchanged (same masks, same order), so this is a no-op for the slices
+        where it never fires and only adds a slow fallback on the rare offending one."""
+        out = []
+        for i in range(0, len(boxes), sam_batch):
+            chunk = boxes[i:i + sam_batch]
+            r = sam_model(image, bboxes=chunk, verbose=False, device=device)[0]
+            mdc = None if r.masks is None else r.masks.data.cpu().numpy()
+            if mdc is not None and len(mdc) == len(chunk):
+                out.extend(list(mdc))
+            else:
+                state["realigned"] += 1
+                for b in chunk:
+                    rb = sam_model(image, bboxes=b[None], verbose=False, device=device)[0]
+                    mb = None if rb.masks is None else rb.masks.data.cpu().numpy()
+                    out.append(mb[0] if (mb is not None and len(mb)) else None)
+        return out
+
     def remask(image, boxes_xyxy):
         boxes = np.asarray(boxes_xyxy, dtype=float)
         if len(boxes) == 0:
             return []
-        outs = []
-        for i in range(0, len(boxes), sam_batch):
-            r = sam_model(image, bboxes=boxes[i:i + sam_batch], verbose=False, device=device)[0]
-            outs.append(r.masks.data.cpu().numpy())
-        s = np.concatenate(outs, axis=0)
+        s = _sam_masks(image, boxes)
         masks = []
         for k in range(len(boxes)):
-            mb = _clean(s[k].astype(np.uint8))
+            mb = None if s[k] is None else _clean(s[k].astype(np.uint8))
             box_area = (boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1])
             if mb is None or mb.sum() > max_box_blowup * box_area:
                 masks.append(None)                       # dropped by _process_detection
@@ -575,6 +615,80 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
         return masks
 
     return remask
+
+
+def sam2_rotation_sweep(model, sam, crops, alphas, aspect_min=1.35, small_px=8.0, sigma=4.0,
+                        n_boot=300, order=3, seed=0, device=0, slice_size=256, imgsz=1024,
+                        conf=0.10, sides=("yolo", "sam256")):
+    """T2 — rotation invariance with SAM2 in the loop (readout B, ``remask_fn``-aware).
+
+    For each rotation ``alpha``, rotate every crop in ``crops`` (a list of 2D uint8 arrays), run the
+    production YOLO-detect + SAM2 re-mask (:func:`detect_sam2_mask_sets`) on each, read angles off
+    each requested side with the SAME moment estimator (:func:`angles_from_moments`), and pool the
+    elongated (``aspect > aspect_min``) angles across crops. Angles are measured in the ROTATED
+    (image) frame; the geographic angle un-rotates by ``+alpha``. Both ``yolo`` and ``sam256`` are
+    read from the **identical** rotated+resampled pixels, so **YOLO is the built-in positive control**
+    (a known grid-locker, geo-slope ≈ +1): the resampling confound is applied to both and cancels in
+    the comparison — if SAM stays content-locked where YOLO grid-locks, the difference is the mask
+    producer (SAM2 decoder vs YOLO prototype head), not the rotation kernel.
+
+    Returns ``{side: DataFrame}`` with one row per alpha:
+    ``[alpha, n, raw_peak, geo_peak, geo_lo, geo_hi, grid_raw, grid_geo, diag_raw, diag_geo, n_sm,
+    grid_raw_sm, grid_geo_sm]``. The ``raw_peak``/``geo_*`` columns match
+    :func:`transforms_test.population_rotation_sweep` so :func:`transforms_test.rotation_slope` /
+    :func:`plot_rotation_sweep` apply unchanged (geo-slope 0 = tracks content, +1 = re-imposed on the
+    grid). ``grid_raw``/``grid_geo`` are the cardinal :func:`orientation.grid_fraction` in the image
+    and geographic frames: a **grid-locked** producer pins the cardinal excess to pixels (``grid_raw``
+    flat, ``grid_geo`` varies with α); a **content-locked** one does the reverse (``grid_geo`` flat).
+    ``diag_*`` is the 45/135 analogue (YOLO's axis). ``*_sm`` restricts to the small (< ``small_px``
+    native-px) subset where T1's cardinal excess lives — the sharpest test of whether *that* residual
+    grid-locks.
+    """
+    from .transforms_test import rotate_image
+    from .orientation import bootstrap_peak_ci, grid_fraction, diagonal_fraction
+
+    out = {s: [] for s in sides}
+    realigned_total = 0
+    for a in alphas:
+        pooled = {s: [] for s in sides}
+        for crop in crops:
+            rimg = rotate_image(crop, a, order=order)
+            df, masks = detect_sam2_mask_sets(model, sam, rimg, slice_size=slice_size, imgsz=imgsz,
+                                              conf=conf, device=device, configs=sides)
+            realigned_total += int(df.attrs.get("realigned_chunks", 0))
+            for s in sides:
+                ang = angles_from_moments(masks[s])
+                el = ang[(ang.aspect > aspect_min) & np.isfinite(ang.angle180)]
+                if len(el):
+                    pooled[s].append((el.angle180.values, el.diameter_px.values))
+        for s in sides:
+            if pooled[s]:
+                raw_ang = np.concatenate([p[0] for p in pooled[s]])
+                dpx = np.concatenate([p[1] for p in pooled[s]])
+            else:
+                raw_ang = np.array([]); dpx = np.array([])
+            if len(raw_ang) == 0:
+                out[s].append((float(a), 0, np.nan, np.nan, np.nan, np.nan,
+                               np.nan, np.nan, np.nan, np.nan, 0, np.nan, np.nan))
+                continue
+            geo_ang = (raw_ang + a) % 180.0
+            raw, lo, hi = bootstrap_peak_ci(raw_ang, n_boot=n_boot, sigma=sigma, seed=seed)
+            sm = dpx < small_px
+            row = [float(a), len(raw_ang), float(raw), float((raw + a) % 180.0),
+                   float((lo + a) % 180.0), float((hi + a) % 180.0),
+                   grid_fraction(raw_ang), grid_fraction(geo_ang),
+                   diagonal_fraction(raw_ang), diagonal_fraction(geo_ang), int(sm.sum())]
+            if sm.sum() >= 20:
+                row += [grid_fraction(raw_ang[sm]), grid_fraction(geo_ang[sm])]
+            else:
+                row += [np.nan, np.nan]
+            out[s].append(tuple(row))
+    cols = ["alpha", "n", "raw_peak", "geo_peak", "geo_lo", "geo_hi", "grid_raw", "grid_geo",
+            "diag_raw", "diag_geo", "n_sm", "grid_raw_sm", "grid_geo_sm"]
+    res = {s: pd.DataFrame(out[s], columns=cols) for s in sides}
+    for s in sides:
+        res[s].attrs["realigned_chunks"] = realigned_total
+    return res
 
 
 def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):

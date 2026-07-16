@@ -30,6 +30,7 @@ import pandas as pd
 from .orientation import (
     ellipse_angle180, grid_fraction, grid_fraction_uniform,
     diagonal_fraction, asymmetry_ratio, axial_distance,
+    half_plane_fraction, half_plane_fraction_uniform,
 )
 from .polygon import binary_mask_to_polygon, binary_mask_to_polygon_cv
 from .transforms_test import render_boulder_patch
@@ -308,6 +309,29 @@ def orientation_by_band(angle180, aspect, dpx, grid_axis="diagonal", aspect_min=
                          "frac": frac(a[m], tol_deg), "chirality": asymmetry_ratio(a[m], tol_deg)})
     res = pd.DataFrame(rows)
     res.attrs["uniform"] = grid_fraction_uniform(tol_deg)
+    return res
+
+
+def half_plane_by_band(angle180, aspect, dpx, aspect_min=1.35, bands=DEFAULT_SIZE_BANDS,
+                       min_n=30):
+    """Half-plane fraction ``f_lower = P(angle180 ∈ [0, 90))`` per native-px size band, on the
+    elongated subset — the SAM2 half-plane-imbalance readout (companion to :func:`orientation_by_band`
+    for the axial grid/diagonal fraction). Given aligned ``angle180`` / ``aspect`` / ``dpx`` arrays,
+    restrict to ``aspect > aspect_min`` and finite angle, then report
+    :func:`orientation.half_plane_fraction` for the ``"all"`` row and each band with >= ``min_n``
+    members. Returns ``[band, n, f_lower]``; the reflection null (0.5) is on ``.attrs["uniform"]``.
+    Used by T1 (synthetic null, by band × aspect), T3/T4 (per body), and the cross-sun probe.
+    """
+    a = np.asarray(angle180, float); asp = np.asarray(aspect, float); d = np.asarray(dpx, float)
+    el = (asp > aspect_min) & np.isfinite(a)
+    rows = [{"band": "all", "n": int(el.sum()), "f_lower": half_plane_fraction(a[el])}]
+    for lo, hi in bands:
+        m = el & (d >= lo) & (d < hi)
+        if m.sum() >= min_n:
+            rows.append({"band": _band_label(lo, hi), "n": int(m.sum()),
+                         "f_lower": half_plane_fraction(a[m])})
+    res = pd.DataFrame(rows)
+    res.attrs["uniform"] = half_plane_fraction_uniform()
     return res
 
 

@@ -221,6 +221,30 @@ def asymmetry_ratio(angle180, tol_deg=10.0):
     return float(n135) / n45 if n45 else float("nan")
 
 
+def half_plane_fraction(angle180):
+    """Fraction of long-axis azimuths in the **lower half-plane** ``[0, 90)`` — the SAM2
+    half-plane-imbalance metric (``f_lower`` in ``docs/sam2_orientation_validation_plan.md``).
+
+    ``f_lower = mean((angle180 % 180) < 90)``. The two halves ``[0, 90)`` and ``[90, 180)`` map onto
+    each other under a mirror flip about a cardinal axis (θ → 180 − θ), so a reflection-symmetric
+    producer on reflection-symmetric input splits them 50/50: the **null is 0.5**. A persistent
+    departure requires a *directional* cause (illumination from a fixed sun azimuth, a real fabric,
+    or a decoder handedness) — which the T4 rotation/mirror + cross-sun probes separate. Unlike the
+    axial :func:`grid_fraction`/:func:`diagonal_fraction` (both blind to which side of an axis the
+    mass sits on), this is the one metric that resolves the left/right bulk asymmetry, of which the
+    narrow 45-vs-135 :func:`asymmetry_ratio` is only one facet. NaNs are dropped before the mean;
+    returns ``nan`` for an all-NaN/empty input.
+    """
+    a = np.asarray(angle180, dtype=float)
+    a = a[np.isfinite(a)] % 180.0
+    return float((a < 90.0).mean()) if a.size else float("nan")
+
+
+def half_plane_fraction_uniform():
+    """The :func:`half_plane_fraction` a reflection-symmetric (unbiased) distribution gives: 0.5."""
+    return 0.5
+
+
 # --- Rose-diagram statistics: well-resolved subset, smoothed density, peak + bootstrap CI -----
 # Consolidates the small analysis helpers previously inlined across the Goal-2 / HiRISE-test
 # notebooks (well-resolved subset selection, smoothed axial density, the refined peak, its
