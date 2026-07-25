@@ -797,6 +797,61 @@ def angles_from_masks(masks, method="skimage"):
     return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
 
 
+def _central_blob(bw, cy, cx):
+    """Connected component of boolean ``bw`` at (or nearest) the centre pixel ``(cy, cx)`` — the
+    target boulder rather than a clipped neighbour that crept into the window. Returns ``bw``
+    unchanged when there is 0 or 1 component."""
+    from scipy import ndimage as ndi
+
+    lab, n = ndi.label(bw)
+    if n <= 1:
+        return bw
+    cid = 0
+    if 0 <= cy < lab.shape[0] and 0 <= cx < lab.shape[1]:
+        cid = int(lab[cy, cx])
+    if cid == 0:                                    # centre off a blob -> nearest labelled pixel
+        ys, xs = np.nonzero(lab)
+        j = int(np.argmin((ys - cy) ** 2 + (xs - cx) ** 2))
+        cid = int(lab[ys[j], xs[j]])
+    return lab == cid
+
+
+def rock_trace_orientations(img, truth, bg, cap, cap_frac=0.5, win_frac=2.5):
+    """Rock-only "human-prior" proxy orientations for a synthetic field (the illumination control).
+
+    A human tracing a boulder outlines the sunlit **rock** and discounts its cast shadow; this proxy
+    does the same on a :func:`~YOLOv8BeyondEarth.transforms_test.render_boulder_field` image by
+    keeping only pixels brighter than ``bg + cap_frac * cap`` — a cut above both the background
+    (~``bg``) and the darker cast shadow (~``bg + shadow``), so the shadow is excluded by
+    construction. For each **known** truth boulder it takes the connected blob at the truth centroid
+    within a window of half-size ``win_frac * a_px``, fills holes, and reads it with
+    :func:`angles_from_moments` — the *same* estimator used on the SAM and YOLO masks, so the three
+    maskers are directly comparable. Returns a DataFrame ``[angle180, aspect, diameter_px]`` aligned
+    row-for-row with ``truth`` (empty/degenerate → NaN): what a shadow-discounting reader recovers.
+    Its departure from ``truth.angle180`` is the shaping any rock-tracer still incurs, and
+    SAM-minus-proxy is the SAM-specific excess.
+    """
+    from scipy import ndimage as ndi
+
+    im = np.asarray(img, dtype=float)
+    H, W = im.shape
+    thr = float(bg) + float(cap_frac) * float(cap)
+    masks = []
+    for r in truth.itertuples(index=False):
+        half = max(int(round(win_frac * float(r.a_px))), 3)
+        cx, cy = int(round(float(r.cx))), int(round(float(r.cy)))
+        x0, x1 = max(cx - half, 0), min(cx + half + 1, W)
+        y0, y1 = max(cy - half, 0), min(cy + half + 1, H)
+        crop = im[y0:y1, x0:x1]
+        bw = crop >= thr
+        if not bw.any():
+            masks.append(np.zeros(crop.shape, dtype=np.uint8))
+            continue
+        blob = _central_blob(bw, cy - y0, cx - x0)
+        masks.append(ndi.binary_fill_holes(blob).astype(np.uint8))
+    return angles_from_moments(masks)
+
+
 def center_orientation(model, patch, imgsz=1024, conf=0.10, device=0, max_center_dist=40):
     """Run YOLO on a square ``patch`` and return ``(angle180, aspect)`` of the detection nearest
     the patch centre, or ``None``. The geographic azimuth is measured in the *patch's own* frame.

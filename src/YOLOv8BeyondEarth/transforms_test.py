@@ -28,9 +28,58 @@ def _circular_diff(a, b):
     return np.minimum(d, 180.0 - d)
 
 
+def _draw_cast_shadow(img, center, a_px, b_px, cv2_ang, sun_az_deg, bg, shadow,
+                      shadow_frac, inc_deg, height_frac, shadow_width_frac):
+    """Draw one boulder's cast shadow onto ``img`` in place (before the bright cap), one of two ways.
+
+    LEGACY (``inc_deg is None``) — the original hand-set model: a copy of the boulder ellipse (same
+    ``a_px, b_px, cv2_ang``), value ``bg + shadow``, offset ``shadow_frac * a_px`` along the anti-sun
+    direction; drawn only if ``shadow_frac > 0``. Byte-identical to the pre-incidence renderer, so
+    every existing caller (``recall_confidence_sweep``, the T4 nulls, the T1 shadow arms) is
+    unchanged.
+
+    INCIDENCE (``inc_deg`` given, degrees from the surface normal) — a 2.5-D "flat-top silhouette
+    projection" shadow whose *length* grows with the solar incidence angle, the lever this whole
+    exploration turns on. A boulder of equivalent diameter ``D = 2*sqrt(a_px*b_px)`` and assumed
+    height ``h = height_frac*D`` casts a ground shadow reaching ``L = h * tan(inc_deg)`` beyond the
+    rock. The shadow is drawn by **sweeping the boulder's own silhouette** (the same ``a_px, b_px,
+    cv2_ang`` as the bright cap) from the boulder centre out to ``L`` along the anti-sun direction:
+    the swept union is a capsule that (a) has the boulder's *exact* cross-sun width at every point —
+    no perpendicular bulge — and (b) starts at the centre, so nothing lands on the sun-facing side.
+    The bright cap, drawn on top by the caller, overpaints the on-boulder part, leaving only the
+    anti-sun crescent. ``height_frac`` is the explicit — and stated — 3-D height assumption the
+    shaping magnitude scales with. This is NOT a full 3-D ellipsoid ray-trace (it ignores the height
+    profile / penumbra); it is the boulder outline displaced by the cast distance. At near-vertical
+    sun ``L -> 0`` and no shadow is drawn. ``shadow_width_frac`` is retained for API compatibility but
+    unused by this model (the shadow width IS the silhouette width).
+    """
+    import cv2
+
+    cx, cy = center
+    anti = np.deg2rad(sun_az_deg + 180.0)
+    sdx, sdy = np.sin(anti), -np.cos(anti)            # (col, row) unit vector toward the shadow
+    axes = (max(int(round(a_px)), 1), max(int(round(b_px)), 1))
+    if inc_deg is None:                               # legacy fixed-offset shadow
+        if shadow_frac <= 0:
+            return
+        soff = shadow_frac * a_px
+        sc = (int(round(cx + sdx * soff)), int(round(cy + sdy * soff)))
+        cv2.ellipse(img, sc, axes, cv2_ang, 0, 360, float(bg + shadow), -1)
+        return
+
+    r = float(np.sqrt(a_px * b_px))                   # equivalent radius (px)
+    L = height_frac * (2.0 * r) * np.tan(np.deg2rad(inc_deg))   # ground cast length (px)
+    if L <= 0.5:                                      # sun ~overhead -> negligible shadow
+        return
+    for t in np.linspace(0.0, L, int(L / 0.5) + 1):  # sweep the silhouette anti-sun to form a capsule
+        sc = (int(round(cx + sdx * t)), int(round(cy + sdy * t)))
+        cv2.ellipse(img, sc, axes, cv2_ang, 0, 360, float(bg + shadow), -1)
+
+
 def render_boulder_field(size=512, n=80, angles=None, diam_px=(8, 22), aspect=(1.5, 3.0),
                          bg=110, noise=12.0, cap=80.0, shadow=-55.0, shadow_frac=0.6,
-                         sun_az_deg=255.0, margin=20, min_sep_frac=1.4, seed=0):
+                         sun_az_deg=255.0, margin=20, min_sep_frac=1.4, seed=0,
+                         inc_deg=None, height_frac=0.5, shadow_width_frac=0.9):
     """Render a field of synthetic boulders at **known** long-axis orientations.
 
     Each boulder is a filled bright ellipse (the sunlit rock, value ``bg+cap``) with an optional
@@ -47,6 +96,14 @@ def render_boulder_field(size=512, n=80, angles=None, diam_px=(8, 22), aspect=(1
     Boulders are rejected if they fall within ``min_sep_frac x`` their own radius of an existing one,
     so masks stay separable. ``sun_az_deg`` is the azimuth the light comes *from* (shadow cast
     opposite).
+
+    Cast-shadow model (see :func:`_draw_cast_shadow`): with the default ``inc_deg=None`` the shadow
+    is the original fixed ``shadow_frac``-offset ellipse (unchanged). Pass an incidence angle
+    ``inc_deg`` (degrees from the surface normal, e.g. real HiRISE 38–58°) to switch on the
+    silhouette-projection shadow — the boulder outline swept anti-sun by ``L = height_frac * diam *
+    tan(inc_deg)`` — the lever for the illumination-shaping magnitude. Critically the **truth angle
+    is always the cap ellipse's own azimuth** ``phi`` regardless of the shadow, so any masker's departure toward the
+    sun axis is pure illumination-shaping.
     """
     import cv2
 
@@ -57,10 +114,6 @@ def render_boulder_field(size=512, n=80, angles=None, diam_px=(8, 22), aspect=(1
     else:
         angles = np.asarray(angles, float)
         n = len(angles)
-
-    # shadow is cast in the anti-sun direction; sun_az is "from", measured like phi (N, clockwise)
-    anti = np.deg2rad(sun_az_deg + 180.0)
-    sdx, sdy = np.sin(anti), -np.cos(anti)            # (col, row) unit vector toward the shadow
 
     placed = []                                       # (cx, cy, rad) for separation checks
     rows = []
@@ -79,10 +132,8 @@ def render_boulder_field(size=512, n=80, angles=None, diam_px=(8, 22), aspect=(1
         placed.append((cx, cy, rad))
         cv2_ang = float(phi - 90.0)
         axes = (max(int(round(a_px)), 1), max(int(round(b_px)), 1))
-        if shadow_frac > 0:                           # cast shadow underneath, offset anti-sun
-            soff = shadow_frac * a_px
-            sc = (int(round(cx + sdx * soff)), int(round(cy + sdy * soff)))
-            cv2.ellipse(img, sc, axes, cv2_ang, 0, 360, float(bg + shadow), -1)
+        _draw_cast_shadow(img, (cx, cy), a_px, b_px, cv2_ang, sun_az_deg, bg, shadow,
+                          shadow_frac, inc_deg, height_frac, shadow_width_frac)
         cv2.ellipse(img, (int(round(cx)), int(round(cy))), axes, cv2_ang, 0, 360,
                     float(bg + cap), -1)
         rows.append((cx, cy, a_px, b_px, phi % 180.0, 2.0 * np.sqrt(a_px * b_px)))
@@ -93,10 +144,13 @@ def render_boulder_field(size=512, n=80, angles=None, diam_px=(8, 22), aspect=(1
 
 
 def render_boulder_patch(size=256, phi=0.0, diam_px=12.0, aspect=2.0, bg=110, noise=12.0,
-                         cap=80.0, shadow=-55.0, shadow_frac=0.6, sun_az_deg=255.0, seed=0):
+                         cap=80.0, shadow=-55.0, shadow_frac=0.6, sun_az_deg=255.0, seed=0,
+                         inc_deg=None, height_frac=0.5, shadow_width_frac=0.9):
     """Render a single synthetic boulder at azimuth ``phi`` centred in a ``size`` square patch --
     the per-boulder (readout A) synthetic-null analogue of :func:`render_boulder_field`. Returns the
-    uint8 patch. Same drawing convention (cv2 angle ``phi - 90``, shadow cast anti-sun)."""
+    uint8 patch. Same drawing convention (cv2 angle ``phi - 90``, shadow cast anti-sun) and the same
+    two-mode cast shadow as the field renderer (``inc_deg=None`` = legacy fixed offset; an incidence
+    angle switches on the physically-scaled elongated shadow -- see :func:`_draw_cast_shadow`)."""
     import cv2
 
     rng = np.random.default_rng(seed)
@@ -106,11 +160,8 @@ def render_boulder_patch(size=256, phi=0.0, diam_px=12.0, aspect=2.0, bg=110, no
     c = size // 2
     axes = (max(int(round(a_px)), 1), max(int(round(b_px)), 1))
     cv2_ang = float(phi - 90.0)
-    if shadow_frac > 0:
-        anti = np.deg2rad(sun_az_deg + 180.0)
-        soff = shadow_frac * a_px
-        sc = (int(round(c + np.sin(anti) * soff)), int(round(c - np.cos(anti) * soff)))
-        cv2.ellipse(img, sc, axes, cv2_ang, 0, 360, float(bg + shadow), -1)
+    _draw_cast_shadow(img, (c, c), a_px, b_px, cv2_ang, sun_az_deg, bg, shadow,
+                      shadow_frac, inc_deg, height_frac, shadow_width_frac)
     cv2.ellipse(img, (c, c), axes, cv2_ang, 0, 360, float(bg + cap), -1)
     return np.clip(img, 0, 255).astype(np.uint8)
 

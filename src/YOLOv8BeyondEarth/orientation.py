@@ -245,6 +245,27 @@ def half_plane_fraction_uniform():
     return 0.5
 
 
+def half_plane_fraction_about(angle180, ref_axis):
+    """:func:`half_plane_fraction` generalised to an **arbitrary reference axis** ``ref_axis`` (deg).
+
+    Fraction of azimuths whose signed axial position sits in the half turned clockwise of
+    ``ref_axis``: ``mean(((angle180 - ref_axis) % 180) < 90)``. The plain
+    :func:`half_plane_fraction` is exactly the ``ref_axis = 0`` case (split about the N–S cardinal).
+    Passing the **sun azimuth** as ``ref_axis`` makes this the "which side of the sun line does the
+    apparent long axis lean" probe. Because a pull *toward* the sun axis is reflection-symmetric
+    about it, a purely axial illumination concentration leaves this at the **null 0.5** — so a
+    departure here is a *handedness* about the sun (decoder or shadow asymmetry), complementary to
+    the fixed-frame :func:`half_plane_fraction` which instead tracks *where* the sun axis sits
+    relative to the cardinals (that is the "f_lower tracks the sun by construction" signal). NaNs
+    dropped; ``nan`` for empty input.
+    """
+    a = np.asarray(angle180, dtype=float)
+    a = a[np.isfinite(a)]
+    if not a.size:
+        return float("nan")
+    return float((((a - float(ref_axis)) % 180.0) < 90.0).mean())
+
+
 # --- Rose-diagram statistics: well-resolved subset, smoothed density, peak + bootstrap CI -----
 # Consolidates the small analysis helpers previously inlined across the Goal-2 / HiRISE-test
 # notebooks (well-resolved subset selection, smoothed axial density, the refined peak, its
@@ -269,6 +290,45 @@ def axial_distance(angles, center):
     """Axial (mod-180) angular distance from each azimuth to ``center``, in [0, 90]."""
     a = np.asarray(angles, dtype=float) % 180.0
     return np.abs(((a - center + 90.0) % 180.0) - 90.0)
+
+
+def signed_axial_deviation(angles, ref):
+    """Signed axial deviation of each azimuth from ``ref``, in (-90, 90] (deg).
+
+    The signed companion of :func:`axial_distance` (whose absolute value it equals). Positive means
+    ``angles`` lies clockwise of ``ref`` (larger azimuth, the short way round the mod-180 circle),
+    negative counter-clockwise; ``((angles - ref + 90) % 180) - 90`` so it wraps correctly (1° vs
+    ref=179° gives +2°) and treats θ and θ+180 as one axis. NaNs propagate (not dropped), matching
+    :func:`axial_distance`. Two uses in the illumination probe: the **signed apparent-angle error**
+    (``ref`` = the known truth angle) and the **signed boulder position relative to the sun**
+    (``ref`` = the sun azimuth); regressing the former on the latter is the shaping curve — a pull
+    toward the sun axis is a negative slope through the origin. ``ref`` may be a scalar or an
+    array broadcastable to ``angles`` (e.g. a per-boulder sun azimuth).
+    """
+    a = np.asarray(angles, dtype=float)
+    r = np.asarray(ref, dtype=float)
+    return ((a - r + 90.0) % 180.0) - 90.0
+
+
+def axis_alignment_fraction(angle180, ref_axis, tol_deg=45.0):
+    """Fraction of long-axis azimuths within ``tol_deg`` of the reference axis ``ref_axis`` (axial).
+
+    With the default ``tol_deg = 45`` this splits the axial circle into the 90°-wide half **centered
+    on** ``ref_axis`` (axes lying *along* it) versus the half centered on its perpendicular (axes
+    lying *across* it) — so, passing the **sun axis**, it answers directly: *are more boulders
+    oriented along the sun line than across it?* The **null for a uniform population is
+    ``tol_deg / 90`` = 0.5 at tol 45**; a pull *toward* ``ref_axis`` (the illumination artifact)
+    pushes it above 0.5. Smaller ``tol_deg`` measures tighter concentration about the axis (e.g. tol
+    10 → a :func:`grid_fraction`-style share about an arbitrary axis, null 0.111). Unlike
+    :func:`half_plane_fraction_about` (which splits *at* the axis and so measures left/right
+    handedness, null 0.5 and blind to a symmetric axial pull), this splits *across* the axis and so is
+    sensitive to the concentration itself. NaNs dropped; ``nan`` for empty input.
+    """
+    a = np.asarray(angle180, dtype=float)
+    a = a[np.isfinite(a)]
+    if not a.size:
+        return float("nan")
+    return float((axial_distance(a, ref_axis) <= float(tol_deg)).mean())
 
 
 def _circular_smooth(counts, sigma=4.0):
