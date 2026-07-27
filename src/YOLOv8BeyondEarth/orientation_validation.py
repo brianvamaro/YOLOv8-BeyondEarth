@@ -303,7 +303,7 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def _capture_process_mask(store):
+def _capture_process_mask(store, proto_store=None):
     """Temporarily wrap ``ultralytics.utils.ops.process_mask`` so each call ALSO appends the
     per-detection **pre-threshold probability field** to ``store`` (Test 3e — the soft mask that
     ultralytics discards: v8.4.75 thresholds the interpolated logits at 0 inside ``process_mask``,
@@ -316,6 +316,18 @@ def _capture_process_mask(store):
     which would smear a phantom half-weight halo over the whole box. Within ~1 proto px of the box
     edge the bilinear blend with the zeroed outside still pulls probabilities toward 0.5; the box
     is the same for the hard and soft sides, so this edge zone is shared, not a confound.
+
+    ``proto_store``, if given, additionally receives the field **before** the bilinear upsample —
+    i.e. at the prototype basis's own resolution (``imgsz / 4``). That is the array the seg head
+    actually produces, and therefore the one that shows *why* small-boulder axes snap to the grid:
+    at the production ``slice_size=256, imgsz=1024`` there are ``256/256 = 1`` prototype cells per
+    native raster pixel, so a 7-px boulder is drawn on roughly a 7x7 grid. Everything after this
+    point is interpolation. Passing ``None`` (the default) leaves the original behaviour untouched.
+
+    ``store`` may be ``None`` to skip the upsampled field entirely. That matters on dense tiles: the
+    upsampled capture is an ``imgsz x imgsz`` float per detection (~4 MB each at 1024 px), so a slice
+    with a hundred boulders allocates hundreds of MB of GPU memory and OOMs an 8 GB card. Callers that
+    only want the prototype-resolution field (16x smaller) should pass ``store=None``.
     """
     import torch
     import torch.nn.functional as F
@@ -330,10 +342,13 @@ def _capture_process_mask(store):
         ratios = torch.tensor([[wr, hr, wr, hr]], device=bboxes.device)
         logits = uops.crop_mask(logits, bboxes * ratios)
         ind = uops.crop_mask(torch.ones_like(logits), bboxes * ratios)
+        if proto_store is not None:
+            proto_store.append((logits.sigmoid() * (ind >= 0.5)).cpu().numpy())
         if upsample:
             logits = F.interpolate(logits[None], shape, mode="bilinear")[0]
             ind = F.interpolate(ind[None], shape, mode="bilinear")[0]
-        store.append((logits.sigmoid() * (ind >= 0.5)).cpu().numpy())
+        if store is not None:
+            store.append((logits.sigmoid() * (ind >= 0.5)).cpu().numpy())
         return logits.gt_(0.0).byte()
 
     uops.process_mask = patched
@@ -409,6 +424,124 @@ def detect_soft_mask_triples(model, img, slice_size=256, imgsz=1024, conf=0.10, 
                     soft_l.append(s[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
                                   .astype(np.float32).copy())
     return prod_l, nat_l, soft_l
+
+
+def _largest_filled(mb):
+    """Largest connected blob of a binary mask, holes filled; ``None`` if empty.
+
+    The same clean-up every mask path in this module applies (kept module-level so
+    :func:`detect_segmenter_view` uses byte-identical handling to the production sides rather than a
+    lookalike). Shape is preserved — no bbox crop.
+    """
+    from scipy.ndimage import binary_fill_holes, label
+    lab, n = label(mb)
+    if n == 0:
+        return None
+    if n > 1:
+        big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+        mb = (lab == big).astype(np.uint8)
+    return binary_fill_holes(mb).astype(np.uint8)
+
+
+def detect_segmenter_view(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0, pad_px=6,
+                          max_records=None, empty_cache_every=8):
+    """Everything the segmenter sees for one boulder, at every resolution in the chain.
+
+    This exists to make the orientation artifact's *mechanism* visible instead of argued. For each
+    detection it returns the same rock at the four stages the pipeline puts it through:
+
+    ``native``  the raw slice pixels around the box (``slice_size`` resolution = the raster's own);
+    ``input``   the same region of the tile after the bilinear upscale to ``imgsz`` — literally the
+                array the network is fed (at the production 256 -> 1024 that is a 4x resize, so it
+                carries no detail the native slice did not already have);
+    ``proto``   the seg head's probability field at the **prototype basis resolution**
+                (``imgsz / 4``), captured before the bilinear upsample. This is the honest answer to
+                "how many mask cells does the network get to describe this boulder?" — at the
+                production config, ``proto_px_per_native_px == 1``, so a 7-px boulder is drawn on a
+                ~7x7 grid, and its long axis can only point where such a grid allows;
+    ``final``   the production binary mask (upsampled, thresholded, largest blob, filled) — the thing
+                the polygon and the reported angle come from.
+
+    Also returned per detection: ``dpx`` (native equivalent diameter), ``angle`` /``aspect`` from the
+    final mask via :func:`angles_from_moments`, ``proto_angle`` from the proto field (same estimator,
+    so the two are directly comparable), ``proto_cells`` (how many proto cells exceed 0.5), and the
+    box. Returns ``(records, meta)``; ``meta`` records the resolution ratios so a figure can state
+    them rather than hard-code them.
+    """
+    import cv2
+    import torch
+
+    records = []
+    proto_store = []
+    up = imgsz / slice_size
+    proto_res = imgsz / 4.0
+    H, W = img.shape
+    n_slices = 0
+    # `store=None`: only the prototype-resolution field is captured. The upsampled field is 16x
+    # larger and unused here, and materialising it per detection OOMs an 8 GB card on dense tiles.
+    with _capture_process_mask(None, proto_store):
+        for y0 in range(0, H - slice_size + 1, slice_size):
+            if max_records and len(records) >= max_records:
+                break
+            for x0 in range(0, W - slice_size + 1, slice_size):
+                if max_records and len(records) >= max_records:
+                    break
+                proto_store.clear()
+                n_slices += 1
+                if empty_cache_every and n_slices % empty_cache_every == 0 \
+                        and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
+                big = cv2.resize(sl, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
+                r0 = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
+                           device=device)[0]
+                if r0.masks is None or len(r0.masks.data) == 0 or not proto_store:
+                    continue
+                md = r0.masks.data.cpu().numpy()
+                # ultralytics rescales `boxes.xyxy` back to the ORIGINAL array it was handed, which
+                # here is the native `slice_size` array — NOT imgsz. (Getting this wrong silently
+                # crops the wrong window: the panels still look like imagery, just not of the
+                # boulder, and the mask contour vanishes.) Each column then scales from native.
+                boxes = r0.boxes.xyxy.cpu().numpy()
+                if proto_store[-1].shape[0] != md.shape[0]:
+                    raise RuntimeError("proto capture out of sync with Results "
+                                       f"({proto_store[-1].shape[0]} vs {md.shape[0]})")
+                for k in range(len(md)):
+                    fin = _largest_filled((md[k] >= 0.5).astype(np.uint8))
+                    if fin is None:
+                        continue
+                    mm = cv2.resize(fin.astype(np.float32), (slice_size, slice_size),
+                                    interpolation=cv2.INTER_AREA)
+                    final = _largest_filled((mm >= 0.5).astype(np.uint8))
+                    if final is None:
+                        continue
+                    x1, y1, x2, y2 = boxes[k]                      # already native slice coords
+                    a, b = int(max(0, x1 - pad_px)), int(max(0, y1 - pad_px))
+                    c, d = (int(min(slice_size, x2 + pad_px)), int(min(slice_size, y2 + pad_px)))
+                    if c - a < 4 or d - b < 4:
+                        continue
+                    pr = proto_store[-1][k]
+                    sc = pr.shape[0] / slice_size                  # proto cells per native px
+                    ang = angles_from_moments([final]).iloc[0]
+                    pang = angles_from_moments([pr]).iloc[0]
+                    pb, pd_ = int(np.floor(b * sc)), int(np.ceil(d * sc))
+                    pa, pc = int(np.floor(a * sc)), int(np.ceil(c * sc))
+                    records.append(dict(
+                        native=sl[b:d, a:c].copy(),
+                        input=big[int(b * up):int(d * up), int(a * up):int(c * up)].copy(),
+                        proto=pr[pb:pd_, pa:pc].copy(),
+                        final=final[b:d, a:c].copy(),
+                        proto_cells_per_native_px=float(sc),
+                        box_native=(float(x1 - a), float(y1 - b), float(x2 - a), float(y2 - b)),
+                        dpx=float(ang.diameter_px), angle=float(ang.angle180),
+                        aspect=float(ang.aspect), proto_angle=float(pang.angle180),
+                        proto_aspect=float(pang.aspect),
+                        proto_cells=int((pr >= 0.5).sum()), score=float(r0.boxes.conf[k]),
+                        slice_xy=(x0, y0)))
+    meta = dict(slice_size=slice_size, imgsz=imgsz, upscale=up, proto_res=proto_res,
+                proto_px_per_native_px=proto_res / slice_size, n=len(records),
+                n_slices=n_slices, truncated=bool(max_records and len(records) >= max_records))
+    return records, meta
 
 
 def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
