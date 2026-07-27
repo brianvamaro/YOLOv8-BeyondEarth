@@ -350,6 +350,31 @@ def _draw_outlines(ax, patch, layers, title=None, subtitle=None):
                 fontsize=6.8, color=fs.INK_SOFT, linespacing=1.35)
 
 
+def _cap_outside_ellipse(records):
+    """How far the rasterised synthetic boulder overshoots the ellipse it was drawn from.
+
+    Returns ``(fraction_of_lit_pixels_outside, mean_radial_excess_px)``. The cap is thresholded midway
+    between the patch median (background) and its maximum, then each lit pixel is expressed in the
+    truth ellipse's own frame, so a normalised radius > 1 means "outside the true shape".
+    """
+    fr, ex = [], []
+    for r in records:
+        p = np.asarray(r["patch"], float)
+        ys, xs = np.nonzero(p >= 0.5 * (np.median(p) + p.max()))
+        if not len(xs):
+            continue
+        t = np.deg2rad(r["true_angle"])
+        dx, dy = xs - r["cx"], ys - r["cy"]
+        u = dx * np.sin(t) - dy * np.cos(t)                    # along the major axis
+        v = dx * np.cos(t) + dy * np.sin(t)                    # along the minor axis
+        nr = np.sqrt((u / r["a_px"]) ** 2 + (v / r["b_px"]) ** 2)
+        fr.append(float((nr > 1).mean()))
+        if (nr > 1).any():
+            ex.append(float(np.mean((nr[nr > 1] - 1) * r["a_px"])))
+    return (float(np.mean(fr)) if fr else float("nan"),
+            float(np.mean(ex)) if ex else float("nan"))
+
+
 @figure("fig03_same_boulder",
         ["data/summary/boulder_examples.pkl + boulder_examples_meta.json",
          "data/solutionH/synth_examples.pkl"],
@@ -368,7 +393,9 @@ def fig03_same_boulder():
     # Explicit inch-based geometry: each row needs its image plus a 3-line subtitle underneath, and
     # `tight_layout` packs rows until row 1's subtitle sits on row 2's title.
     PW, IMG, SUB, TTL = 2.35, 2.35, 0.52, 0.28
-    head, foot = 0.85, 0.42
+    # `foot` reserves inches below the axes for the legend AND the two-line rasterisation note; at
+    # 0.42 the note was drawn on top of the bottom row of images.
+    head, foot = 0.85, 1.02
     rowh = IMG + SUB + TTL
     height = 2 * rowh + head + foot
     fig = plt.figure(figsize=(PW * n + 0.55, height))
@@ -408,6 +435,23 @@ def fig03_same_boulder():
             axes[1, j].axis("off")
     axes[0, 0].set_ylabel("real boulders\nhuman = reference", fontsize=9, color=fs.INK)
     axes[1, 0].set_ylabel("synthetic boulders\nknown truth = reference", fontsize=9, color=fs.INK)
+    # The rendered blob visibly overshoots its own truth ellipse, and a reader will ask why. It is not
+    # a mis-drawn overlay: the ellipse is exactly the shape that was rasterised, but a pixel is either
+    # in or out and is then painted as a full 1x1 square, so the blob gains a blocky margin. Measured
+    # here rather than asserted, because it is the same quantisation the whole document is about.
+    out_frac, out_px = _cap_outside_ellipse(sb)
+    import textwrap
+    fig.text(0.5, 0.30 / height,
+             "\n".join(textwrap.wrap(
+                 f"Bottom row: the lit blob extends ~{out_px:.1f} px beyond its own truth ellipse "
+                 f"({out_frac * 100:.0f}% of its lit pixels fall outside it). The ellipse is exactly the "
+                 f"shape that was rendered — but a pixel is either in or out, and is then drawn as a "
+                 f"full square, so a "
+                 f"{np.mean([r['true_dpx'] for r in sb]):.0f}-px boulder cannot be represented without "
+                 f"gaining a blocky margin. That is the quantisation this document is about; the true "
+                 f"ANGLE is unaffected, being the ellipse's own azimuth.",
+                 width=int(13 * (PW * n + 0.55)))),
+             ha="center", va="bottom", fontsize=7.6, color=fs.INK_SOFT)
     handles = [
         plt.Line2D([], [], color=fs.PALETTE["human"], lw=2,
                    label="reference: human tracing (top) / known truth (bottom)"),
@@ -425,7 +469,14 @@ def fig03_same_boulder():
                     for r in real],
               synthetic_median_yolo_err=round(float(syn["median_yolo_err"]), 1),
               synthetic_median_sam_err=round(float(syn["median_sam_err"]), 1),
-              synthetic_sun_az=syn["sun_az_deg"])
+              synthetic_sun_az=syn["sun_az_deg"],
+              # The rasterisation overshoot explained on the figure, kept traceable.
+              rasterisation_overshoot=dict(
+                  lit_pixels_outside_truth_ellipse=round(out_frac, 3),
+                  mean_radial_excess_px=round(out_px, 2),
+                  note="a pixel is either in or out and is painted as a full square, so the rendered "
+                       "blob is larger and blockier than the ellipse it was drawn from; the truth "
+                       "ANGLE is unaffected (it is the ellipse's own azimuth)"))
     mp = SUM / "boulder_examples_meta.json"
     if mp.exists():
         st["pool"] = load_json(mp)["pool_by_body"]
