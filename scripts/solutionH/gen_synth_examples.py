@@ -7,13 +7,18 @@ uses per slice, so the YOLO masks show the real discretisation artifact), then o
   - YOLO-seg  (yolov8-m-boulder)      → per-boulder binary mask (blue)
   - SAM2      (sam2.1_b, box-prompted) → per-boulder binary mask (green)   [option G]
   - OBB R-A   (yolo26m-h-obb-rot)      → per-boulder oriented box (cyan)
-Detections are matched to the rendered truth by centroid. Like Fig 2 (which deliberately shows real
-boulders whose YOLO angle snapped to a pixel diagonal), we render the small artifact-regime size
-band and SELECT the boulders where YOLO's mask most mis-measures the long axis (|YOLO−true| large)
-— the honest showcase of the failure mode and SAM's recovery, now against a KNOWN true angle. Each
-kept boulder is stored self-contained (its own image patch + mask patches + local-frame OBB corners
-+ all four angles) so the plotter is field-agnostic. Cached to data/solutionH/synth_examples.pkl;
-the GPU-free `make_orientation_summary_figs.py` reads it and draws Fig 5.
+Detections are matched to the rendered truth by centroid, then the pool is kept **stratified by size**:
+within each equivalent-diameter band, the boulders where YOLO's mask most mis-measures the long axis
+and SAM recovers it most. Ranking the whole pool by that error instead — as an earlier version did —
+can only ever return small boulders, because the artifact *is* size-dependent: measured over 330
+rendered boulders, the share with |YOLO − true| >= 10 deg runs 8/32 at 4-6 px but **0/113 above 15 px**.
+Stratifying lets the figure show the failure mode *and* its size dependence, and that per-band rate is
+saved alongside the panels so the figure can quote it.
+
+Each kept boulder is stored self-contained (its own image patch + mask patches + local-frame OBB
+corners + all four angles) so the plotter is field-agnostic. Cached to
+data/solutionH/synth_examples.pkl, read by `scripts/summary/make_summary_figs.py` (fig03) and the
+older `make_orientation_summary_figs.py`.
 
 Run from repo root: python YOLOv8-BeyondEarth/scripts/solutionH/gen_synth_examples.py
 """
@@ -34,12 +39,21 @@ OUT = os.path.join(INNER, "data", "solutionH", "synth_examples.pkl")
 SIZE = 256                 # one production slice; upscaled 4x to imgsz=1024 (= production per-tile)
 IMGSZ = 1024
 N_RENDER = 40              # requested boulders per field (fewer placed after separation rejection)
-DIAM_PX = (7, 20)          # the artifact regime + a few larger, clearer boulders (cf. Fig 2's range)
+# `diam_px` is the MAJOR-axis length, so the equivalent diameter that ends up in `true_dpx` is
+# 2*sqrt(a*b), i.e. noticeably smaller for an elongated shape: (7, 34) here yields ~5-24 px equivalent.
+# The old (7, 20) topped out near 14 px equivalent, and after the artifact selection below nothing
+# above 10 px survived — the artifact is size-dependent, so ranking purely by YOLO error can only ever
+# return small boulders. The pool is therefore stratified by size instead.
+DIAM_PX = (7, 34)
 ASPECT = (1.7, 3.0)        # clearly elongated so the true long axis is well defined
 SUN_AZ = 255.0             # matches the Fig 4 / Fig 7 shadowed null render convention
-SEEDS = [5, 11, 23, 42, 67, 88]     # pool several fields to build a selection pool
+SEEDS = [5, 11, 23, 42, 67, 88, 101, 137, 199]   # more fields: large boulders are rarer per field
 MATCH_PX = 5.0
-N_PANELS = 12
+# Size-stratified pool: within each equivalent-diameter band keep the boulders where YOLO's mask most
+# mis-measures the axis AND SAM recovers it most (the same "honest showcase" ranking as before), so the
+# plotter can draw a row spanning size rather than four near-identical small boulders.
+BANDS = [(4, 6), (6, 8), (8, 11), (11, 15), (15, 99)]
+PER_BAND = 4
 MIN_YOLO_ERR = 10.0        # a boulder is an "artifact case" if |YOLO angle − true| >= this
 
 
@@ -141,25 +155,51 @@ def main():
         pool.extend(recs)
         print(f"seed {s}: +{len(recs)} matched elongated (pool {len(pool)})")
 
-    # SELECT the artifact cases (parallels Fig 2's diagonal-locked selection): boulders where YOLO's
-    # mask most mis-measures the long axis, ranked by how much SAM recovers it (yolo_err - sam_err).
-    artifact = [r for r in pool if r["yolo_err"] >= MIN_YOLO_ERR]
-    artifact.sort(key=lambda r: r["yolo_err"] - r["sam_err"], reverse=True)
-    recs = artifact[:N_PANELS] if len(artifact) >= N_PANELS else \
-        sorted(pool, key=lambda r: r["yolo_err"] - r["sam_err"], reverse=True)[:N_PANELS]
+    # SELECT per size band. Within a band, prefer the artifact cases (|YOLO - true| >= MIN_YOLO_ERR)
+    # ranked by how much SAM recovers (yolo_err - sam_err); if a band has none, fall back to its
+    # best-ranked boulders so the band is still represented. Stratifying is what lets the figure show
+    # the failure mode AND the size dependence: ranking the whole pool by error returns only small
+    # boulders, because that is where the artifact lives.
+    recs = []
+    for lo, hi in BANDS:
+        band = [r for r in pool if lo <= r["true_dpx"] < hi]
+        band.sort(key=lambda r: r["yolo_err"] - r["sam_err"], reverse=True)
+        # Artifact cases first, then top up from the band's next-best so every band offers the
+        # plotter a real choice. Above ~15 px there are typically NO artifact cases at all, which is
+        # the size dependence stated as a count rather than asserted.
+        hits = [r for r in band if r["yolo_err"] >= MIN_YOLO_ERR]
+        # dedupe by identity: these records hold numpy arrays, so `r not in hits` would compare them
+        # elementwise and raise on the ambiguous truth value.
+        seen = {id(r) for r in hits}
+        hits += [r for r in band if id(r) not in seen]
+        recs.extend(hits[:PER_BAND])
+        print(f"  band {lo}-{hi} px: {len(band):3d} in pool, "
+              f"{sum(1 for r in band if r['yolo_err'] >= MIN_YOLO_ERR):3d} artifact cases, "
+              f"kept {len(hits[:PER_BAND])}")
     recs.sort(key=lambda r: r["true_dpx"])                # display order: small -> large
     n_obb = sum(r["obb_corners"] is not None for r in recs)
     my = float(np.median([r["yolo_err"] for r in recs]))
     ms = float(np.median([r["sam_err"] for r in recs]))
-    print(f"\npool {len(pool)}; artifact-cases (|Y-T|>={MIN_YOLO_ERR:.0f}) {len(artifact)}; "
-          f"kept {len(recs)} panels; OBB matched {n_obb}/{len(recs)}")
+    n_art = sum(1 for r in pool if r["yolo_err"] >= MIN_YOLO_ERR)
+    print(f"\npool {len(pool)}; artifact-cases (|Y-T|>={MIN_YOLO_ERR:.0f}) {n_art}; "
+          f"kept {len(recs)} panels over {len(BANDS)} size bands; OBB matched {n_obb}/{len(recs)}")
     print(f"selected-panel median error: YOLO {my:.1f}°  SAM {ms:.1f}°")
+    # The artifact-case rate per band is the size dependence, measured; kept for the figure to quote.
+    band_rate = {(f"{lo}-{hi}" if hi < 99 else f"{lo}+"): dict(
+        n=sum(1 for r in pool if lo <= r["true_dpx"] < hi),
+        artifact_cases=sum(1 for r in pool if lo <= r["true_dpx"] < hi
+                           and r["yolo_err"] >= MIN_YOLO_ERR)) for lo, hi in BANDS}
+    print("artifact-case rate by size band:",
+          {k: f"{v['artifact_cases']}/{v['n']}" for k, v in band_rate.items()})
     if len(recs) < 8:
         raise RuntimeError("too few example boulders — add SEEDS or relax MIN_YOLO_ERR")
 
     with open(OUT, "wb") as f:
         pickle.dump({"boulders": recs, "sun_az_deg": SUN_AZ,
-                     "median_yolo_err": my, "median_sam_err": ms}, f)
+                     "median_yolo_err": my, "median_sam_err": ms,
+                     "bands": BANDS, "min_yolo_err": MIN_YOLO_ERR,
+                     "artifact_rate_by_band": band_rate, "pool_size": len(pool),
+                     "diam_px_rendered": DIAM_PX}, f)
     print("wrote:", OUT)
 
 

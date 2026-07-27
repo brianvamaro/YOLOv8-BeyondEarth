@@ -384,11 +384,20 @@ def fig03_same_boulder():
     if not real_p.exists():
         raise FileNotFoundError(f"{real_p} — run data/summary/run_boulder_examples.py first")
     NCOL = 4                      # fewer, larger panels: at 6 across the boulders were unreadable
-    real = load_pickle(real_p)["diag_locked"][:NCOL]
+    # Both rows span SIZE rather than taking the worst cases, which would return four near-identical
+    # small boulders in each row. Real: nearest to these equivalent diameters (this also drops a 12 px
+    # panel whose three outlines disagreed so wildly it read as noise rather than as the artifact).
+    pool_real = load_pickle(real_p)["diag_locked"]
+    real = [min(pool_real, key=lambda r, t=t: abs(r["dpx"] - t)) for t in (8, 9, 11, 15)]
     syn = load_pickle(syn_p)
-    sb = syn["boulders"]
-    # synthetic: the boulders YOLO mis-measures most, spread over size (same intent as the real row)
-    sb = sorted(sb, key=lambda r: -abs(r["yolo_err"]))[:NCOL]
+    # Synthetic: one boulder per size band, the band's most illustrative case (largest YOLO error that
+    # SAM recovers). The largest band deliberately shows a boulder YOLO gets RIGHT -- above ~15 px the
+    # cache finds no case at all with |YOLO - true| >= 10 deg, so a row of only failures would
+    # misrepresent a size-dependent artifact as a blanket one.
+    def _pick(lo, hi):
+        band = [r for r in syn["boulders"] if lo <= r["true_dpx"] < hi]
+        return max(band, key=lambda r: r["yolo_err"] - r["sam_err"]) if band else None
+    sb = [r for r in (_pick(4, 6), _pick(6, 8), _pick(11, 15), _pick(15, 99)) if r is not None]
     n = max(len(real), len(sb))
     # Explicit inch-based geometry: each row needs its image plus a 3-line subtitle underneath, and
     # `tight_layout` packs rows until row 1's subtitle sits on row 2's title.
@@ -447,7 +456,7 @@ def fig03_same_boulder():
                  f"({out_frac * 100:.0f}% of its lit pixels fall outside it). The ellipse is exactly the "
                  f"shape that was rendered — but a pixel is either in or out, and is then drawn as a "
                  f"full square, so a "
-                 f"{np.mean([r['true_dpx'] for r in sb]):.0f}-px boulder cannot be represented without "
+                 f"{min(r['true_dpx'] for r in sb):.0f}-px boulder cannot be represented without "
                  f"gaining a blocky margin. That is the quantisation this document is about; the true "
                  f"ANGLE is unaffected, being the ellipse's own azimuth.",
                  width=int(13 * (PW * n + 0.55)))),
@@ -460,8 +469,8 @@ def fig03_same_boulder():
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=8.5,
                bbox_to_anchor=(0.5, 0.002))
     fig.suptitle("One boulder, three producers — solid = outline, dashed = that producer's fitted "
-                 "long axis\nreal boulders selected where YOLO's axis has snapped onto a pixel "
-                 "diagonal; synthetic where YOLO's angle error is largest",
+                 "long axis\nboth rows span size; synthetic panels are each band's most-mis-measured "
+                 "boulder, and the largest band has none to show",
                  fontsize=10.5, y=1 - 0.10 / height, va="top")
     st = dict(real=[dict(body=r["body"], dpx=round(r["dpx"], 1), angle_h=round(r["angle_h"], 1),
                          angle_y=round(r["angle_y"], 1), angle_s=round(r["angle_s"], 1),
@@ -470,6 +479,11 @@ def fig03_same_boulder():
               synthetic_median_yolo_err=round(float(syn["median_yolo_err"]), 1),
               synthetic_median_sam_err=round(float(syn["median_sam_err"]), 1),
               synthetic_sun_az=syn["sun_az_deg"],
+              # The artifact's size dependence, counted on known truth over the whole render pool
+              # rather than the four panels shown: the share of boulders whose YOLO axis is >= 10 deg
+              # from the truth falls from a quarter at 4-6 px to none above 15 px.
+              synthetic_artifact_rate_by_band=syn.get("artifact_rate_by_band"),
+              synthetic_pool_size=syn.get("pool_size"),
               # The rasterisation overshoot explained on the figure, kept traceable.
               rasterisation_overshoot=dict(
                   lit_pixels_outside_truth_ellipse=round(out_frac, 3),
