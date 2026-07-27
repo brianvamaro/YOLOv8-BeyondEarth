@@ -35,8 +35,9 @@ import matplotlib.pyplot as plt                                        # noqa: E
 
 from YOLOv8BeyondEarth import figstyle as fs                           # noqa: E402
 from YOLOv8BeyondEarth.orientation import (asymmetry_ratio, axial_distance,      # noqa: E402
-                                           axis_alignment_fraction, diagonal_fraction,
-                                           grid_fraction, half_plane_fraction, refine_peak)
+                                           axis_alignment_fraction, bootstrap_peak_ci,
+                                           diagonal_fraction, grid_fraction, half_plane_fraction,
+                                           refine_peak)
 
 DATA = ROOT / "data"
 SUM = DATA / "summary"
@@ -53,6 +54,49 @@ UNIF = fs.UNIFORM_FRACTION
 
 REGISTRY = {}
 
+# --- measured provenance -----------------------------------------------------------------------
+# Every figure's inputs used to be a hand-written string in its decorator. That is a claim, not a
+# fact: change a figure's data source without updating the decorator and the document confidently
+# prints a false provenance line — worse than printing nothing. So all reads go through the helpers
+# below, which record what was actually opened. `build()` returns that record, and the CLI checks it
+# against the declared list and complains if a real input was never declared.
+_STATE = {"fig": None, "opened": [], "save_png": True}
+
+
+def _record(path):
+    p = Path(path)
+    try:
+        rel = str(p.resolve().relative_to(REPO))
+    except ValueError:
+        rel = str(p)
+    entry = dict(path=rel, bytes=p.stat().st_size if p.exists() else None,
+                 mtime=(pd.Timestamp(p.stat().st_mtime, unit="s").strftime("%Y-%m-%d %H:%M")
+                        if p.exists() else None))
+    if not any(e["path"] == rel for e in _STATE["opened"]):
+        _STATE["opened"].append(entry)
+    return entry
+
+
+def read_csv(path, **kw):
+    """`pd.read_csv` that records the file (and its row count) as a measured input."""
+    e = _record(path)
+    df = pd.read_csv(path, **kw)
+    e["rows"] = len(df)
+    return df
+
+
+def load_json(path):
+    """`load_json(Path)` that records the file as a measured input."""
+    _record(path)
+    return json.loads(Path(path).read_text())
+
+
+def load_pickle(path):
+    """`pickle.load` that records the file as a measured input."""
+    _record(path)
+    with open(path, "rb") as fh:
+        return pickle.load(fh)
+
 
 def figure(name, inputs, title):
     def deco(fn):
@@ -62,12 +106,63 @@ def figure(name, inputs, title):
 
 
 def save(fig, name):
-    FIG.mkdir(parents=True, exist_ok=True)
+    """Hand the finished figure back to whoever asked for it.
+
+    Two callers with different needs, hence the indirection: the CLI wants a PNG on disk and the
+    figure closed (16 open figures is a lot of memory), while the notebook wants the live `Figure`
+    object to display inline — reading a PNG off disk would let the document show something the data
+    no longer supports. `build()` flips `save_png` and picks the figure up from `_STATE`.
+    """
+    _STATE["fig"] = fig
     p = FIG / f"{name}.png"
-    fig.savefig(p, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    print(f"    -> {p.relative_to(REPO)}")
+    if _STATE["save_png"]:
+        FIG.mkdir(parents=True, exist_ok=True)
+        fig.savefig(p, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        print(f"    -> {p.relative_to(REPO)}")
     return str(p.relative_to(REPO))
+
+
+def build(name, save_png=False):
+    """Build one figure **now**, from its cached inputs. Returns ``(fig, stats, provenance)``.
+
+    This is the notebook's entry point. Calling it means the document renders from the data every
+    time it is executed, so a figure cannot silently disagree with the numbers quoted beside it, and
+    a stale PNG cannot survive on disk unnoticed. ``provenance`` lists the files actually opened,
+    with row counts and modification times.
+    """
+    if name not in REGISTRY:
+        raise KeyError(f"unknown figure {name!r}; available: {list(REGISTRY)}")
+    fs.apply_rcparams()
+    _STATE.update(fig=None, opened=[], save_png=save_png)
+    _, st = REGISTRY[name]["fn"]()
+    prov = dict(name=name, title=REGISTRY[name]["title"],
+                declared_inputs=list(REGISTRY[name]["inputs"]),
+                measured_inputs=list(_STATE["opened"]))
+    return _STATE["fig"], st, prov
+
+
+def run_metadata():
+    """Recorded configuration of the long GPU runs behind these figures.
+
+    The measurement runs take hours and can never execute inside a document, so their provenance has
+    to be *recorded metadata shown* rather than re-execution. This surfaces the parameters that decide
+    what the numbers mean — sampling area, tile order, random seed, per-scene wall clock — so a reader
+    can check the sampling design without taking it on trust.
+    """
+    out = {}
+    p = SUM / "fixed_area_scenes_meta.json"
+    if p.exists():
+        m = load_json(p)
+        sc = [s for s in m.get("scenes", []) if "error" not in s]
+        out["multi-scene / control-site rescan"] = dict(
+            target_km2=m.get("target_km2"), tile_px=m.get("tile_px"), tile_order=m.get("order"),
+            seed=m.get("seed"), n_scenes=len(sc),
+            km2_per_scene=sorted({round(s.get("km2_valid", 0)) for s in sc}),
+            total_detections=int(sum(s.get("n_det", 0) for s in sc)),
+            gpu_hours=round(sum(s.get("wall_s", 0) for s in sc) / 3600, 2),
+            all_reached_target=all(s.get("reached_target") for s in sc))
+    return out
 
 
 def _null_line(ax, y, label, x=0.985):
@@ -95,18 +190,18 @@ def stat_block(a, sun=None):
 
 def sun_axes():
     """Sun axis (axial, degrees) + measured shadow depth per labelled scene."""
-    m = json.loads((SAMV / "mars_sun.json").read_text())["ESP_017355_2260_RED"]
+    m = load_json(SAMV / "mars_sun.json")["ESP_017355_2260_RED"]
     mars = (m["sub_solar"] - m["north"]) % 180.0
     out = {"mars": dict(sun_axis=mars, incidence=m["incidence"]),
            "moon": dict(sun_axis=None, incidence=None)}
     p = SUM / "moon_sun.json"
     if p.exists():
-        j = json.loads(p.read_text())
+        j = load_json(p)
         out["moon"] = dict(sun_axis=j.get("sun_axis"), incidence=j.get("incidence"),
                            source=j.get("source"))
     sp = SUM / "shadow_azimuth.json"
     if sp.exists():
-        for s in json.loads(sp.read_text())["scenes"]:
+        for s in load_json(sp)["scenes"]:
             out[s["body"]]["shadow_depth"] = s["shadow_depth"]
             out[s["body"]]["sun_axis_from_image"] = s["sun_axis_axial_from_image"]
     return out
@@ -116,10 +211,10 @@ def sun_axes():
 # 1. The problem
 # =================================================================================================
 
-@figure("fig01_artifact", ["data/mars_hirise/hirise_orientations.csv"],
+@figure("fig01_artifact", ["data/mars_hirise/hirise_orientations.csv", "illumination geometry: data/sam2_validation/mars_sun.json, data/summary/moon_sun.json, data/summary/shadow_azimuth.json"],
         "The artifact: YOLO long axes lock to the pixel diagonal")
 def fig01_artifact():
-    h = pd.read_csv(DATA / "mars_hirise" / "hirise_orientations.csv")
+    h = read_csv(DATA / "mars_hirise" / "hirise_orientations.csv")
     h = h[h["set"] == "new-skimage"].copy()          # the production skimage-contour catalogue
     res = 0.5
     h["dpx"] = h.diameter_m / res
@@ -146,13 +241,14 @@ def fig01_artifact():
     return save(fig, "fig01_artifact"), st
 
 
-@figure("fig02_segmenter_view", ["data/summary/segmenter_view.pkl"],
+@figure("fig02_segmenter_view",
+        ["data/summary/segmenter_view.pkl + segmenter_view_meta.json"],
         "What the segmenter sees: one prototype cell per native pixel")
 def fig02_segmenter_view():
     p = SUM / "segmenter_view.pkl"
     if not p.exists():
         raise FileNotFoundError(f"{p} — run data/summary/run_segmenter_view.py first")
-    d = pickle.loads(p.read_bytes())
+    d = load_pickle(p)
     recs, meta = d["picked"], d["meta"]
     ppn = meta["proto_px_per_native_px"]
     cols = [("native", f"native raster\n({meta['slice_size']} px slice)"),
@@ -206,7 +302,7 @@ def fig02_segmenter_view():
                                       proto_cells=r["proto_cells"]) for r in recs])
     extra = SUM / "segmenter_view_meta.json"
     if extra.exists():
-        j = json.loads(extra.read_text())
+        j = load_json(extra)
         st["proto_vs_final_median_abs_deg"] = j["proto_vs_final_median_abs_deg"]
         st["proto_cells_median"] = j["proto_cells_median"]
         st["n_candidates"] = j["n_candidates"]
@@ -250,15 +346,16 @@ def _draw_outlines(ax, patch, layers, title=None, subtitle=None):
 
 
 @figure("fig03_same_boulder",
-        ["data/summary/boulder_examples.pkl", "data/solutionH/synth_examples.pkl"],
+        ["data/summary/boulder_examples.pkl + boulder_examples_meta.json",
+         "data/solutionH/synth_examples.pkl"],
         "The same boulder, three producers — real and against known truth")
 def fig03_same_boulder():
     real_p, syn_p = SUM / "boulder_examples.pkl", SH / "synth_examples.pkl"
     if not real_p.exists():
         raise FileNotFoundError(f"{real_p} — run data/summary/run_boulder_examples.py first")
     NCOL = 4                      # fewer, larger panels: at 6 across the boulders were unreadable
-    real = pickle.loads(real_p.read_bytes())["diag_locked"][:NCOL]
-    syn = pickle.loads(syn_p.read_bytes())
+    real = load_pickle(real_p)["diag_locked"][:NCOL]
+    syn = load_pickle(syn_p)
     sb = syn["boulders"]
     # synthetic: the boulders YOLO mis-measures most, spread over size (same intent as the real row)
     sb = sorted(sb, key=lambda r: -abs(r["yolo_err"]))[:NCOL]
@@ -326,7 +423,7 @@ def fig03_same_boulder():
               synthetic_sun_az=syn["sun_az_deg"])
     mp = SUM / "boulder_examples_meta.json"
     if mp.exists():
-        st["pool"] = json.loads(mp.read_text())["pool_by_body"]
+        st["pool"] = load_json(mp)["pool_by_body"]
     return save(fig, "fig03_same_boulder"), st
 
 
@@ -338,16 +435,17 @@ def _rom():
     p = SUM / "rom_threeway.csv"
     if not p.exists():
         raise FileNotFoundError(f"{p} — run data/summary/run_rom_threeway.py first")
-    return pd.read_csv(p)
+    return read_csv(p)
 
 
 def _synth_rows(cond="shadow"):
-    t = pd.read_csv(SAMV / "t1_synth.csv")
+    t = read_csv(SAMV / "t1_synth.csv")
     return t[t.cond == cond].copy()
 
 
 @figure("fig04a_threeway_matched",
-        ["data/summary/rom_threeway.csv", "data/sam2_validation/t1_synth.csv"],
+        ["data/summary/rom_threeway.csv", "data/sam2_validation/t1_synth.csv",
+         "illumination geometry: data/sam2_validation/mars_sun.json, data/summary/moon_sun.json, data/summary/shadow_azimuth.json"],
         "YOLO vs SAM2 vs reference on the SAME boulders")
 def fig04a_threeway_matched():
     rom, sun = _rom(), sun_axes()
@@ -396,7 +494,7 @@ def fig04a_threeway_matched():
     return save(fig, "fig04a_threeway_matched"), st
 
 
-@figure("fig04b_threeway_samearea", ["data/summary/rom_threeway.csv"],
+@figure("fig04b_threeway_samearea", ["data/summary/rom_threeway.csv", "illumination geometry: data/sam2_validation/mars_sun.json, data/summary/moon_sun.json, data/summary/shadow_azimuth.json"],
         "YOLO vs SAM2 vs reference over the SAME AREA")
 def fig04b_threeway_samearea():
     rom, sun = _rom(), sun_axes()
@@ -433,7 +531,7 @@ def fig04b_threeway_samearea():
 @figure("fig05_axis_fractions", ["data/solutionG/G_detections.csv"],
         "Per-axis share and size-resolved diagonal fraction")
 def fig05_axis_fractions():
-    g = pd.read_csv(SG / "G_detections.csv")
+    g = read_csv(SG / "G_detections.csv")
     tol, per_axis_unif = 10.0, 10.0 / 90.0
     fig, ax = plt.subplots(1, 2, figsize=(10.4, 3.9))
 
@@ -492,7 +590,7 @@ def fig05_axis_fractions():
 @figure("fig06_quantization", ["data/sam2_validation/t35_val_detections.csv"],
         "Why an average-angle metric is blind to this")
 def fig06_quantization():
-    t = pd.read_csv(SAMV / "t35_val_detections.csv")
+    t = read_csv(SAMV / "t35_val_detections.csv")
     bodies = ["mars", "moon", "earth"]
     TOL = 0.01
     prods = (("YOLOv8-seg mask", "angle_yolo", "aspect_yolo", "yolo"),
@@ -567,41 +665,225 @@ def fig06_quantization():
 # 3. How far to trust a rose
 # =================================================================================================
 
-@figure("fig07_hirise_scenes",
-        ["data/sam2_validation/sam_chirality_hirise.csv",
-         "data/sam2_validation/sam_chirality_perscene.csv"],
-        "SAM orientations across 11 HiRISE scenes, against each scene's sun axis")
-def fig07_hirise_scenes():
-    d = pd.read_csv(SAMV / "sam_chirality_hirise.csv")
-    ps = pd.read_csv(SAMV / "sam_chirality_perscene.csv").set_index("scene")
-    scenes = ps.sort_values("inc").index.tolist()
+FIXED_AREA = SUM / "fixed_area_scenes.csv"
+FIXED_AREA_META = SUM / "fixed_area_scenes_meta.json"
+CI_POWER_LIMIT = 90.0     # a bootstrap peak interval wider than this carries no directional info
+
+
+def _fixed_area(group):
+    """Per-scene detections + metadata from the fixed-area rescan.
+
+    Returns ``(df, meta_by_scene, source_label)``. Falls back to the earlier detection-quota run if
+    the rescan has not been done, and says which was used — the two are NOT interchangeable: the old
+    one walked tiles in raster order and stopped on a detection count, so its `n` is not comparable
+    between scenes and its sample is a spatial prefix rather than a random sample of the scene.
+    """
+    # Prefer the combined file the run writes at the end; otherwise assemble from the per-scene
+    # files it writes as it goes, so a partially-complete rescan can still be inspected. The number
+    # of scenes present is always reported, so a partial run is never mistaken for a complete one.
+    if FIXED_AREA.exists() and FIXED_AREA_META.exists():
+        meta = {m["scene"]: m for m in load_json(FIXED_AREA_META)["scenes"]
+                if m.get("group") == group and "error" not in m}
+        d = read_csv(FIXED_AREA)
+        d = d[d.scene.isin(meta)]
+        if len(meta):
+            return d, meta, f"fixed area, shuffled tiles ({len(meta)} scenes)"
+    part_dir = SUM / "fixed_area"
+    if part_dir.exists():
+        metas = [load_json(p) for p in part_dir.glob(f"{group}__*.json")]
+        meta = {m["scene"]: m for m in metas if "error" not in m}
+        frames = [read_csv(p) for p in part_dir.glob(f"{group}__*.csv")]
+        if meta and frames:
+            d = pd.concat(frames, ignore_index=True)
+            d = d[d.scene.isin(meta)]
+            return d, meta, (f"fixed area, shuffled tiles — PARTIAL: {len(meta)} scenes complete "
+                             f"so far")
+    if group == "hirise":
+        d = read_csv(SAMV / "sam_chirality_hirise.csv")
+        ps = read_csv(SAMV / "sam_chirality_perscene.csv").set_index("scene")
+        meta = {sc: dict(scene=sc, res_m=float(d[d.scene == sc].res.iloc[0]),
+                         shadow_axis=float(ps.at[sc, "shadow"]), incidence=float(ps.at[sc, "inc"]),
+                         km2_valid=None, per_km2_elong_ge8px=None) for sc in ps.index}
+    else:
+        d = read_csv(SAMV / "t1_controls_sam.csv")
+        meta = {sc: dict(scene=sc, res_m=float(g.res.iloc[0]), shadow_axis=float(g.sun.iloc[0]),
+                         incidence=float(g.incidence.iloc[0]), km2_valid=None,
+                         per_km2_elong_ge8px=None) for sc, g in d.groupby("scene")}
+    return d, meta, "detection quota, raster order (LEGACY — n not comparable between scenes)"
+
+
+DM_MIN = 4.0     # metres: a COMMON physical size floor, so cross-scene panels count the same rocks
+
+
+def _scene_panels(d, meta, colour="sam", angle_col="angle_sam", aspect_col="aspect_sam",
+                  dm_min=DM_MIN):
+    """One rose panel per scene, annotated with density and the peak's bootstrap interval.
+
+    ``dm_min`` imposes a **metric** size floor on top of the pixel floor. This is what makes a
+    cross-scene comparison legitimate: >= 8 px is 2 m at 0.25 m/px but 4 m at 0.50 m/px, so a
+    pixel-only cut would have the fine-resolution scenes counting a different (much more numerous)
+    physical population — contaminating both the roses and the boulders/km² densities. Requiring
+    ``max(8 px, 4 m)`` costs power on the fine scenes and buys a comparison that means something.
+    Pass ``dm_min=None`` to reproduce the pixel-only cut.
+    """
     panels, st = [], {}
-    for sc in scenes:
-        g = d[(d.scene == sc) & (d.aspect_sam > ASPECT_MIN) & (d.dpx_sam >= DPX_MIN)]
-        sx = float(ps.at[sc, "shadow"])
-        inc = float(ps.at[sc, "inc"])
-        panels.append(dict(angles=g.angle_sam.values, color="sam",
-                           label=sc.replace("_RED", ""), sun_axis=sx,
-                           note=f"sun {sx:.0f}°  ·  incidence {inc:.0f}°",
-                           stats=("peak", "dsun")))
-        st[sc] = dict(sun_axis=round(sx, 1), incidence=round(inc, 1),
-                      **stat_block(g.angle_sam.values, sx))
+    order = sorted(meta, key=lambda s: meta[s].get("incidence") or 0)
+    for sc in order:
+        m = meta[sc]
+        res = m.get("res_m")
+        g = d[(d.scene == sc) & (d[aspect_col] > ASPECT_MIN) & (d.dpx_sam >= DPX_MIN)]
+        dm = g.dm_sam if "dm_sam" in g else g.dpx_sam * res      # legacy CSVs lack the metric column
+        if dm_min:
+            g = g[dm >= dm_min]
+        sx, inc = m.get("shadow_axis"), m.get("incidence")
+        a = g[angle_col].dropna().values
+        km2 = m.get("km2_valid")
+        # Density is recomputed at the figure's own cut rather than taken from the run metadata,
+        # which recorded the pixel-only count.
+        dens = round(len(a) / km2, 1) if km2 else m.get("per_km2_elong_ge8px")
+        # Two short lines, not one long one: at five columns a single note line overran into the
+        # neighbouring panel's title (seen on a rendered draft). |peak-sun| is dropped from the panel
+        # because it is tabulated under the figure — the panel keeps only what the rose cannot show.
+        note = f"sun {sx:.0f}°  ·  inc {inc:.0f}°"
+        second = f"{res:.2f} m/px" + (f"  ·  {dens:g}/km²" if dens is not None else "")
+        note += f"\n{second}"
+        panels.append(dict(angles=a, color=colour, label=sc, sun_axis=sx, note=note,
+                           stats=("peakci",)))
+        blk = stat_block(a, sx)
+        if len(a) > 20:
+            pk, lo, hi = bootstrap_peak_ci(a, n_boot=400)
+            blk.update(peak_ci=[round(float(lo), 1), round(float(hi), 1)],
+                       peak_ci_width=round(float(hi - lo), 1),
+                       has_power=bool((hi - lo) <= CI_POWER_LIMIT))
+        else:
+            blk.update(peak_ci=None, peak_ci_width=None, has_power=False)
+        st[sc] = dict(sun_axis=None if sx is None else round(sx, 1),
+                      incidence=None if inc is None else round(inc, 1), res_m=res,
+                      km2_valid=km2, per_km2_elong_ge8px=dens, **blk)
+    return panels, st, order
+
+
+def _scene_summary(st, order):
+    """Aggregate |peak − sun|, and the confound checks that aggregate invites."""
+    def arr(key):
+        return np.array([st[s].get(key) if st[s].get(key) is not None else np.nan
+                         for s in order], float)
+    dsun, inc, res = arr("peak_minus_sun"), arr("incidence"), arr("res_m")
+    powered = np.array([bool(st[s].get("has_power")) for s in order])
+    # Which axis do the peaks actually sit on? The three candidates are the sun, the pixel cardinals
+    # and the pixel diagonals, and comparing all three is what identifies the mechanism — the same
+    # test the control sites use, so the two sections can be read against each other.
+    pk = arr("peak")
+    dcard = np.array([min(axial_distance(p, 0.0), axial_distance(p, 90.0)) if np.isfinite(p)
+                      else np.nan for p in pk])
+    ddiag = np.array([min(axial_distance(p, 45.0), axial_distance(p, 135.0)) if np.isfinite(p)
+                      else np.nan for p in pk])
+    out = dict(n_scenes=len(order), n_with_power=int(powered.sum()),
+               ci_power_limit_deg=CI_POWER_LIMIT, random_expectation=45.0,
+               mean_peak_minus_sun=round(float(np.nanmean(dsun)), 1),
+               mean_peak_minus_sun_powered_only=(round(float(np.nanmean(dsun[powered])), 1)
+                                                if powered.any() else None),
+               mean_peak_minus_cardinal=round(float(np.nanmean(dcard)), 1),
+               mean_peak_minus_diagonal=round(float(np.nanmean(ddiag)), 1),
+               mean_peak_minus_cardinal_powered_only=(round(float(np.nanmean(dcard[powered])), 1)
+                                                     if powered.any() else None),
+               n_peaks_within_10deg_of_cardinal=int(np.nansum(dcard <= 10)),
+               mean_along_sun=round(float(np.nanmean(arr("along_sun"))), 3),
+               median_peak_ci_width=round(float(np.nanmedian(arr("peak_ci_width"))), 1))
+
+    def corr(x, y, mask=None):
+        m = np.isfinite(x) & np.isfinite(y) & (np.ones_like(x, bool) if mask is None else mask)
+        return None if m.sum() < 4 else round(float(np.corrcoef(x[m], y[m])[0, 1]), 3)
+
+    sun = arr("sun_axis")
+    out["corr_incidence_vs_peak_minus_sun"] = corr(inc, dsun)
+    out["corr_sun_axis_vs_incidence"] = corr(sun, inc)
+    # The >=8 px cut selects 2 m boulders at 0.25 m/px and 4 m at 0.5 m/px, so resolution is a
+    # candidate confound for anything read off this figure. Checked explicitly, and the incidence
+    # correlation is re-run within the single largest resolution group.
+    out["corr_resolution_vs_peak_minus_sun"] = corr(res, dsun)
+    out["corr_resolution_vs_incidence"] = corr(res, inc)
+    for r in np.unique(res[np.isfinite(res)]):
+        sub = res == r
+        out[f"corr_incidence_vs_peak_minus_sun_at_{r:g}mpx"] = corr(inc, dsun, sub)
+        out[f"n_scenes_at_{r:g}mpx"] = int(sub.sum())
+    return out
+
+
+def _sampling_validity(order):
+    """Measure how unrepresentative the earlier raster-order sample was, per scene.
+
+    The rerun's justification should be a number, not an assertion. Both passes measured the same
+    quantity — elongated well-resolved boulders per km² — on the same scenes, one by walking a
+    contiguous prefix of a central strip, the other by sampling tiles at random over the whole
+    footprint. Where the two disagree, the prefix was not representative of its scene; the ratio is
+    the size of that error, and its *scene-dependence* is why no global correction could have fixed
+    the old numbers after the fact.
+    """
+    try:
+        old = read_csv(SAMV / "sam_chirality_hirise.csv")
+        om = load_json(SAMV / "sam_chirality_meta.json")
+        new_meta = {m["scene"]: m for m in load_json(FIXED_AREA_META)["scenes"]} \
+            if FIXED_AREA_META.exists() else \
+            {load_json(p)["scene"]: load_json(p)
+             for p in (SUM / "fixed_area").glob("hirise__*.json")}
+    except Exception as e:                                            # noqa: BLE001
+        return dict(error=f"could not compare: {type(e).__name__}: {e}")
+    rows = {}
+    for sc in order:
+        if sc not in om or sc not in new_meta:
+            continue
+        o, n = om[sc], new_meta[sc]
+        okm2 = o["tiles"] * (512 * o["res"]) ** 2 / 1e6
+        g = old[(old.scene == sc) & (old.aspect_sam > ASPECT_MIN) & (old.dpx_sam >= DPX_MIN)]
+        o_dens, n_dens = len(g) / okm2, n.get("per_km2_elong_ge8px")
+        if not n_dens:
+            continue
+        rows[sc] = dict(old_km2=round(okm2, 1), old_per_km2=round(o_dens, 1),
+                        new_km2=n.get("km2_valid"), new_per_km2=n_dens,
+                        ratio_new_over_old=round(n_dens / max(o_dens, 1e-6), 2))
+    if not rows:
+        return dict(note="no overlapping scenes to compare yet")
+    r = [v["ratio_new_over_old"] for v in rows.values()]
+    return dict(
+        per_scene=rows, n_scenes=len(rows),
+        ratio_min=round(min(r), 2), ratio_max=round(max(r), 2),
+        ratio_median=round(float(np.median(r)), 2),
+        note="new (equal-area, randomly-sampled) boulders per km² divided by old (detection-quota, "
+             "raster-order prefix). Values far from 1 mean the old prefix was not representative of "
+             "its scene; the spread across scenes is why the old per-scene n could not be corrected "
+             "after the fact.")
+
+
+@figure("fig07_hirise_scenes",
+        ["data/summary/fixed_area_scenes.csv + fixed_area_scenes_meta.json (the equal-area rescan)",
+         "data/sam2_validation/sam_chirality_hirise.csv + sam_chirality_meta.json "
+         "(the superseded quota sample, used only for the sampling-validity comparison)"],
+        "SAM orientations across the HiRISE scenes, against each scene's sun axis")
+def fig07_hirise_scenes():
+    d, meta, source = _fixed_area("hirise")
+    panels, st, order = _scene_panels(d, meta, dm_min=DM_MIN)
+    # Round before comparing: 153 tiles at 0.50 m/px is 10.03 km2 and 611 at 0.25 m/px is 10.01, so
+    # an exact-value set makes an equal-area run look unequal (it did, in the title of a draft).
+    km2 = {round(m["km2_valid"]) for m in meta.values() if m.get("km2_valid")}
+    area_txt = (f"{next(iter(km2))} km² of valid ground per scene" if len(km2) == 1
+                else "unequal area per scene (legacy sampling)")
     fig, _ = fs.rose_grid(
-        panels, aspect_min=ASPECT_MIN, dpx_min=DPX_MIN, ncols=4,
-        suptitle="SAM2 orientations on 11 Mars HiRISE scenes, ordered by solar incidence — "
-                 "sun-ward at moderate incidence, not at high",
-        footer_extra="each scene is a DIFFERENT footprint, so 'sun axis' also indexes different "
-                     "ground: read as suggestive, not causal")
-    inc = np.array([st[s]["incidence"] for s in scenes], float)
-    dsun = np.array([st[s]["peak_minus_sun"] for s in scenes], float)
-    ok = np.isfinite(inc) & np.isfinite(dsun)
-    st["_summary"] = dict(
-        n_scenes=len(scenes),
-        mean_peak_minus_sun=round(float(np.nanmean(dsun)), 1), random_expectation=45.0,
-        corr_incidence_vs_peak_minus_sun=round(float(np.corrcoef(inc[ok], dsun[ok])[0, 1]), 3),
-        corr_shadow_vs_incidence=round(float(np.corrcoef(
-            ps.loc[scenes, "shadow"].values, ps.loc[scenes, "inc"].values)[0, 1]), 3),
-        mean_along_sun=round(float(np.nanmean([st[s]["along_sun"] for s in scenes])), 3))
+        panels, aspect_min=ASPECT_MIN, dpx_min=DPX_MIN, dm_min=DM_MIN, ncols=4,
+        suptitle=f"SAM2 orientations on {len(order)} Mars HiRISE scenes, ordered by solar "
+                 f"incidence — {area_txt}, tiles sampled at random across each scene",
+        footer_extra="brackets = bootstrap 95% interval on the peak  ·  the metric floor puts every "
+                     "scene on the same physical population despite the 0.25/0.50 m/px mix  ·  each "
+                     "scene is a DIFFERENT footprint, so 'sun axis' also indexes different ground")
+    st["_summary"] = dict(source=source, size_cut=f"≥ {DPX_MIN:g} px and ≥ {DM_MIN:g} m",
+                          **_scene_summary(st, order))
+    st["_sampling_validity"] = _sampling_validity(order)
+    # Same figure's statistics under the pixel-only cut, so the effect of imposing a common physical
+    # population is visible rather than asserted (it changes n on the 0.25 m/px scenes by ~10x).
+    _, st_px, order_px = _scene_panels(d, meta, dm_min=None)
+    st["_summary_pixel_cut_only"] = dict(
+        size_cut=f"≥ {DPX_MIN:g} px only (2 m at 0.25 m/px, 4 m at 0.50 m/px)",
+        n_by_scene={s: st_px[s]["n"] for s in order_px}, **_scene_summary(st_px, order_px))
     return save(fig, "fig07_hirise_scenes"), st
 
 
@@ -610,12 +892,12 @@ def fig07_hirise_scenes():
          "data/summary/t2_thumbnails_meta.json"],
         "Same ground, different sun: the rose does not follow the sun")
 def fig08_repeat_pairs():
-    t = pd.read_csv(SAMV / "t2_hirise_sam.csv")
+    t = read_csv(SAMV / "t2_hirise_sam.csv")
     npz_p, meta_p = SUM / "t2_thumbnails.npz", SUM / "t2_thumbnails_meta.json"
     if not npz_p.exists():
         raise FileNotFoundError(f"{npz_p} — run data/summary/cut_t2_thumbnails.py first")
     npz = np.load(npz_p)
-    tm = json.loads(meta_p.read_text())
+    tm = load_json(meta_p)
 
     # Order pairs by statistical power: the usable pair first, the recall-collapsed ones after, and
     # labelled as such. Presenting a n=7 rose next to a n=711 rose without saying so would be the
@@ -709,50 +991,69 @@ def fig08_repeat_pairs():
     return save(fig, "fig08_repeat_pairs"), st
 
 
-@figure("fig09_controls", ["data/sam2_validation/t1_controls_sam.csv"],
-        "Control sites: a residual preference exists, is not the sun, and is not SAM's")
+@figure("fig09_controls",
+        ["data/summary/fixed_area_scenes.csv + fixed_area_scenes_meta.json (the equal-area rescan)",
+         "data/sam2_validation/t1_controls_sam.csv (superseded quota sample; fallback only)"],
+        "Control sites: on fabric-free ground each masker imprints its own grid axis — SAM2 cardinal, "
+        "YOLO diagonal — and neither follows the sun")
 def fig09_controls():
-    d = pd.read_csv(SAMV / "t1_controls_sam.csv")
-    scenes = sorted(d.scene.unique())
-    panels, st = [], {}
+    d, meta, source = _fixed_area("controls")
+    st, panels = {}, []
     for prod, acol, pcol, col in (("SAM2 re-mask", "angle_sam", "aspect_sam", "sam"),
                                   ("YOLOv8-seg mask", "angle_yolo", "aspect_yolo", "yolo")):
-        for sc in scenes:
-            g = d[(d.scene == sc) & (d[pcol] > ASPECT_MIN) & (d.dpx_sam >= DPX_MIN)]
-            sx = float(g.sun.iloc[0]) if len(g) else np.nan
-            panels.append(dict(angles=g[acol].values, color=col, label=sc,
-                               sun_axis=None if not np.isfinite(sx) else sx,
-                               note=f"sun {sx:.0f}°", stats=("peak", "dsun")))
-            st.setdefault(prod, {})[sc] = dict(sun_axis=round(sx, 1),
-                                               **stat_block(g[acol].values, sx))
+        p, s, order = _scene_panels(d, meta, colour=col, angle_col=acol, aspect_col=pcol,
+                                    dm_min=DM_MIN)
+        panels += p
+        st[prod] = s
+    scenes = order
+    # Round before comparing: 153 tiles at 0.50 m/px is 10.03 km2 and 611 at 0.25 m/px is 10.01, so
+    # an exact-value set makes an equal-area run look unequal (it did, in the title of a draft).
+    km2 = {round(m["km2_valid"]) for m in meta.values() if m.get("km2_valid")}
+    area_txt = (f"{next(iter(km2))} km² of valid ground per site" if len(km2) == 1
+                else "unequal area per site (legacy sampling)")
     fig, _ = fs.rose_grid(
-        panels, aspect_min=ASPECT_MIN, dpx_min=DPX_MIN, ncols=len(scenes),
+        panels, aspect_min=ASPECT_MIN, dpx_min=DPX_MIN, dm_min=DM_MIN, ncols=len(scenes),
         row_labels=["SAM2 re-mask", "YOLOv8-seg mask"],
         suptitle="Geologically-null control sites (no depositional fabric expected), sun axes "
-                 "spanning 55–130°",
-        footer_extra="the residual is near-identical in SAM and YOLO, so it is inherited "
-                     "(detection selection / imagery), not added by the re-masker")
-    for prod in st:
-        pk = [st[prod][s]["peak_minus_sun"] for s in scenes if "peak_minus_sun" in st[prod][s]]
+                 f"spanning 55–130° — {area_txt}, tiles sampled at random",
+        footer_extra="brackets = bootstrap 95% interval on the peak  ·  no fabric is expected here, "
+                     "yet no rose is flat: SAM2's peaks sit on the CARDINAL axis and YOLO's on the "
+                     "pixel DIAGONAL, so each masker imprints its own grid signature — re-masking "
+                     "exchanges one for the other rather than removing it")
+    for prod in ("SAM2 re-mask", "YOLOv8-seg mask"):
+        have = [s for s in scenes if st[prod][s].get("peak") is not None]
+        pk = [st[prod][s]["peak_minus_sun"] for s in have]
         cd = [min(axial_distance(st[prod][s]["peak"], 0.0),
-                  axial_distance(st[prod][s]["peak"], 90.0)) for s in scenes if "peak" in st[prod][s]]
+                  axial_distance(st[prod][s]["peak"], 90.0)) for s in have]
         dd = [min(axial_distance(st[prod][s]["peak"], 45.0),
-                  axial_distance(st[prod][s]["peak"], 135.0)) for s in scenes if "peak" in st[prod][s]]
-        st[prod]["_summary"] = dict(mean_peak_minus_sun=round(float(np.mean(pk)), 1),
-                                    mean_peak_minus_cardinal=round(float(np.mean(cd)), 1),
-                                    mean_peak_minus_diagonal=round(float(np.mean(dd)), 1),
-                                    random_expectation=45.0)
+                  axial_distance(st[prod][s]["peak"], 135.0)) for s in have]
+        st[prod]["_summary"] = dict(
+            source=source, n_sites=len(have),
+            n_with_power=int(sum(bool(st[prod][s].get("has_power")) for s in have)),
+            mean_peak_minus_sun=round(float(np.mean(pk)), 1),
+            mean_peak_minus_cardinal=round(float(np.mean(cd)), 1),
+            mean_peak_minus_diagonal=round(float(np.mean(dd)), 1), random_expectation=45.0)
     # The load-bearing claim of this figure is that the residual is INHERITED, i.e. the two producers
     # agree site by site. Aggregate means cannot show that, so the per-site agreement is recorded.
     agree = {sc: round(float(axial_distance(st["SAM2 re-mask"][sc]["peak"],
                                             st["YOLOv8-seg mask"][sc]["peak"])), 1)
              for sc in scenes
-             if "peak" in st["SAM2 re-mask"][sc] and "peak" in st["YOLOv8-seg mask"][sc]}
+             if st["SAM2 re-mask"][sc].get("peak") is not None
+             and st["YOLOv8-seg mask"][sc].get("peak") is not None}
+    both_powered = {sc: v for sc, v in agree.items()
+                    if st["SAM2 re-mask"][sc].get("has_power")
+                    and st["YOLOv8-seg mask"][sc].get("has_power")}
     st["_sam_vs_yolo_peak_agreement"] = dict(
         per_site_deg=agree, median_deg=round(float(np.median(list(agree.values()))), 1),
         max_deg=round(float(max(agree.values())), 1),
+        median_deg_both_powered=(round(float(np.median(list(both_powered.values()))), 1)
+                                 if both_powered else None),
+        n_both_powered=len(both_powered),
         note="axial distance between the two producers' fitted peaks at the same site; small values "
-             "mean the residual is inherited from detection/imagery rather than added by re-masking")
+             "mean the residual is inherited from detection/imagery rather than added by re-masking. "
+             "The `both_powered` variant drops sites where either producer's peak interval exceeds "
+             f"{CI_POWER_LIMIT:.0f}deg, since agreement between two undetermined peaks is not "
+             "evidence of anything.")
     return save(fig, "fig09_controls"), st
 
 
@@ -761,10 +1062,11 @@ def fig09_controls():
 # =================================================================================================
 
 @figure("fig10_area",
-        ["data/sam2_validation/t35_val_detections.csv", "data/summary/boulder_examples.pkl"],
+        ["data/sam2_validation/t35_val_detections.csv",
+         "data/summary/boulder_examples.pkl + boulder_examples_meta.json"],
         "Mask area against human tracing, with examples")
 def fig10_area():
-    t = pd.read_csv(SAMV / "t35_val_detections.csv")
+    t = read_csv(SAMV / "t35_val_detections.csv")
     m = t[t.h_area.notna() & (t.h_area > 0)].copy()
     m["r_yolo"] = m.area_yolo / m.h_area
     m["r_sam"] = m.area_sam / m.h_area
@@ -774,7 +1076,7 @@ def fig10_area():
 
     ex_p = SUM / "boulder_examples.pkl"
     have_ex = ex_p.exists()
-    ex = pickle.loads(ex_p.read_bytes())["area_spread"] if have_ex else []
+    ex = load_pickle(ex_p)["area_spread"] if have_ex else []
     nex = min(len(ex), 6)
 
     fig = plt.figure(figsize=(11.2, 6.6 if nex else 3.6))
@@ -943,8 +1245,8 @@ def fig11_fusion_gallery():
         ["data/solutionDE/goal3_fullscene_sfd.csv", "data/solutionDE/goal3_rom_recall.csv"],
         "Where the added boulders are, and recall against human mapping")
 def fig12_size_recall():
-    sfd = pd.read_csv(DE / "goal3_fullscene_sfd.csv")
-    rec = pd.read_csv(DE / "goal3_rom_recall.csv")
+    sfd = read_csv(DE / "goal3_fullscene_sfd.csv")
+    rec = read_csv(DE / "goal3_rom_recall.csv")
     bands = [(2, 4), (4, 6), (6, 8), (8, 10), (10, 14), (14, 60)]
     lab = [f"{lo}–{hi if hi < 60 else '+'}" for lo, hi in bands]
 
@@ -1006,8 +1308,8 @@ def fig12_size_recall():
                       "data/solutionDE/goal3_fullscene_sfd_fit.csv"],
         "Size–frequency distribution and the completeness roll-off")
 def fig13_sfd():
-    sfd = pd.read_csv(DE / "goal3_fullscene_sfd.csv")
-    fit = pd.read_csv(DE / "goal3_fullscene_sfd_fit.csv")
+    sfd = read_csv(DE / "goal3_fullscene_sfd.csv")
+    fit = read_csv(DE / "goal3_fullscene_sfd_fit.csv")
     scenes = [("hirise", "Mars HiRISE ESP_017355_2260"), ("nac", "Moon LRO NAC M139694087LE")]
     cols = {"256_only": ("arm_256", "production 256 pass"),
             "fused": ("arm_sr2", "fused multi-scale ladder")}
@@ -1073,7 +1375,7 @@ def fig14_speed():
     # drawn hatched and labelled as an estimate rather than passed off as a measurement.
     scenes = [("Moon NAC M139694087LE\n303 Mpx", 4.79, 3.46, True),
               ("Mars HiRISE ESP_017355_2260\n1,930 Mpx", 123.0, 55.1, False)]
-    cost = pd.read_csv(DE / "goal3_fullscene_cost.csv")
+    cost = read_csv(DE / "goal3_fullscene_cost.csv")
 
     fig, ax = plt.subplots(1, 3, figsize=(12.4, 3.9))
     lbl = [p[0] for p in profile]
@@ -1166,9 +1468,9 @@ def fig14_speed():
                       "data/solutionH/obb_null_pred.csv"],
         "Appendix: a direct angle head, and why it is not the fix")
 def figA1_obb():
-    truth = pd.read_csv(SH / "obb_null_truth_rot.csv")
-    d0 = pd.read_csv(SH / "obb_null_pred.csv")
-    ra = pd.read_csv(SH / "obb_null_pred_rot.csv")
+    truth = read_csv(SH / "obb_null_truth_rot.csv")
+    d0 = read_csv(SH / "obb_null_pred.csv")
+    ra = read_csv(SH / "obb_null_pred_rot.csv")
     panels = [
         dict(angles=truth[truth.a_px / truth.b_px > ASPECT_MIN].angle180.values
              if "b_px" in truth else truth.angle180.values,
@@ -1210,18 +1512,34 @@ def main():
     sp = FIG / "figure_stats.json"
     allstats = json.loads(sp.read_text()) if sp.exists() else {}
     failed = []
+    undeclared = []
     for n in names:
         print(f"[{n}] {REGISTRY[n]['title']}")
+        _STATE.update(fig=None, opened=[], save_png=True)
         try:
             path, st = REGISTRY[n]["fn"]()
         except Exception as e:                                    # noqa: BLE001 - report, continue
             print(f"    !! FAILED: {type(e).__name__}: {e}")
             failed.append((n, f"{type(e).__name__}: {e}"))
             continue
+        # Cross-check the hand-written `inputs` against what the function actually opened. A figure
+        # that reads a file nobody declared is a provenance claim that has drifted from the code, so
+        # it is reported rather than left to be discovered by a reader.
+        measured = list(_STATE["opened"])
+        declared = " ".join(REGISTRY[n]["inputs"])
+        for e in measured:
+            stem = Path(e["path"]).name
+            if stem not in declared:
+                undeclared.append((n, e["path"]))
         allstats[n] = dict(figure=path, inputs=REGISTRY[n]["inputs"],
-                           title=REGISTRY[n]["title"], stats=st)
+                           measured_inputs=measured, title=REGISTRY[n]["title"], stats=st)
     sp.write_text(json.dumps(allstats, indent=2, default=str))
     print(f"\nstats -> {sp.relative_to(REPO)}")
+    if undeclared:
+        print("\nUNDECLARED INPUTS (a figure read a file its decorator does not mention —\n"
+              "update the decorator so the document's provenance line stays true):")
+        for n, p in undeclared:
+            print(f"  {n}: {p}")
     if failed:
         print("\nFAILED figures (nothing was silently skipped):")
         for n, e in failed:

@@ -81,6 +81,21 @@ def test_caption_can_report_metres():
     assert "4.0 m" in cap
 
 
+def test_metric_floor_is_captioned(angles):
+    """A metric size floor is a second cut, so it must appear in the caption like the pixel one.
+
+    Cross-scene figures need it: >= 8 px is 2 m at 0.25 m/px but 4 m at 0.50 m/px, so a pixel-only
+    cut silently compares different physical populations between scenes.
+    """
+    cap = fs.subset_caption(aspect_min=1.35, dpx_min=8, dm_min=4.0)
+    assert "8 px" in cap and "4 m" in cap
+    panels = [dict(angles=angles["uniform"], label="scene A", color="sam")]
+    fig, _ = fs.rose_grid(panels, aspect_min=1.35, dpx_min=8, dm_min=4.0)
+    text = " ".join(t.get_text() for t in fig.findobj(plt.Text))
+    assert "4 m" in text, "the metric floor must reach the figure footer"
+    plt.close(fig)
+
+
 # --- rule 2: shared axes across every panel ----------------------------------------------------
 
 def _rows(angles):
@@ -190,6 +205,40 @@ def test_rose_grid_enforces_the_same_rules(angles):
     assert "1.7" in text and "8 px" in text
     assert all(f"n = {np.asarray(p['angles']).size:,}" in " ".join(
         t.get_text() for t in ax.texts + [ax.title]) for p, ax in zip(panels, axes))
+    plt.close(fig)
+
+
+def test_rose_grid_excludes_tiny_panels_from_the_shared_radial_limit(angles):
+    """A 20-boulder panel must not set the radial scale for a 4,000-boulder one.
+
+    Rose density peaks scale like 1/n at small n (two rocks in one bin of twenty reads 0.05, while a
+    well-populated scene peaks near 0.02), so including tiny panels in the shared limit squashes every
+    real rose to a dot at the centre — which is what a rendered draft of the 11-scene figure did. Tiny
+    panels get their own scale plus a visible badge instead.
+    """
+    rng = np.random.default_rng(3)
+    big = rng.uniform(0, 180, 4000)
+    tiny = np.r_[np.full(8, 130.0), rng.uniform(0, 180, 12)]      # n=20, one dominant spoke
+    panels = [dict(angles=big, label="dense scene", color="sam"),
+              dict(angles=tiny, label="sparse scene", color="sam")]
+    fig, axes = fs.rose_grid(panels, aspect_min=1.35, dpx_min=8, share_min_n=200)
+    big_ax, tiny_ax = axes[0], axes[1]
+    assert tiny_ax.get_ylim()[1] > big_ax.get_ylim()[1], \
+        "the tiny panel should be on its own, larger radial scale"
+    # the dense panel's own peak must occupy a usable share of its radius, not a dot
+    assert fs._rose_max(big, 36) / big_ax.get_ylim()[1] > 0.5
+    badge = [t.get_text() for t in tiny_ax.texts if "own radial scale" in t.get_text()]
+    assert badge, "an off-scale panel must carry a visible badge"
+    plt.close(fig)
+
+
+def test_rose_grid_shares_the_limit_when_all_panels_are_large(angles):
+    rng = np.random.default_rng(4)
+    panels = [dict(angles=rng.uniform(0, 180, 900), label=f"s{i}", color="sam") for i in range(3)]
+    fig, axes = fs.rose_grid(panels, aspect_min=1.35, dpx_min=8, share_min_n=200)
+    lims = {round(ax.get_ylim()[1], 9) for ax in axes}
+    assert len(lims) == 1, f"comparable panels must share the radial limit: {lims}"
+    assert not any("own radial scale" in t.get_text() for ax in axes for t in ax.texts)
     plt.close(fig)
 
 

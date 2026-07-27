@@ -58,8 +58,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .orientation import (asymmetry_ratio, axial_distance, diagonal_fraction, grid_fraction,
-                          grid_fraction_uniform, half_plane_fraction, refine_peak)
+from .orientation import (asymmetry_ratio, axial_distance, bootstrap_peak_ci, diagonal_fraction,
+                          grid_fraction, grid_fraction_uniform, half_plane_fraction, refine_peak)
 
 # --- palette ---------------------------------------------------------------------------------
 # Validated default categorical instance (light mode). Slot numbers are the palette's own order;
@@ -126,7 +126,7 @@ def outline_effects(linewidth=1.6, casing="white", casing_extra=1.8):
 
 # --- captions ---------------------------------------------------------------------------------
 
-def subset_caption(*, aspect_min, dpx_min, extra=None, res_m=None):
+def subset_caption(*, aspect_min, dpx_min, extra=None, res_m=None, dm_min=None):
     """The mandatory subset label: ``"aspect > 1.35 · d_eq >= 8 px · ..."``.
 
     ``aspect_min`` / ``dpx_min`` are required because an orientation distribution is meaningless
@@ -134,15 +134,21 @@ def subset_caption(*, aspect_min, dpx_min, extra=None, res_m=None):
     quoted without its cuts cannot be compared to anything. ``dpx_min`` may be ``None`` for the
     deliberate *no-size-floor* variants, which then say so explicitly rather than staying silent.
     ``res_m`` (m/px), when given, adds the metric equivalent of the pixel floor.
+
+    ``dm_min`` is a **metric** floor applied in addition to the pixel one. Cross-scene figures need it:
+    a pixel floor selects a different physical population at each ground resolution, so comparing
+    scenes on pixels alone compares different rocks. It is captioned rather than silently applied.
     """
     parts = [f"aspect > {aspect_min:g}"]
     if dpx_min is None:
         parts.append("no size floor")
     else:
         px = f"d$_{{eq}}$ ≥ {dpx_min:g} px"
-        if res_m:
+        if res_m and not dm_min:
             px += f" (≥ {dpx_min * res_m:.1f} m)"
         parts.append(px)
+    if dm_min:
+        parts.append(f"and ≥ {dm_min:g} m")
     if extra:
         parts.append(str(extra))
     return "  ·  ".join(parts)
@@ -166,6 +172,13 @@ def _stat_line(a, keys, sun_axis=None):
             out.append(f"$f_{{low}}$ {half_plane_fraction(a):.2f}")
         elif k == "peak":
             out.append(f"peak {refine_peak(a):.0f}°")
+        elif k == "peakci":
+            # A per-scene peak is only meaningful with its uncertainty: on a small, broad rose the
+            # bootstrap interval can span most of the circle, and a bare peak number hides that.
+            _, lo, hi = bootstrap_peak_ci(a, n_boot=300)
+            w = (hi - lo)
+            out.append(f"peak {refine_peak(a):.0f}° [{lo:.0f}–{hi:.0f}]"
+                       + ("  ⚠ no power" if w > 90 else ""))
         elif k == "dsun" and sun_axis is not None:
             out.append(f"|peak−sun| {axial_distance(refine_peak(a), sun_axis):.0f}°")
         else:
@@ -271,7 +284,7 @@ def draw_sun_axis(ax_rose=None, ax_hist=None, *, sun_axis, label="sun", rmax=Non
 def orientation_panel(ax_rose, ax_hist, angles, *, color, label, aspect_min, dpx_min,
                       sun_axis=None, sun_label="sun", rmax=None, ymax=None, bins=36,
                       stats=("diag", "grid"), note=None, res_m=None, show_rticks=False,
-                      show_xlabel=True, rescale_hist=False):
+                      show_xlabel=True, rescale_hist=False, dm_min=None):
     """One producer: a density rose over a count histogram, fully self-labelling.
 
     ``aspect_min`` and ``dpx_min`` are **required** — see the module docstring. They are rendered
@@ -316,7 +329,7 @@ def orientation_panel(ax_rose, ax_hist, angles, *, color, label, aspect_min, dpx
                       fontsize=9, color=INK, pad=9)
     if show_xlabel:
         ax_hist.set_xlabel("azimuth from North (°)", fontsize=7.5, color=INK_SOFT, labelpad=1)
-    cap = subset_caption(aspect_min=aspect_min, dpx_min=dpx_min, res_m=res_m)
+    cap = subset_caption(aspect_min=aspect_min, dpx_min=dpx_min, res_m=res_m, dm_min=dm_min)
     ax_hist.text(0.5, -0.44 if show_xlabel else -0.18,
                  "\n".join(x for x in (cap, note) if x), fontsize=6.6,
                  color=INK_SOFT, ha="center", va="top", transform=ax_hist.transAxes)
@@ -465,9 +478,9 @@ def orientation_grid(rows, *, aspect_min, dpx_min, row_labels=None, suptitle=Non
     return fig, axes
 
 
-def rose_grid(panels, *, aspect_min, dpx_min, ncols=None, suptitle=None, bins=36,
+def rose_grid(panels, *, aspect_min, dpx_min, dm_min=None, ncols=None, suptitle=None, bins=36,
               stats=("peak",), share=True, panel_w=1.95, panel_h=2.5, row_labels=None,
-              footer_extra=None):
+              footer_extra=None, share_min_n=200):
     """A compact roses-only grid (no histograms) for many-panel comparisons — same rules apply.
 
     Used where the point is the *shape across many scenes or sites* and a histogram per panel would
@@ -485,7 +498,19 @@ def rose_grid(panels, *, aspect_min, dpx_min, ncols=None, suptitle=None, bins=36
     n = len(panels)
     ncols = ncols or int(np.ceil(np.sqrt(n)))
     nrows = int(np.ceil(n / ncols))
-    rmax = (max(_rose_max(p["angles"], bins) for p in panels) * 1.08 or None) if share else None
+    # A rose's peak *density* scales like 1/n at small n: a 20-boulder panel puts 2 rocks in one bin
+    # and reads 0.05, while a 4,000-boulder panel peaks near 0.02. Letting the smallest panel set the
+    # shared radial limit therefore squashes every well-populated rose into a dot at the centre (seen
+    # on a rendered draft). So panels below `share_min_n` are excluded from the shared limit and are
+    # autoscaled with a visible badge instead — the same "declare it, never do it silently" rule as
+    # the rescaled histograms.
+    def _n_of(p):
+        a = np.asarray(p["angles"], float)
+        return int(np.isfinite(a).sum())
+
+    big = [p for p in panels if _n_of(p) >= share_min_n] if share_min_n else panels
+    rmax = ((max(_rose_max(p["angles"], bins) for p in (big or panels)) * 1.08) or None) \
+        if share else None
 
     width = panel_w * ncols + 0.7
     sup = _wrap(suptitle, max(58, int(11 * width))) if suptitle else None
@@ -500,15 +525,26 @@ def rose_grid(panels, *, aspect_min, dpx_min, ncols=None, suptitle=None, bins=36
         ax = fig.add_subplot(gs[i // ncols, i % ncols], projection="polar")
         a = np.asarray(p["angles"], float)
         a = a[np.isfinite(a)]
-        rose(ax, a, color=p["color"], bins=bins, rmax=rmax, show_rticks=(i == 0))
+        own = _rose_max(a, bins)
+        off_scale = bool(rmax and a.size < (share_min_n or 0) and own * 1.08 > rmax)
+        rose(ax, a, color=p["color"], bins=bins, rmax=None if off_scale else rmax,
+             show_rticks=(i == 0 or off_scale))
+        if off_scale:
+            ax.text(0.5, -0.03, f"own radial scale (n<{share_min_n})", transform=ax.transAxes,
+                    ha="center", va="top", fontsize=5.8, color=INK,
+                    bbox=dict(fc="#fff6ec", ec=PALETTE["human"], lw=0.5, pad=1.2))
         # Only N and E are labelled: on a tightly-packed grid the W of one panel collides with the
         # E of its neighbour, and for an AXIAL rose S/W are redundant with N/E anyway.
         ax.set_xticklabels(["N", "", "E", "", "", "", "", ""], fontsize=7, color=INK_SOFT)
         if p.get("sun_axis") is not None:
-            draw_sun_axis(ax, sun_axis=p["sun_axis"], label=p.get("sun_label", "sun"), rmax=rmax)
+            draw_sun_axis(ax, sun_axis=p["sun_axis"], label=p.get("sun_label", "sun"),
+                          rmax=None if off_scale else rmax)
         sl = _stat_line(a, p.get("stats", stats), p.get("sun_axis"))
         ax.set_title("\n".join(x for x in (p["label"], f"n = {a.size:,}", sl, p.get("note")) if x),
                      fontsize=7.4, color=INK, pad=6)
+        ax._subset_cut = subset_caption(aspect_min=p.get("aspect_min", aspect_min),
+                                        dpx_min=p.get("dpx_min", dpx_min),
+                                        dm_min=p.get("dm_min", dm_min))
         axes.append(ax)
     for i in range(n, nrows * ncols):
         fig.add_subplot(gs[i // ncols, i % ncols]).axis("off")
@@ -521,7 +557,7 @@ def rose_grid(panels, *, aspect_min, dpx_min, ncols=None, suptitle=None, bins=36
     fig.text(0.5, 0.07 / height,
              _wrap(f"radial = density, {'shared across all panels' if share else 'per panel'}  ·  "
                    f"dashed = isotropic null  ·  "
-                   f"{subset_caption(aspect_min=aspect_min, dpx_min=dpx_min)}"
+                   f"{subset_caption(aspect_min=aspect_min, dpx_min=dpx_min, dm_min=dm_min)}"
                    + (f"  ·  {footer_extra}" if footer_extra else ""), max(70, int(16 * width))),
              ha="center", va="bottom", fontsize=7.2, color=INK_SOFT)
     return fig, axes
