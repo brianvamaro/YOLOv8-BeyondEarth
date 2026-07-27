@@ -350,6 +350,23 @@ def _wrap(text, width):
                      for line in text.split("\n"))
 
 
+def _figure_cut_caption(panels, *, aspect_min, dpx_min, dm_min):
+    """The figure-level subset caption, or a pointer to the panels when their cuts differ.
+
+    A figure whose panels use *different* cuts must not state one of them as if it applied to all: a
+    two-panel before/after of a size floor legitimately has one panel at "no size floor" and one at
+    ">= 8 px", and a footer asserting either is false for the other half of the figure (fig01 shipped
+    exactly that contradiction). When the cuts vary, the footer says so and defers to the panels,
+    which always carry their own.
+    """
+    cuts = {(p.get("aspect_min", aspect_min), p.get("dpx_min", dpx_min), p.get("dm_min", dm_min))
+            for p in panels}
+    if len(cuts) > 1:
+        return "subset cuts differ between panels — each panel states its own"
+    a, d, m = cuts.pop()
+    return subset_caption(aspect_min=a, dpx_min=d, dm_min=m)
+
+
 def _rose_max(angles, bins):
     """Max axial-rose bin density, without drawing (the discovery pass for shared radial limits)."""
     a = np.asarray(angles, float)
@@ -389,8 +406,8 @@ def _limits(rows, bins, share):
     return [None] * len(rows), [None] * len(rows)
 
 
-def orientation_grid(rows, *, aspect_min, dpx_min, row_labels=None, suptitle=None, bins=36,
-                     stats=("diag", "grid"), share_rose="figure", share_hist="row",
+def orientation_grid(rows, *, aspect_min, dpx_min, dm_min=None, row_labels=None, suptitle=None,
+                     bins=36, stats=("diag", "grid"), share_rose="figure", share_hist="row",
                      panel_w=2.8, panel_h=4.6, res_m=None, footer_extra=None):
     """Build a rows x cols grid of :func:`orientation_panel`\\ s with **shared axes**.
 
@@ -454,7 +471,8 @@ def orientation_grid(rows, *, aspect_min, dpx_min, row_labels=None, suptitle=Non
                               rmax=rmax[i], ymax=ymax[i], bins=bins,
                               stats=p.get("stats", stats), note=p.get("note"),
                               res_m=p.get("res_m", res_m), show_rticks=(i == 0 and j == 0),
-                              rescale_hist=p.get("rescale_hist", False))
+                              rescale_hist=p.get("rescale_hist", False),
+                              dm_min=p.get("dm_min", dm_min))
             if j == 0:
                 axh.set_ylabel("boulders", fontsize=7.5, color=INK_SOFT)
             elif not p.get("rescale_hist"):
@@ -471,7 +489,7 @@ def orientation_grid(rows, *, aspect_min, dpx_min, row_labels=None, suptitle=Non
     fig.text(0.5, 0.10 / height,
              _wrap(f"radial = density, {share_txt[share_rose]}  ·  bars = boulder counts, "
                    f"{share_txt[share_hist]}  ·  dashed = isotropic null  ·  "
-                   f"{subset_caption(aspect_min=aspect_min, dpx_min=dpx_min)}"
+                   f"{_figure_cut_caption([p for row in rows for p in row], aspect_min=aspect_min, dpx_min=dpx_min, dm_min=dm_min)}"
                    + (f"  ·  {footer_extra}" if footer_extra else ""),
                    max(70, int(16 * width))),
              ha="center", va="bottom", fontsize=7.2, color=INK_SOFT)
@@ -557,7 +575,7 @@ def rose_grid(panels, *, aspect_min, dpx_min, dm_min=None, ncols=None, suptitle=
     fig.text(0.5, 0.07 / height,
              _wrap(f"radial = density, {'shared across all panels' if share else 'per panel'}  ·  "
                    f"dashed = isotropic null  ·  "
-                   f"{subset_caption(aspect_min=aspect_min, dpx_min=dpx_min, dm_min=dm_min)}"
+                   f"{_figure_cut_caption(panels, aspect_min=aspect_min, dpx_min=dpx_min, dm_min=dm_min)}"
                    + (f"  ·  {footer_extra}" if footer_extra else ""), max(70, int(16 * width))),
              ha="center", va="bottom", fontsize=7.2, color=INK_SOFT)
     return fig, axes

@@ -242,6 +242,41 @@ def test_rose_grid_shares_the_limit_when_all_panels_are_large(angles):
     plt.close(fig)
 
 
+def test_figure_footer_never_contradicts_panels_with_differing_cuts(angles):
+    """A figure whose panels use different cuts must not assert one of them figure-wide.
+
+    The real case: a two-panel before/after of a size floor, one panel at "no size floor" and one at
+    ">= 8 px". The footer inherited the figure-level `dpx_min=None` and printed "no size floor" — false
+    for half the figure, and directly contradicting that panel's own caption. It must defer instead.
+    """
+    rows = [[dict(angles=angles["uniform"], label="no floor", color="yolo", dpx_min=None),
+             dict(angles=angles["uniform"], label="floored", color="yolo", dpx_min=8)]]
+    fig, _ = fs.orientation_grid(rows, aspect_min=1.35, dpx_min=None)
+    footer = [t.get_text() for t in fig.findobj(plt.Text) if "isotropic null" in t.get_text()]
+    assert footer, "no figure footer found"
+    assert "differ between panels" in footer[0]
+    assert "no size floor" not in footer[0], "footer asserts a cut that is false for one panel"
+    plt.close(fig)
+
+
+def test_figure_footer_states_the_cut_when_panels_agree(angles):
+    rows = [[dict(angles=angles["uniform"], label="a", color="yolo"),
+             dict(angles=angles["uniform"], label="b", color="sam")]]
+    fig, _ = fs.orientation_grid(rows, aspect_min=1.35, dpx_min=8)
+    footer = [t.get_text() for t in fig.findobj(plt.Text) if "isotropic null" in t.get_text()]
+    assert "8 px" in footer[0] and "differ between panels" not in footer[0]
+    plt.close(fig)
+
+
+def test_rose_grid_footer_also_defers_when_cuts_differ(angles):
+    panels = [dict(angles=angles["uniform"], label="a", color="sam", dm_min=None),
+              dict(angles=angles["uniform"], label="b", color="sam", dm_min=4.0)]
+    fig, _ = fs.rose_grid(panels, aspect_min=1.35, dpx_min=8)
+    footer = [t.get_text() for t in fig.findobj(plt.Text) if "isotropic null" in t.get_text()]
+    assert "differ between panels" in footer[0]
+    plt.close(fig)
+
+
 def test_grid_footer_states_the_sharing_used(angles):
     """A reader must never have to guess whether two panels are comparable."""
     fig, _ = fs.orientation_grid(_rows(angles), aspect_min=1.35, dpx_min=8)

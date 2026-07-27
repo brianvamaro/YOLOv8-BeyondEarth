@@ -222,18 +222,23 @@ def fig01_artifact():
     e = h[h.aspect_ra > ASPECT_MIN]
     # Two panels, two different size cuts — so each panel carries its own `dpx_min` and the captions
     # follow the panel. The floored panel pre-empts "it is only the near-pixel-scale blobs".
+    # The panel LABEL carries the cut, not just the small caption beneath the histogram: "well-resolved"
+    # is jargon, and a reader should not have to hunt for its definition to know what the right-hand
+    # panel is. `dpx_min` still differs per panel, so the figure footer defers to the panels rather
+    # than asserting one figure-wide cut (it previously claimed "no size floor" for both).
     panels = [
-        dict(angles=e.angle180.values, color="yolo", label="all elongated boulders", sun_axis=sun,
+        dict(angles=e.angle180.values, color="yolo", sun_axis=sun,
+             label="every elongated boulder\n(no size floor, down to ~3 px)",
              stats=("diag", "grid", "chir"), dpx_min=None),
-        dict(angles=e[e.dpx >= DPX_MIN].angle180.values, color="yolo",
-             label="well-resolved only", sun_axis=sun, stats=("diag", "grid", "chir"),
-             dpx_min=DPX_MIN),
+        dict(angles=e[e.dpx >= DPX_MIN].angle180.values, color="yolo", sun_axis=sun,
+             label=f"well resolved only\n(≥ {DPX_MIN:g} px across = ≥ {DPX_MIN * res:g} m)",
+             stats=("diag", "grid", "chir"), dpx_min=DPX_MIN),
     ]
     fig, axes = fs.orientation_grid(
         [panels], aspect_min=ASPECT_MIN, dpx_min=None, res_m=res, share_hist=None,
         suptitle="Mars HiRISE ESP_017355_2260 — YOLOv8-seg long-axis azimuths "
                  "(150,000-boulder random sample of the 1.1M-boulder scene)",
-        footer_extra="each panel states its own size cut")
+        footer_extra="the lock is not confined to near-pixel-scale blobs: it survives the size floor")
     st = dict(no_floor=stat_block(e.angle180.values, sun),
               well_resolved=stat_block(e[e.dpx >= DPX_MIN].angle180.values, sun),
               uniform_reference=round(UNIF, 3), sun_axis=sun,
