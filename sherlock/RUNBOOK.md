@@ -1,5 +1,14 @@
 # Sherlock training runbook — lessons learned (prep for the next run)
 
+> **Also planned for Sherlock: the pipeline *timing* runs.** Not training — the cost-model
+> coefficient runs. Reason: the laptop's Modern Standby silently contaminated every full-scene wall
+> clock we have (12 sleep windows in one run, 33–64% of each arm, job continued at 68% throughput so
+> the inflation is real but not a clean subtraction). A batch job cannot sleep, and `sacct` gives an
+> independent `Elapsed`/`TotalCPU`/`MaxRSS` record to cross-check against. Scope, what to request and
+> what to record: [`../../docs/cost_model_optimization_plan.md`](../../docs/cost_model_optimization_plan.md)
+> → "Do the timing runs on Sherlock, not the laptop". Note the GPU there is not the RTX 5070, so
+> coefficients are hardware-specific while ratios and drivers transfer.
+
 Everything we hit getting Solution H training onto Sherlock (mlapotre group, OnDemand), with the
 fix for each. Read this **before** launching a new training run so you don't rediscover them.
 `README.md` is the step-by-step workflow; this is the "why / what bit us / known-good config".
