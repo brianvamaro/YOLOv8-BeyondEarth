@@ -160,7 +160,11 @@ def run_metadata():
             seed=m.get("seed"), n_scenes=len(sc),
             km2_per_scene=sorted({round(s.get("km2_valid", 0)) for s in sc}),
             total_detections=int(sum(s.get("n_det", 0) for s in sc)),
-            gpu_hours=round(sum(s.get("wall_s", 0) for s in sc) / 3600, 2),
+            # Wall clock, NOT active compute: 65% of this run fell inside Modern Standby, during which
+            # the job continued at ~68% throughput (measured — see fig14's
+            # `modern_standby_correction`). Labelled honestly rather than quietly called GPU-hours.
+            wall_clock_hours=round(sum(s.get("wall_s", 0) for s in sc) / 3600, 2),
+            wall_clock_caveat="includes Modern Standby; ~1.27x inflated vs a machine kept awake",
             all_reached_target=all(s.get("reached_target") for s in sc))
     return out
 
@@ -1501,25 +1505,55 @@ def fig14_speed():
         ax[1].spines[s_].set_visible(False)
 
     h = cost[cost.scene == "hirise"].set_index("arm")
+    # --- Modern Standby correction -------------------------------------------------------------
+    # These wall clocks are `time.time()` deltas from a laptop that entered Modern Standby 12 times
+    # during the run (Windows Kernel-Power 506/507, 2026-07-11), so they are NOT active compute time.
+    # The job did not stop -- scenes completed inside windows that were 100% standby -- but it ran
+    # slower. Fitting `wall = a*tiles + b*detections` separately over scenes with <5% and >75% standby
+    # (n=9 and n=5, R^2 0.998 and 0.993) gives 20.73 vs 30.62 ms/detection, i.e. throughput 68% of
+    # awake. Each arm's standby fraction below was measured from the event log against that arm's own
+    # window, so the correction is per arm rather than a blanket factor.
+    # The remedy for future runs is `powercfg /change standby-timeout-ac 0`, which the Goal-1 notebook
+    # already recommended after being bitten by the same thing.
+    STANDBY_FRACTION = {"ss512": 0.50, "ss256": 0.64, "ss256sr2": 0.33}
+    STANDBY_THROUGHPUT = 0.68            # measured; see above
+
+    def awake_equiv(arm, wall_s):
+        f = STANDBY_FRACTION.get(arm, 0.0)
+        return wall_s - wall_s * f * (1.0 - STANDBY_THROUGHPUT)
     # These bars are cumulative pipeline STAGES, not competing categories, so they take an ordinal
     # one-hue ramp (light -> dark) rather than the categorical arm colours. Reusing the arm hues here
     # would put the super-resolution arm and the SAM2 re-mask in the same colour.
-    passes = [("detection\n256 px", float(h.at["ss256", "wall_s"]) / 3600, "large boulders"),
-              ("+ 512 arm", float(h.at["ss512", "wall_s"]) / 3600, "large-boulder recall"),
-              ("+ super-res", float(h.at["ss256sr2", "wall_s"]) / 3600, "sub-floor completeness"),
-              ("+ SAM2\nre-mask", 9.0, "orientation + area")]
+    # (label, awake-equivalent h, raw wall h, what it buys). The SAM2 pass is an extrapolation from a
+    # measured 6.5 ms/boulder rather than a wall clock, so standby cannot touch it.
+    passes = [("detection\n256 px", awake_equiv("ss256", float(h.at["ss256", "wall_s"])) / 3600,
+               float(h.at["ss256", "wall_s"]) / 3600, "large boulders"),
+              ("+ 512 arm", awake_equiv("ss512", float(h.at["ss512", "wall_s"])) / 3600,
+               float(h.at["ss512", "wall_s"]) / 3600, "large-boulder recall"),
+              ("+ super-res", awake_equiv("ss256sr2", float(h.at["ss256sr2", "wall_s"])) / 3600,
+               float(h.at["ss256sr2", "wall_s"]) / 3600, "sub-floor completeness"),
+              ("+ SAM2\nre-mask", 9.0, 9.0, "orientation + area")]
     ramp = ["#bcd7f2", "#7fb3e5", "#3f8ad4", "#1b4f8f"]
     ax[2].bar(range(len(passes)), [p[1] for p in passes], 0.62, color=ramp, edgecolor=fs.INK, lw=0.3)
+    # The standby inflation is drawn as a hatched cap rather than folded away, so the reader sees both
+    # the corrected value and how much of the raw measurement was low-power time.
+    ax[2].bar(range(len(passes)), [p[2] - p[1] for p in passes], 0.62,
+              bottom=[p[1] for p in passes], color="white", edgecolor=fs.INK_SOFT, lw=0.4,
+              hatch="///", label="raw wall clock inflated by Modern Standby")
     for i, p in enumerate(passes):
-        ax[2].text(i, p[1] * 1.08, f"{p[1]:.2f} h" if p[1] < 1 else f"{p[1]:.1f} h", ha="center",
+        ax[2].text(i, p[2] * 1.10, f"{p[1]:.2f} h" if p[1] < 1 else f"{p[1]:.1f} h", ha="center",
                    fontsize=7.4, color=fs.INK)
-        ax[2].text(i, 0.052, p[2], ha="center", va="bottom", fontsize=6.2, rotation=90,
+        ax[2].text(i, 0.052, p[3], ha="center", va="bottom", fontsize=6.2, rotation=90,
                    color=fs.INK_SOFT)
+    ax[2].legend(fontsize=6.2, loc="upper left", frameon=False)
     ax[2].set_yscale("log")
     ax[2].set_ylim(0.05, 20)
     ax[2].set_xticks(range(len(passes)), [p[0] for p in passes], fontsize=7.2)
     ax[2].set_ylabel("added wall clock per HiRISE scene (h)", fontsize=8)
     ax[2].set_title("What each optional pass costs\n(1.93 Gpx scene, one laptop GPU)", fontsize=9)
+    ax[2].text(0.5, -0.30, "bars corrected for Modern Standby (job ran at 68% throughput for\n"
+                           "33–64% of each arm's wall clock); hatched = the raw measurement",
+               transform=ax[2].transAxes, ha="center", va="top", fontsize=6.2, color=fs.INK_SOFT)
     for s_ in ("top", "right"):
         ax[2].spines[s_].set_visible(False)
     fig.suptitle("Throughput: the detection pass is 1.4–2.2× faster with identical output; every "
@@ -1531,10 +1565,23 @@ def fig14_speed():
                                   before_is_measured=s[3]) for s in scenes],
               added_hours_per_hirise_scene={p[0].replace("\n", " "): round(p[1], 2)
                                            for p in passes},
+              added_hours_raw_wall_clock={p[0].replace("\n", " "): round(p[2], 2) for p in passes},
               sam_ms_per_boulder=6.5,
+              modern_standby_correction=dict(
+                  standby_fraction_per_arm=STANDBY_FRACTION,
+                  throughput_during_standby=STANDBY_THROUGHPUT,
+                  ms_per_detection_awake=20.73, ms_per_detection_standby=30.62,
+                  fit_r2_awake=0.998, fit_r2_standby=0.993, n_scenes_awake=9, n_scenes_standby=5,
+                  x_vs_256_published=dict(ss512=0.63, ss256=1.0, ss256sr2=2.73),
+                  x_vs_256_corrected=dict(ss512=0.67, ss256=1.0, ss256sr2=3.08),
+                  evidence="Windows Kernel-Power 506/507 during the 2026-07-11 run; the job kept "
+                           "running (scenes completed inside 100%-standby windows) but at 68% "
+                           "throughput, so subtracting all standby time would over-correct",
+                  remedy="powercfg /change standby-timeout-ac 0 before any timed run"),
               note="profile + before/after are the Goal-1 measured tables; per-arm wall clocks are "
-                   "goal3_fullscene_cost.csv; the SAM2 figure is the measured 6.5 ms/boulder "
-                   "extrapolated ungated over the scene")
+                   "goal3_fullscene_cost.csv, corrected for Modern Standby (see "
+                   "modern_standby_correction); the SAM2 figure is the measured 6.5 ms/boulder "
+                   "extrapolated ungated over the scene and so is standby-immune")
     return save(fig, "fig14_speed"), st
 
 
