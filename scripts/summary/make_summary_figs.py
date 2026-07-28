@@ -992,13 +992,17 @@ def fig08_repeat_pairs():
     fig = plt.figure(figsize=(11.4, height))
     outer = fig.add_gridspec(len(rows), 1, hspace=0.30, top=1 - HEAD / height,
                              bottom=FOOT / height, left=0.055, right=0.98)
-    # shared radial limit across every rose in the figure
+    # Shared radial limit across the figure — but computed only over the panels with enough boulders
+    # to deserve a vote. The recall-collapsed members hold 7-24 boulders, and a rose's peak density
+    # scales like 1/n, so including them set the limit for everything and squashed the n=462-711 roses
+    # into a dot. They get their own scale and a badge instead (same rule as `fs.rose_grid`).
+    SHARE_MIN_N = 60          # matches the `weak` threshold below, so badge and banner agree
     allang = []
     for pid, members, _ in rows:
         for o in members:
             g = t[(t.scene == o) & (t.aspect_sam > ASPECT_MIN) & (t.dpx_sam >= DPX_MIN)]
             allang.append(g.angle_sam.values)
-    rmax = max((fs._rose_max(a, 36) for a in allang if len(a) > 5), default=0.1) * 1.08
+    rmax = fs.shared_rmax(allang, min_n=SHARE_MIN_N) or 0.1
 
     for i, (pid, members, nmin) in enumerate(rows):
         weak = nmin < 60
@@ -1040,8 +1044,12 @@ def fig08_repeat_pairs():
                          arrowprops=dict(arrowstyle="-", color=fs.INK, lw=1.3,
                                          linestyle=(0, (7, 2, 1.5, 2))))
             axr = fig.add_subplot(inner[1, 2 * j + 1], projection="polar")
-            fs.rose(axr, g.angle_sam.values, color="sam", rmax=rmax, show_rticks=(i == 0 and j == 0))
-            fs.draw_sun_axis(axr, sun_axis=info["sun_axis"], rmax=rmax)
+            off = len(g) < SHARE_MIN_N and fs._rose_max(g.angle_sam.values, 36) * 1.08 > rmax
+            fs.rose(axr, g.angle_sam.values, color="sam", rmax=None if off else rmax,
+                    show_rticks=(i == 0 and j == 0) or off)
+            fs.draw_sun_axis(axr, sun_axis=info["sun_axis"], rmax=None if off else rmax)
+            if off:
+                fs.off_scale_badge(axr, SHARE_MIN_N, y=-0.14)   # clears the "S" tick label
             pk = refine_peak(g.angle_sam.values) if len(g) > 5 else np.nan
             axr.set_title(f"SAM2  n = {len(g):,}\n"
                           + (f"peak {pk:.0f}°" if np.isfinite(pk) else "too few boulders"),
@@ -1054,8 +1062,9 @@ def fig08_repeat_pairs():
                  "an illumination-driven mask would swing the rose TOWARD the sun between the two "
                  "members; it does not", fontsize=10.8, y=1 - 0.10 / height, va="top")
     fig.text(0.5, 0.10 / height,
-             f"aspect > {ASPECT_MIN}  ·  d$_{{eq}}$ ≥ {DPX_MIN} px  ·  radial density shared across "
-             "all roses  ·  dash-dot = that member's own sun axis  ·  thumbnails are the SAME "
+             f"aspect > {ASPECT_MIN}  ·  d$_{{eq}}$ ≥ {DPX_MIN} px  ·  radial density shared across the "
+             f"roses with n ≥ {SHARE_MIN_N}; the recall-collapsed ones are badged and on their own "
+             "scale  ·  dash-dot = that member's own sun axis  ·  thumbnails are the SAME "
              "geographic window, contrast-stretched per member",
              ha="center", va="bottom", fontsize=7.2, color=fs.INK_SOFT)
     return save(fig, "fig08_repeat_pairs"), st

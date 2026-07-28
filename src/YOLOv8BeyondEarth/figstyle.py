@@ -350,6 +350,27 @@ def _wrap(text, width):
                      for line in text.split("\n"))
 
 
+def shared_rmax(angle_arrays, *, min_n=200, bins=36, pad=1.08):
+    """Radial limit to share across roses, ignoring panels too small to deserve a vote.
+
+    A rose's peak *density* scales like 1/n at small n — two rocks in one bin of twenty reads 0.05,
+    where a well-populated scene peaks near 0.02 — so a handful of near-empty panels will set the
+    limit for the whole figure and squash every real rose into a dot. Panels below ``min_n`` are
+    therefore excluded here and should be drawn on their own scale with :func:`off_scale_badge`.
+    Falls back to all panels if none reach ``min_n``.
+    """
+    big = [a for a in angle_arrays if int(np.isfinite(np.asarray(a, float)).sum()) >= min_n]
+    pool = big or list(angle_arrays)
+    return (max((_rose_max(a, bins) for a in pool), default=0.0) * pad) or None
+
+
+def off_scale_badge(ax, min_n, y=-0.03):
+    """Mark a rose that is on its own radial scale, so the break in comparability is never silent."""
+    ax.text(0.5, y, f"own radial scale (n<{min_n})", transform=ax.transAxes, ha="center", va="top",
+            fontsize=5.8, color=INK,
+            bbox=dict(fc="#fff6ec", ec=PALETTE["human"], lw=0.5, pad=1.2))
+
+
 def _figure_cut_caption(panels, *, aspect_min, dpx_min, dm_min):
     """The figure-level subset caption, or a pointer to the panels when their cuts differ.
 
@@ -516,19 +537,11 @@ def rose_grid(panels, *, aspect_min, dpx_min, dm_min=None, ncols=None, suptitle=
     n = len(panels)
     ncols = ncols or int(np.ceil(np.sqrt(n)))
     nrows = int(np.ceil(n / ncols))
-    # A rose's peak *density* scales like 1/n at small n: a 20-boulder panel puts 2 rocks in one bin
-    # and reads 0.05, while a 4,000-boulder panel peaks near 0.02. Letting the smallest panel set the
-    # shared radial limit therefore squashes every well-populated rose into a dot at the centre (seen
-    # on a rendered draft). So panels below `share_min_n` are excluded from the shared limit and are
-    # autoscaled with a visible badge instead — the same "declare it, never do it silently" rule as
-    # the rescaled histograms.
-    def _n_of(p):
-        a = np.asarray(p["angles"], float)
-        return int(np.isfinite(a).sum())
-
-    big = [p for p in panels if _n_of(p) >= share_min_n] if share_min_n else panels
-    rmax = ((max(_rose_max(p["angles"], bins) for p in (big or panels)) * 1.08) or None) \
-        if share else None
+    # Panels below `share_min_n` are excluded from the shared radial limit and autoscaled with a
+    # visible badge instead — see `shared_rmax` for why, and the "declare it, never do it silently"
+    # rule that the rescaled histograms follow too.
+    rmax = shared_rmax([p["angles"] for p in panels], min_n=share_min_n or 0,
+                       bins=bins) if share else None
 
     width = panel_w * ncols + 0.7
     sup = _wrap(suptitle, max(58, int(11 * width))) if suptitle else None
@@ -548,9 +561,7 @@ def rose_grid(panels, *, aspect_min, dpx_min, dm_min=None, ncols=None, suptitle=
         rose(ax, a, color=p["color"], bins=bins, rmax=None if off_scale else rmax,
              show_rticks=(i == 0 or off_scale))
         if off_scale:
-            ax.text(0.5, -0.03, f"own radial scale (n<{share_min_n})", transform=ax.transAxes,
-                    ha="center", va="top", fontsize=5.8, color=INK,
-                    bbox=dict(fc="#fff6ec", ec=PALETTE["human"], lw=0.5, pad=1.2))
+            off_scale_badge(ax, share_min_n)
         # Only N and E are labelled: on a tightly-packed grid the W of one panel collides with the
         # E of its neighbour, and for an AXIAL rose S/W are redundant with N/E anyway.
         ax.set_xticklabels(["N", "", "E", "", "", "", "", ""], fontsize=7, color=INK_SOFT)
