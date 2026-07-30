@@ -64,9 +64,22 @@ def pairwise_box_metric(boxes_a, boxes_b, metric="diou"):
 # --- pooling ------------------------------------------------------------------------------------
 
 def _parse_scale_key(key):
-    """``512`` -> (512, 1.0); ``(256, 2)`` -> (256, 2.0) i.e. slice 256 on a ×2-SR'd image."""
+    """``512`` -> (512, 1.0); ``(256, 2)`` -> (256, 2.0) i.e. slice 256 on a ×2-SR'd image.
+
+    A **third element is an opaque tag** (phase 5c, seam fusion): ``(256, 1, "tile_03")`` is still
+    slice 256 at sr 1 — the tag does not enter ``footprint`` or any priority, it only makes the dict
+    key unique and lands in the ``scale_key`` provenance string. Seam fusion needs it because
+    neighbouring tiles are at the *same* scale, so scale alone cannot key them apart and a dict
+    cannot hold the same key twice.
+    """
     if isinstance(key, (tuple, list)):
-        slice_size, sr_factor = key
+        if len(key) == 3:
+            slice_size, sr_factor, _tag = key
+        elif len(key) == 2:
+            slice_size, sr_factor = key
+        else:
+            raise ValueError(f"scale key {key!r}: expected slice_size, (slice_size, sr_factor) "
+                             "or (slice_size, sr_factor, tag)")
         return int(slice_size), float(sr_factor)
     return int(key), 1.0
 
@@ -75,8 +88,9 @@ def pool_predictions(gdfs):
     """Pool per-scale GeoDataFrames into one, attaching the provenance columns.
 
     ``gdfs``: dict mapping scale key -> GeoDataFrame (in-memory ``gdf_nms`` or a read-back
-    ``-nms`` layer; on-disk column names are normalized). Keys are ``slice_size`` ints, or
-    ``(slice_size, sr_factor)`` tuples for SR arms. Provenance attached per detection —
+    ``-nms`` layer; on-disk column names are normalized). Keys are ``slice_size`` ints,
+    ``(slice_size, sr_factor)`` tuples for SR arms, or ``(slice_size, sr_factor, tag)`` for
+    same-scale seam fusion across neighbouring tiles (phase 5c). Provenance attached per detection —
     ``scale_key, slice_size, sr_factor, footprint, src_index`` (``footprint`` =
     slice_size / sr_factor = native-px context window; *finest scale = smallest footprint*) —
     and these survive into the fused output (G re-masking and all audits key off them).

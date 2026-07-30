@@ -12,6 +12,7 @@ import pytest
 import shapely
 
 from YOLOv8BeyondEarth.fusion import (DEFAULT_CLUSTER_THR, fuse_predictions, pool_predictions,
+                                      _parse_scale_key,
                                       pairwise_box_metric, matched_recall, duplicate_rate,
                                       equivalent_diameter_px)
 
@@ -305,3 +306,80 @@ def test_duplicate_rate_flags_bug_pairs():
     fake_fused = make_gdf([[0, 0, 4, 4], [0.2, 0, 4.2, 4]])
     dup = duplicate_rate(fake_fused, native_res=1.0)
     assert dup["n_bug_pairs"].sum() == 1
+
+
+# --- phase 5c: seam fusion across neighbouring tiles ---------------------------------------------
+# Cross-*tile* dedup at scene/tile seams is the same fuse_predictions call with keys = neighbouring
+# tiles at the SAME scale. That last part is why the key contract needed a third element: a dict
+# cannot hold 256 twice, so scale alone cannot key two tiles apart (found 2026-07-30, plan §5c).
+
+
+def test_scale_key_accepts_a_tile_tag():
+    assert _parse_scale_key((256, 1, "tile_a")) == (256, 1.0)
+    assert _parse_scale_key((256, 2, "tile_a")) == (256, 2.0)
+    with pytest.raises(ValueError, match="scale key"):
+        _parse_scale_key((256, 1, "tile_a", "extra"))
+
+
+def test_tile_tag_does_not_change_footprint_or_priority():
+    """The tag is provenance only — two tiles at one scale must tie on footprint."""
+    pool = pool_predictions({(256, 1, "a"): make_gdf([[0, 0, 4, 4]]),
+                             (256, 1, "b"): make_gdf([[40, 40, 44, 44]])})
+    assert pool["footprint"].nunique() == 1
+    assert set(pool["scale_key"]) == {"(256, 1, 'a')", "(256, 1, 'b')"}
+
+
+def test_seam_overlap_fuses_to_parity_with_no_duplicates():
+    """Two overlapping tiles of one scene: the shared boulder must survive exactly once."""
+    # tile A covers x in [0, 60], tile B covers x in [40, 100]; overlap strip is x in [40, 60]
+    tile_a = make_gdf([[5, 5, 9, 9],        # A-only interior
+                       [50, 5, 54, 9]])     # in the overlap strip - both tiles see it
+    tile_b = make_gdf([[50.2, 5.1, 54.1, 9.0],   # same boulder, tile B's view
+                       [90, 5, 94, 9]])          # B-only interior
+    fused, audit = fuse_predictions({(256, 1, "A"): tile_a, (256, 1, "B"): tile_b})
+
+    assert len(fused) == 3                      # 4 pooled, 1 duplicate suppressed
+    assert len(audit) == 1
+    assert len(fused) + len(audit) == len(tile_a) + len(tile_b)     # parity by construction
+
+    strip = fused[fused.geometry.centroid.x.between(40, 60)]
+    assert len(strip) == 1                      # no duplicate in the overlap strip
+    dup = duplicate_rate(fused, native_res=1.0)
+    assert dup["n_bug_pairs"].sum() == 0
+
+
+def test_seam_truncation_priority_prefers_the_whole_mask():
+    """The tile that clipped a boulder at its edge must lose to the tile that saw it whole."""
+    clipped = make_gdf([[50, 5, 53, 9]], scores=[0.95], within=[False])   # tile A's edge
+    whole = make_gdf([[50, 5, 54, 9]], scores=[0.40], within=[True])      # tile B, fully inside
+    fused, audit = fuse_predictions({(256, 1, "A"): clipped, (256, 1, "B"): whole})
+
+    assert len(fused) == 1
+    assert bool(fused["is_within_slice"].iloc[0]) is True     # despite the lower score
+    assert fused["scale_key"].iloc[0] == "(256, 1, 'B')"
+
+
+def test_seam_interior_only_boulders_are_untouched():
+    """No detection deficit in the strip: non-overlapping content passes straight through."""
+    tile_a = make_gdf([[5, 5, 9, 9], [12, 5, 16, 9]])
+    tile_b = make_gdf([[90, 5, 94, 9]])
+    fused, audit = fuse_predictions({(256, 1, "A"): tile_a, (256, 1, "B"): tile_b})
+    assert len(fused) == 3 and len(audit) == 0
+
+
+def test_seam_fusion_is_order_independent():
+    tile_a = make_gdf([[50, 5, 54, 9]], scores=[0.6])
+    tile_b = make_gdf([[50.2, 5.1, 54.1, 9.0]], scores=[0.6])
+    ab, _ = fuse_predictions({(256, 1, "A"): tile_a, (256, 1, "B"): tile_b})
+    ba, _ = fuse_predictions({(256, 1, "B"): tile_b, (256, 1, "A"): tile_a})
+    assert len(ab) == len(ba) == 1
+
+
+def test_tile_edge_flag_survives_pooling():
+    """``is_at_edge`` (raster-footprint edge, set by get_sliced_prediction) IS the tile-edge flag
+    once the raster is a tile — it must reach the fused catalog for seam provenance."""
+    a = make_gdf([[50, 5, 53, 9]], within=[False], is_at_edge=[True])
+    b = make_gdf([[90, 5, 94, 9]], within=[True], is_at_edge=[False])
+    fused, _ = fuse_predictions({(256, 1, "A"): a, (256, 1, "B"): b})
+    assert "is_at_edge" in fused.columns
+    assert fused.sort_values("scale_key")["is_at_edge"].tolist() == [True, False]
