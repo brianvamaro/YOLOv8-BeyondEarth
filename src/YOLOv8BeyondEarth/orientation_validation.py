@@ -679,6 +679,53 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
     return df, masks
 
 
+def largest_blob_fill(mb):
+    """Largest connected component of a binary mask, holes filled; ``None`` if empty.
+
+    Module-level since 2026-07-30 so the Goal-3 phase-5a window re-masker
+    (:func:`YOLOv8BeyondEarth.remask.remask_windows`) applies the *same* mask cleanup as the
+    validated in-slice G path — extracted verbatim from ``sam2_remasker``'s local ``_clean``,
+    behaviour unchanged.
+    """
+    from scipy.ndimage import label, binary_fill_holes
+    lab, n = label(mb)
+    if n == 0:
+        return None
+    if n > 1:
+        big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
+        mb = (lab == big).astype(np.uint8)
+    return binary_fill_holes(mb).astype(np.uint8)
+
+
+def sam_masks_in_order(sam_model, image, boxes, sam_batch=96, device=0):
+    """One SAM mask per box **in order** — ``(masks, n_realigned_chunks)``.
+
+    ``masks`` is a list with ``None`` where a box yielded none. SAM2 usually returns one mask per
+    prompted box, but a batched call can return a *different* count on some slices — indexing a
+    stacked array then silently misaligns every later box. On a per-chunk count mismatch the chunk
+    is re-prompted one box at a time so alignment is exact; the count-matched path is unchanged
+    (same masks, same order).
+
+    Module-level since 2026-07-30 so the phase-5a window re-masker shares this exact prompting +
+    realignment path with the validated in-slice G path — extracted verbatim from
+    ``sam2_remasker``'s local ``_sam_masks`` (which now calls it), behaviour unchanged.
+    """
+    out, realigned = [], 0
+    for i in range(0, len(boxes), sam_batch):
+        chunk = boxes[i:i + sam_batch]
+        r = sam_model(image, bboxes=chunk, verbose=False, device=device)[0]
+        mdc = None if r.masks is None else r.masks.data.cpu().numpy()
+        if mdc is not None and len(mdc) == len(chunk):
+            out.extend(list(mdc))
+        else:
+            realigned += 1
+            for b in chunk:
+                rb = sam_model(image, bboxes=b[None], verbose=False, device=device)[0]
+                mb = None if rb.masks is None else rb.masks.data.cpu().numpy()
+                out.append(mb[0] if (mb is not None and len(mb)) else None)
+    return out, realigned
+
+
 def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_cache_every=64):
     """Build a ``remask_fn`` for :func:`YOLOv8BeyondEarth.predict.get_sliced_prediction` (Solution G).
 
@@ -694,49 +741,18 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
     ms/boulder (2026-07-06 benchmark) -> ~9 h/scene ungated.
     """
     import torch
-    from scipy.ndimage import label, binary_fill_holes
 
     state = {"n": 0, "realigned": 0}
-
-    def _clean(mb):
-        lab, n = label(mb)
-        if n == 0:
-            return None
-        if n > 1:
-            big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
-            mb = (lab == big).astype(np.uint8)
-        return binary_fill_holes(mb).astype(np.uint8)
-
-    def _sam_masks(image, boxes):
-        """One SAM mask per box **in order** (list, ``None`` where a box yields none). SAM2 usually
-        returns one mask per prompted box, but a batched call can return a *different* count on some
-        slices — indexing a stacked array then silently misaligns every later box. On a per-chunk
-        count mismatch we re-prompt that chunk one box at a time so alignment is exact. The
-        count-matched path is unchanged (same masks, same order), so this is a no-op for the slices
-        where it never fires and only adds a slow fallback on the rare offending one."""
-        out = []
-        for i in range(0, len(boxes), sam_batch):
-            chunk = boxes[i:i + sam_batch]
-            r = sam_model(image, bboxes=chunk, verbose=False, device=device)[0]
-            mdc = None if r.masks is None else r.masks.data.cpu().numpy()
-            if mdc is not None and len(mdc) == len(chunk):
-                out.extend(list(mdc))
-            else:
-                state["realigned"] += 1
-                for b in chunk:
-                    rb = sam_model(image, bboxes=b[None], verbose=False, device=device)[0]
-                    mb = None if rb.masks is None else rb.masks.data.cpu().numpy()
-                    out.append(mb[0] if (mb is not None and len(mb)) else None)
-        return out
 
     def remask(image, boxes_xyxy):
         boxes = np.asarray(boxes_xyxy, dtype=float)
         if len(boxes) == 0:
             return []
-        s = _sam_masks(image, boxes)
+        s, realigned = sam_masks_in_order(sam_model, image, boxes, sam_batch=sam_batch, device=device)
+        state["realigned"] += realigned
         masks = []
         for k in range(len(boxes)):
-            mb = None if s[k] is None else _clean(s[k].astype(np.uint8))
+            mb = None if s[k] is None else largest_blob_fill(s[k].astype(np.uint8))
             box_area = (boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1])
             if mb is None or mb.sum() > max_box_blowup * box_area:
                 masks.append(None)                       # dropped by _process_detection
