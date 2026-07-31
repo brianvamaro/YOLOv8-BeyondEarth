@@ -121,11 +121,25 @@ def pool_predictions(gdfs):
 
 # --- clustering core ----------------------------------------------------------------------------
 
-def _candidate_pairs(boxes, cluster_thr, metric):
+def _same_arm(arm_of, ii, jj):
+    """Mask of pairs whose two members came from the **same arm**.
+
+    "Arm" is the full ``scale_key`` — deliberately *not* the parsed ``(slice_size, sr_factor)``.
+    Seam fusion (phase 5c) keys neighbouring tiles of one scene as ``(256, 1, "A")`` and
+    ``(256, 1, "B")``: same scale, different arm. Keying same-arm on the parsed scale would make
+    every cross-tile pair look same-arm, silently turning seam dedup into a no-op and letting
+    duplicates flow into the regional catalog at every seam with no error at all.
+    """
+    return arm_of[ii] == arm_of[jj]
+
+
+def _candidate_pairs(boxes, cluster_thr, metric, arm_of=None, cross_arm_only=False):
     """All unordered index pairs with metric >= cluster_thr, via one bulk STRtree query.
 
     The spatial query only sees *intersecting* boxes, which is complete for thresholds > 0:
     disjoint boxes have IoU 0 and DIoU < 0.
+
+    ``cross_arm_only`` drops same-arm pairs before suppression: see :func:`fuse_predictions`.
     """
     if cluster_thr <= 0:
         raise ValueError("cluster_thr must be > 0 (the intersects-based candidate search is "
@@ -134,6 +148,10 @@ def _candidate_pairs(boxes, cluster_thr, metric):
     tree = shapely.STRtree(geoms)
     ii, jj = tree.query(geoms, predicate="intersects")
     keep = ii < jj  # drop self-pairs and mirrored duplicates
+    if cross_arm_only:
+        if arm_of is None:
+            raise ValueError("cross_arm_only needs arm_of")
+        keep &= ~_same_arm(arm_of, ii, jj)
     ii, jj = ii[keep], jj[keep]
     if len(ii) == 0:
         return ii, jj, np.empty(0)
@@ -205,7 +223,7 @@ def _priority_order(pool, rule, in_band=None):
 # --- the main entry point -----------------------------------------------------------------------
 
 def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule="scale_aware",
-                     bands=None, native_res=None, engulf_thr=None):
+                     bands=None, native_res=None, engulf_thr=None, cross_arm_only=True):
     """Fuse per-scale detection sets into one catalog. Returns ``(fused, audit)``.
 
     Parameters
@@ -234,6 +252,18 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
         footprint-wall artifacts). Suppressions land in the audit with ``engulfed=True``.
         Default None = off (phase-1 pinned behaviour). Use :func:`matched_recall` with the same
         ``engulf_thr`` so consolidated fragments count as represented.
+    cross_arm_only : bool, default True — only let detections from *different* arms suppress each
+        other (review item G3-02). Candidate generation was arm-agnostic, so fusion also
+        re-suppressed pairs *within* one arm that that arm's own NMS had already deliberately
+        kept — 5,043 such suppressions for HiRISE and 223 for NAC in the saved audits. Two
+        overlapping detections that survived a calibrated IoU-0.2 NMS are the arm's considered
+        answer; a DIoU-0.30 second opinion on them is a different, uncalibrated operation. Pass
+        ``False`` to request it explicitly.
+
+        "Arm" is the full ``scale_key``, **not** the parsed ``(slice_size, sr_factor)``: seam
+        fusion keys neighbouring tiles as ``(256, 1, "A")`` / ``(256, 1, "B")``, which are the
+        same scale but different arms, and keying on the parsed scale would silently turn
+        cross-tile dedup into a no-op.
 
     Returns
     -------
@@ -243,8 +273,12 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
         *deleted*: every pooled detection is either kept or suppressed by a kept one — parity
         by construction for every rule (the gate in validation re-checks it independently).
     audit : DataFrame — one row per suppressed detection: its provenance, its keeper's pool row
-        (``keeper`` indexes ``fused``'s original pool index — join on ``pool_index``),
-        the pair metric, and ``cross_scale``.
+        (``keeper`` indexes ``fused``'s original pool index — join on ``pool_index``), the pair
+        ``metric``, ``cross_scale`` (the keeper came from a different ``scale_key``, i.e. a
+        different arm — for seam fusion, a different tile), ``engulfed``, and ``relation``:
+        ``"cluster"`` for a DIoU suppression, ``"engulf"`` for containment, ``"engulf_chain"``
+        for a member redirected to an outer container. ``metric`` always describes the pair the
+        row names.
     """
     if rule not in _RULES:
         raise ValueError(f"rule must be one of {_RULES}, got {rule!r}")
@@ -266,14 +300,18 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
         pool["in_band"] = in_band
 
     boxes = pool.geometry.bounds.to_numpy(dtype=float)
-    ii, jj, vals = _candidate_pairs(boxes, cluster_thr, metric)
+    scale_of = pool["scale_key"].to_numpy()
+    ii, jj, vals = _candidate_pairs(boxes, cluster_thr, metric, arm_of=scale_of,
+                                    cross_arm_only=cross_arm_only)
     order = _priority_order(pool, rule, in_band=in_band)
     keeper, pair_val = _greedy_suppress(n, order, ii, jj, vals)
 
     if engulf_thr is not None:
-        keeper, pair_val, engulfed = _engulf_pass(pool, keeper, pair_val, engulf_thr)
+        keeper, pair_val, relation = _engulf_pass(pool, keeper, pair_val, engulf_thr,
+                                                  arm_of=scale_of,
+                                                  cross_arm_only=cross_arm_only)
     else:
-        engulfed = np.zeros(n, dtype=bool)
+        relation = np.where(keeper == -1, "", "cluster").astype(object)
 
     kept_mask = keeper == -1
     fused = pool.loc[kept_mask].copy()
@@ -281,7 +319,6 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
     fused["n_merged"] = counts[kept_mask]
 
     dropped = pool.loc[~kept_mask]
-    scale_of = pool["scale_key"].to_numpy()
     audit = pd.DataFrame({
         "pool_index": dropped["pool_index"].to_numpy(),
         "scale_key": dropped["scale_key"].to_numpy(),
@@ -291,7 +328,8 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
         "keeper_scale_key": scale_of[keeper[~kept_mask]],
         "metric": pair_val[~kept_mask],
         "cross_scale": scale_of[keeper[~kept_mask]] != dropped["scale_key"].to_numpy(),
-        "engulfed": engulfed[~kept_mask],
+        "engulfed": np.isin(relation[~kept_mask], ("engulf", "engulf_chain")),
+        "relation": relation[~kept_mask],
     })
     return fused, audit
 
@@ -303,13 +341,27 @@ def _poly_containment(geoms_small, geoms_big):
     return np.where(a > 0, inter / a, 0.0)
 
 
-def _engulf_pass(pool, keeper, pair_val, engulf_thr):
+def _engulf_pass(pool, keeper, pair_val, engulf_thr, arm_of=None, cross_arm_only=False):
     """Fragment-consolidation post-pass: among KEPT members, suppress any whose polygon is
     ``engulf_thr``-contained in a larger kept member's polygon (container wins). Greedy in
     descending polygon area, so a suppressed fragment never suppresses others and chains
-    (fragment in fragment in whole) resolve to the outermost container."""
+    (fragment in fragment in whole) resolve to the outermost container.
+
+    Returns ``(keeper, pair_val, relation)``, where ``relation`` is one of ``"cluster"`` (untouched
+    by this pass), ``"engulf"`` (contained in its keeper) or ``"engulf_chain"``.
+
+    **Chain provenance (review item G3-03).** When a fragment is engulfed, the members the DIoU
+    pass had already suppressed *into* that fragment are redirected to the outer container. This
+    used to leave their recorded metric as the old DIoU against the fragment and their
+    ``engulfed`` flag False — so the audit named one pair and measured another, and a
+    child -> fragment -> container chain produced a row claiming a relationship that had never
+    been evaluated. Every redirected member's metric is now recomputed against the container it
+    actually ends up attributed to, and flagged ``engulf_chain`` so a weak final relationship is
+    visible rather than disguised as a strong one.
+    """
     if not (0 < engulf_thr <= 1):
         raise ValueError("engulf_thr must be in (0, 1]")
+    relation = np.where(keeper == -1, "", "cluster").astype(object)
     kept_idx = np.flatnonzero(keeper == -1)
     geoms = pool.geometry.values
     areas = shapely.area(geoms)
@@ -318,19 +370,24 @@ def _engulf_pass(pool, keeper, pair_val, engulf_thr):
     ai, bi = tree.query(kg, predicate="intersects")
     off_diag = ai != bi
     ai, bi = ai[off_diag], bi[off_diag]
-    engulfed = np.zeros(len(pool), dtype=bool)
     if len(ai) == 0:
-        return keeper, pair_val, engulfed
+        return keeper, pair_val, relation
     # orient pairs small -> big, dedupe mirrored copies
     small_first = areas[kept_idx[ai]] <= areas[kept_idx[bi]]
     si = np.where(small_first, ai, bi)
     bg = np.where(small_first, bi, ai)
     uniq = np.unique(np.stack([si, bg], axis=1), axis=0)
     si, bg = uniq[:, 0], uniq[:, 1]
+    if cross_arm_only:
+        cross = ~_same_arm(arm_of, kept_idx[si], kept_idx[bg])
+        si, bg = si[cross], bg[cross]
+        if len(si) == 0:
+            return keeper, pair_val, relation
     contain = _poly_containment(kg[si], kg[bg])
     sel = contain >= engulf_thr
     keeper = keeper.copy()
     pair_val = pair_val.copy()
+    redirected = np.zeros(len(pool), dtype=bool)
     # process containers in descending area so chains resolve to surviving containers
     order = np.argsort(-areas[kept_idx[bg[sel]]], kind="stable")
     for s, b, c in zip(kept_idx[si[sel]][order], kept_idx[bg[sel]][order],
@@ -338,15 +395,26 @@ def _engulf_pass(pool, keeper, pair_val, engulf_thr):
         if keeper[b] == -1 and keeper[s] == -1 and s != b:
             keeper[s] = b
             pair_val[s] = c
-            engulfed[s] = True
-            # members previously suppressed into the fragment follow it to the container
-            keeper[keeper == s] = b
-    return keeper, pair_val, engulfed
+            relation[s] = "engulf"
+            # members previously suppressed into the fragment follow it to the container; their
+            # recorded relationship is no longer the one they were measured against
+            children = np.flatnonzero(keeper == s)
+            keeper[children] = b
+            redirected[children] = True
+
+    # Re-measure every redirected member against the container it actually landed on, so the
+    # audit's metric always describes the pair the audit names.
+    moved = np.flatnonzero(redirected)
+    if len(moved):
+        pair_val[moved] = _poly_containment(geoms[moved], geoms[keeper[moved]])
+        relation[moved] = "engulf_chain"
+    return keeper, pair_val, relation
 
 
 def _empty_audit():
     return pd.DataFrame(columns=["pool_index", "scale_key", "src_index", "score", "keeper",
-                                 "keeper_scale_key", "metric", "cross_scale", "engulfed"])
+                                 "keeper_scale_key", "metric", "cross_scale", "engulfed",
+                                 "relation"])
 
 
 # --- validation helpers (the standing gates; see plan §Validation) -------------------------------
@@ -358,15 +426,25 @@ def equivalent_diameter_px(gdf, native_res):
 
 
 def matched_recall(reference, fused, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou",
-                   engulf_thr=None):
-    """Parity gate: fraction of ``reference`` detections *represented* in ``fused`` — i.e. having
-    any fused detection at metric >= cluster_thr (representation, not verbatim survival: a
+                   engulf_thr=None, unique=True):
+    """Parity gate: fraction of ``reference`` detections *represented* in ``fused`` — i.e. paired
+    with a fused detection at metric >= cluster_thr (representation, not verbatim survival: a
     baseline member may be replaced or consolidated). Must be 1.0 for the 256-only baseline.
+
     When the fusion ran with ``engulf_thr``, pass the same value here: a reference fragment is
     also *represented* by a fused polygon that contains ``engulf_thr`` of it (the consolidation
     case — the fragment's boulder is in the catalog, as its whole).
+
+    ``unique=True`` (default) requires a **one-to-one** pairing, computed as a maximum-cardinality
+    bipartite matching (review item G3-02). The old behaviour was many-to-one: one surviving
+    keeper could credit *every* reference it happened to overlap, so a fusion that collapsed two
+    neighbouring boulders into one still scored parity 1.0 — the gate could not see the loss it
+    exists to catch. Maximum-cardinality (rather than greedy) matching means the gate never fails
+    merely because a greedy pass consumed a keeper that a different reference needed.
+
     Returns ``(recall, unmatched_positional_indices)`` — a non-empty second element on the
-    baseline is a gate failure and points at the offending detections."""
+    baseline is a gate failure and points at the offending detections.
+    """
     if len(reference) == 0:
         return 1.0, np.empty(0, dtype=np.int64)
     if len(fused) == 0:
@@ -384,8 +462,25 @@ def matched_recall(reference, fused, cluster_thr=DEFAULT_CLUSTER_THR, metric="di
             contain = _poly_containment(reference.geometry.values[ri],
                                         fused.geometry.values[fi])
             ok |= contain >= engulf_thr
-        matched[np.unique(ri[ok])] = True
+        if unique:
+            matched[_max_bipartite_matching(ri[ok], fi[ok], len(reference), len(fused))] = True
+        else:
+            matched[np.unique(ri[ok])] = True
     return float(matched.mean()), np.flatnonzero(~matched)
+
+
+def _max_bipartite_matching(rows, cols, n_rows, n_cols):
+    """Row indices in a maximum-cardinality matching of the sparse bipartite graph rows->cols."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import maximum_bipartite_matching
+
+    if len(rows) == 0:
+        return np.empty(0, dtype=np.int64)
+    graph = coo_matrix((np.ones(len(rows), dtype=bool), (rows, cols)),
+                       shape=(n_rows, n_cols)).tocsr()
+    # perm_type="column": for each row, the column it is matched to, or -1
+    pairing = maximum_bipartite_matching(graph, perm_type="column")
+    return np.flatnonzero(pairing >= 0)
 
 
 def duplicate_rate(fused, audit_thr=0.0, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou",

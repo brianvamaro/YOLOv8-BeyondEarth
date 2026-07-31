@@ -34,7 +34,10 @@ def _fake_scale_outputs(slice_size, sr_factor):
                              "is_within_slice": True}, geometry=geoms)
 
 
-def test_wrapper_runs_ladder_fuses_and_writes(tmp_path, monkeypatch):
+def test_generic_scale_aware_run_keeps_the_finest_footprint(tmp_path, monkeypatch):
+    """The generic (non-preset) path, requested explicitly. This used to be the *default*, which
+    is what G3-01 objected to: `scale_aware` with no engulf pass was refuted by the phase-3
+    ablation, so an ordinary no-argument call produced an unvalidated catalog."""
     calls = []
 
     def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
@@ -48,9 +51,9 @@ def test_wrapper_runs_ladder_fuses_and_writes(tmp_path, monkeypatch):
     monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
 
     fused, audit, per_scale = P.get_multiscale_prediction(
-        tmp_path / "scene.tif", None, output_dir=tmp_path)
+        tmp_path / "scene.tif", None, output_dir=tmp_path, preset=None)
 
-    assert calls == [(512, 1), (256, 1), (256, 2)]           # the default ladder, in order
+    assert calls == [(512, 1), (256, 1), (256, 2)]           # the ladder, in order
     assert len(fused) == 2                                    # shared boulder + 512-only large
     kept = fused.sort_values("src_index").scale_key.tolist()
     assert "(256, 2)" in kept and "512" in kept               # finest wins; 512-only survives
@@ -63,6 +66,40 @@ def test_wrapper_runs_ladder_fuses_and_writes(tmp_path, monkeypatch):
     back = gpd.read_file(out)
     assert {"scale_key", "slice_size", "sr_factor", "footprint", "n_merged",
             "isin_slice"} <= set(back.columns)
+
+
+def test_no_argument_call_is_the_production_preset(tmp_path, monkeypatch):
+    """G3-01 acceptance: a no-argument call must select 256 in contested clusters and consolidate
+    contained fragments — i.e. be `256pref_engulf`, not the refuted `scale_aware`."""
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        g = _fake_scale_outputs(slice_size, sr_factor)
+        if (slice_size, sr_factor) == (256, 1):   # fragment wholly inside the 512 large boulder
+            g = gpd.GeoDataFrame({"score": list(g.score) + [0.5], "category_id": 0,
+                                  "category_name": "boulder", "is_within_slice": True},
+                                 geometry=list(g.geometry) + [shapely.box(31, 1, 36, 6)])
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+
+    fused, audit, _ = P.get_multiscale_prediction(tmp_path / "scene.tif", None,
+                                                  output_dir=tmp_path)
+
+    assert set(fused.scale_key) == {"256", "512"}             # 256 beats the finer SR arm
+    eng = audit[audit.engulfed]
+    assert len(eng) == 1 and eng.iloc[0].scale_key == "256"   # fragment consolidated
+    assert eng.iloc[0].keeper_scale_key == "512"
+    out = tmp_path / "scene-predictions-fused-bands-engulf70-512-256-256sr2-mask.gpkg"
+    assert out.exists(), sorted(p.name for p in tmp_path.iterdir())
+
+    # ...and the resolved fusion configuration is on disk beside it
+    import json
+    record = json.loads((tmp_path / (out.stem + "-manifest.json")).read_text())
+    assert record["config"]["fusion"]["rule"] == "bands"
+    assert record["config"]["fusion"]["engulf_thr"] == 0.7
+    assert record["config"]["fusion"]["cross_arm_only"] is True
+    assert record["same_arm_suppressions"] == 0               # G3-02 production invariant
 
 
 def test_empty_layer_writers_skip(tmp_path):

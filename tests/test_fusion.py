@@ -269,7 +269,134 @@ def test_engulf_thr_validated():
         fuse_predictions({256: make_gdf([[0, 0, 4, 4]])}, engulf_thr=1.5)
 
 
+# --- cross-arm-only suppression (G3-02) ------------------------------------------------------------
+
+def test_same_arm_overlaps_are_not_re_suppressed():
+    """Two detections from ONE arm that survived that arm's own calibrated NMS are its considered
+    answer. Fusion's candidate generation was arm-agnostic and re-suppressed them at a different,
+    uncalibrated threshold — 5,043 such suppressions for HiRISE in the saved audits."""
+    pair = make_gdf([[0, 0, 4, 4], [1, 0, 5, 4]], scores=[0.9, 0.5])   # DIoU ~0.58, same arm
+    fused, audit = fuse_predictions({256: pair})
+    assert len(fused) == 2 and len(audit) == 0
+
+    fused_off, audit_off = fuse_predictions({256: pair}, cross_arm_only=False)
+    assert len(fused_off) == 1 and len(audit_off) == 1        # available, but only on request
+    assert not bool(audit_off.iloc[0].cross_scale)
+
+
+def test_cross_arm_suppression_still_happens():
+    gdfs = {256: make_gdf([[0, 0, 4, 4]]), (256, 2): make_gdf([[1, 0, 5, 4]])}
+    fused, audit = fuse_predictions(gdfs)
+    assert len(fused) == 1 and len(audit) == 1 and bool(audit.iloc[0].cross_scale)
+
+
+def test_production_audit_has_no_same_arm_suppressions():
+    """The G3-02 acceptance invariant, over a dense random population."""
+    rng = np.random.default_rng(7)
+    lo = rng.uniform(0, 120, size=(150, 2))          # dense enough for same-arm overlaps
+    wh = rng.uniform(3, 14, size=(150, 2))
+    boxes = np.hstack([lo, lo + wh])
+    gdfs = {256: make_gdf(boxes[:80]), 512: make_gdf(boxes[80:]),
+            (256, 2): make_gdf(boxes[:40] + 0.3)}
+    fused, audit = fuse_predictions(gdfs, rule="bands", bands={256: (0.0, np.inf)},
+                                    native_res=1.0, engulf_thr=0.7)
+    assert len(audit) > 0, "fixture produced no suppressions at all"
+    assert int((~audit.cross_scale).sum()) == 0
+    assert len(fused) + len(audit) == sum(len(g) for g in gdfs.values())    # parity
+
+
+def test_cross_arm_only_keys_on_the_full_scale_key_not_the_parsed_scale():
+    """The trap: neighbouring tiles are the SAME (slice_size, sr_factor) but DIFFERENT arms.
+    Keying same-arm on the parsed scale would make every cross-tile pair look same-arm and turn
+    seam dedup into a silent no-op — no error, duplicates just flow into the regional catalog."""
+    tile_a = make_gdf([[50, 5, 54, 9]], scores=[0.6])
+    tile_b = make_gdf([[50.2, 5.1, 54.1, 9.0]], scores=[0.6])
+    fused, audit = fuse_predictions({(256, 1, "A"): tile_a, (256, 1, "B"): tile_b})
+    assert len(fused) == 1 and len(audit) == 1, "cross-tile dedup became a no-op"
+    assert bool(audit.iloc[0].cross_scale)      # different arm, same scale
+
+
+# --- engulf chain provenance (G3-03) ---------------------------------------------------------------
+
+def test_engulf_chain_metric_describes_the_pair_it_names():
+    """Two mutually overlapping fine-arm masks inside one coarse container. The DIoU pass keeps one
+    of them and suppresses the other into it; the engulf pass then swallows the survivor into the
+    container, and the suppressed one is redirected there too. Its recorded metric used to stay the
+    old DIoU against the *fragment*, so the audit named one pair and measured another."""
+    frag = [1, 1, 9, 9]                       # inside WHOLE
+    twin = [1.4, 1, 9.4, 9]                   # DIoU ~0.6 vs frag -> one suppresses the other
+    boxes = {"256": frag, "(256, 2)": twin}
+    gdfs = {512: make_gdf([WHOLE]), 256: make_gdf([frag]), (256, 2): make_gdf([twin])}
+    fused, audit = fuse_predictions(gdfs, engulf_thr=0.7)
+
+    assert len(fused) == 1 and fused.iloc[0]["scale_key"] == "512"
+    assert (audit["keeper_scale_key"] == "512").all()
+    assert set(audit["relation"]) == {"engulf", "engulf_chain"}
+
+    chained = audit[audit.relation == "engulf_chain"].iloc[0]
+    # the metric must be the redirected member's containment in the CONTAINER, recomputed --
+    # not the DIoU against the fragment it was originally measured against
+    own = shapely.box(*boxes[chained["scale_key"]])
+    truth = own.intersection(shapely.box(*WHOLE)).area / own.area
+    assert chained["metric"] == pytest.approx(truth, abs=1e-9)
+    assert bool(chained["engulfed"])           # its final relationship is containment
+    stale_diou = pairwise_box_metric([shapely.box(*frag).bounds],
+                                     [shapely.box(*twin).bounds], "diou")[0]
+    assert chained["metric"] != pytest.approx(stale_diou, abs=1e-6)
+
+
+def test_every_audit_metric_matches_its_named_relation():
+    """No audit row may carry a metric measured against a different pair."""
+    frag = [1, 1, 9, 9]
+    child = [1.4, 1, 9.4, 9]
+    gdfs = {512: make_gdf([WHOLE, [200, 200, 208, 208]]), 256: make_gdf([frag]),
+            (256, 2): make_gdf([child, [200.2, 200, 208.2, 208]])}
+    fused, audit = fuse_predictions(gdfs, engulf_thr=0.7)
+    geoms = {}
+    for key, g in gdfs.items():
+        for i, geom in enumerate(g.geometry):
+            geoms[(str(key), i)] = geom
+    keeper_geom = dict(zip(fused["pool_index"], fused.geometry))
+
+    for _, row in audit.iterrows():
+        dropped = geoms[(row["scale_key"], row["src_index"])]
+        keeper = keeper_geom[row["keeper"]]
+        if row["relation"] == "cluster":
+            expected = pairwise_box_metric([dropped.bounds], [keeper.bounds], "diou")[0]
+        else:
+            expected = dropped.intersection(keeper).area / dropped.area
+        assert row["metric"] == pytest.approx(expected, abs=1e-9), row["relation"]
+
+
+def test_relation_is_cluster_when_engulf_is_off():
+    gdfs = {256: make_gdf([[0, 0, 4, 4]]), (256, 2): make_gdf([[1, 0, 5, 4]])}
+    _, audit = fuse_predictions(gdfs)
+    assert list(audit["relation"]) == ["cluster"]
+
+
 # --- validation helpers --------------------------------------------------------------------------
+
+def test_matched_recall_is_one_to_one():
+    """G3-02 adversarial fixture: two distinct neighbouring truths and ONE fused detection that
+    overlaps both. Many-to-one matching scored parity 1.0 and hid the collapse."""
+    two_truths = make_gdf([[0, 0, 4, 4], [1, 0, 5, 4]])
+    one_keeper = make_gdf([[0.5, 0, 4.5, 4]])
+    rec_unique, unmatched = matched_recall(two_truths, one_keeper)
+    assert rec_unique == pytest.approx(0.5) and len(unmatched) == 1
+    rec_many, _ = matched_recall(two_truths, one_keeper, unique=False)
+    assert rec_many == pytest.approx(1.0)      # the old behaviour, kept only for comparison
+
+
+def test_matched_recall_is_maximum_cardinality_not_greedy():
+    """A greedy pass ordered by metric can consume a keeper that another reference needed, scoring
+    below the true optimum. R0 overlaps both keepers; R1 only overlaps K0."""
+    refs = make_gdf([[0, 0, 4, 4],          # R0: matches K0 strongly and K1 as well
+                     [0.2, 0, 4.2, 4]])     # R1: matches K0 only
+    keepers = make_gdf([[0.1, 0, 4.1, 4],   # K0
+                        [0, 0, 4, 4]])      # K1: identical to R0
+    rec, unmatched = matched_recall(refs, keepers)
+    assert rec == pytest.approx(1.0), "maximum matching should pair both references"
+    assert len(unmatched) == 0
 
 def test_parity_gate_holds_by_construction():
     rng = np.random.default_rng(1)

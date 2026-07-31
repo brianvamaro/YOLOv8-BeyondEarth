@@ -816,33 +816,46 @@ def predict_production(in_raster, detection_model, output_dir, preset="goal1_pro
     return get_sliced_prediction(in_raster, detection_model, output_dir=output_dir, **call)
 
 
+_UNSET = object()   # lets an explicit `engulf_thr=None` mean "off" rather than "use the preset"
+
+
 def get_multiscale_prediction(in_raster,
                               detection_model=None,
-                              scales=(512, 256, (256, 2)),
-                              rule: str = "scale_aware",
-                              cluster_thr: float = None,
-                              metric: str = "diou",
-                              bands=None,
-                              engulf_thr: float = None,
+                              scales=_UNSET,
+                              rule=_UNSET,
+                              cluster_thr=_UNSET,
+                              metric=_UNSET,
+                              bands=_UNSET,
+                              engulf_thr=_UNSET,
+                              cross_arm_only=_UNSET,
+                              preset="goal3_production",
                               output_dir=None,
                               output_format: str = "gpkg",
+                              on_conflict: str = "error",
                               **kwargs):
     """Goal 3: run ``get_sliced_prediction`` once per scale and fuse into one catalog.
 
+    **Called with no fusion arguments this runs the production configuration**
+    :data:`presets.GOAL3_PRODUCTION` — the phase-3 ablation winner ``256pref_engulf``: the ladder
+    {512 native, 256 native, SR x2 @ 128-native footprint}, ``rule="bands"`` with
+    ``bands={256: (0, inf)}`` so 256 masks win contested clusters while 512/SR act as recall nets,
+    and ``engulf_thr=0.7`` so fine-arm fragments consolidate into the whole boulder. It used to
+    default to ``rule="scale_aware"`` with no engulf pass — a rule the phase-3 ablation had already
+    refuted — so an ordinary call produced a catalog nobody had validated (review item G3-01).
+    Pass ``preset=None`` plus explicit arguments for a generic run; any argument you do pass
+    overrides the preset.
+
     ``scales`` uses the same keys as :func:`YOLOv8BeyondEarth.fusion.fuse_predictions`: an int
-    is a native slice size, a ``(slice_size, sr_factor)`` tuple is a streamed-SR arm. The
-    default is the plan's ladder {512 native, 256 native, SR×2 @ 128-native footprint}
-    (`docs/goal3_multiscale_fusion_plan.md`). Per-scale passes run with their own intra-scale
-    NMS on and per-scale file output off (``save_prenms=False, save_bbox=False``); the fused
-    mask layer is the one file written, as ``<stem>-predictions-fused-<rule>-...-mask.gpkg``,
-    with the suppression audit table next to it as ``...-audit.csv``.
+    is a native slice size, a ``(slice_size, sr_factor)`` tuple is a streamed-SR arm. Per-scale
+    passes run with their own intra-scale NMS on and per-scale file output off
+    (``save_prenms=False, save_bbox=False``); the fused mask layer is the one file written, as
+    ``<stem>-predictions-fused-<rule>-...-mask.gpkg``, with the suppression audit table next to it
+    as ``...-audit.csv`` and the resolved-config manifest as ``...-manifest.json``.
 
     ``cluster_thr=None`` uses the calibrated ``fusion.DEFAULT_CLUSTER_THR`` (a DIoU value —
-    pass an explicit threshold if ``metric="iou"``). ``bands``/``rule``/``metric``/``engulf_thr``
-    are passed through to ``fuse_predictions`` (``native_res`` for the bands rule is read off the
-    raster). The phase-3 ablation winner ``256pref_engulf`` is ``rule="bands",
-    bands={256: (0, np.inf)}, engulf_thr=0.7`` — 256 masks win contested clusters, SR/512 act as
-    recall nets, fragments consolidate; when ``engulf_thr`` is set the fused filename carries an
+    pass an explicit threshold if ``metric="iou"``). ``bands``/``rule``/``metric``/``engulf_thr``/
+    ``cross_arm_only`` are passed through to ``fuse_predictions`` (``native_res`` for the bands
+    rule is read off the raster); when ``engulf_thr`` is set the fused filename carries an
     ``-engulfNN`` tag.
     Remaining ``**kwargs`` (confidence_threshold, inference_size, overlap ratios,
     contour_method, batch_size, ...) go to every per-scale ``get_sliced_prediction`` call —
@@ -854,11 +867,39 @@ def get_multiscale_prediction(in_raster,
     """
     from YOLOv8BeyondEarth.fusion import fuse_predictions, DEFAULT_CLUSTER_THR
 
+    # Explicit arguments win; anything left unset comes from the preset, and from the generic
+    # fallback if there is no preset.
+    generic = {"scales": (512, 256, (256, 2)), "rule": "scale_aware", "cluster_thr": None,
+               "metric": "diou", "bands": None, "engulf_thr": None, "cross_arm_only": True}
+    explicit = {k: v for k, v in
+                (("scales", scales), ("rule", rule), ("cluster_thr", cluster_thr),
+                 ("metric", metric), ("bands", bands), ("engulf_thr", engulf_thr),
+                 ("cross_arm_only", cross_arm_only)) if v is not _UNSET}
+    base = dict(generic)
+    if preset is not None:
+        base.update({k: v for k, v in presets.resolve(preset).items()
+                     if not k.startswith("_")})
+    fuse_cfg = {**base, **explicit}
+    scales = fuse_cfg["scales"]
+
     in_raster = Path(in_raster)
     output_dir = Path(output_dir)
     for forbidden in ("slice_size", "sr_factor", "save_prenms", "save_bbox", "postprocess"):
         if forbidden in kwargs:
             raise ValueError(f"{forbidden} is owned by the wrapper — set scales=... instead")
+    if not scales:
+        raise ValueError("scales is empty — nothing to fuse")
+
+    ext = ".gpkg" if output_format == "gpkg" else ".shp"
+    rule_str = (fuse_cfg["rule"] if fuse_cfg["engulf_thr"] is None else
+                f"{fuse_cfg['rule']}-engulf{int(round(fuse_cfg['engulf_thr'] * 100)):02d}")
+    scales_str = "-".join(str(s) if isinstance(s, int) else f"{s[0]}sr{s[1]}" for s in scales)
+    out_mask = output_dir / (in_raster.stem + f"-predictions-fused-{rule_str}-{scales_str}-mask" + ext)
+    resolved_config = {"preset": preset if preset is None else str(preset),
+                       "fusion": fuse_cfg, "per_scale_kwargs": dict(kwargs),
+                       "output_format": output_format,
+                       "inference_contract_version": INFERENCE_CONTRACT_VERSION}
+    presets.check_config_conflict(out_mask, resolved_config, on_conflict)
 
     per_scale = {}
     for key in scales:
@@ -866,18 +907,24 @@ def get_multiscale_prediction(in_raster,
         _, gdf_nms = get_sliced_prediction(
             in_raster, detection_model, slice_size=int(slice_size), sr_factor=int(sr_factor),
             output_dir=output_dir, output_format=output_format,
-            save_prenms=False, save_bbox=False, postprocess=True, **kwargs)
+            save_prenms=False, save_bbox=False, postprocess=True,
+            on_conflict=on_conflict, **kwargs)
         per_scale[key] = gdf_nms
 
-    thr = DEFAULT_CLUSTER_THR if cluster_thr is None else cluster_thr
+    thr = DEFAULT_CLUSTER_THR if fuse_cfg["cluster_thr"] is None else fuse_cfg["cluster_thr"]
     native_res = raster_metadata.get_resolution(in_raster)[0]
-    fused, audit = fuse_predictions(per_scale, cluster_thr=thr, metric=metric, rule=rule,
-                                    bands=bands, native_res=native_res, engulf_thr=engulf_thr)
+    fused, audit = fuse_predictions(per_scale, cluster_thr=thr, metric=fuse_cfg["metric"],
+                                    rule=fuse_cfg["rule"], bands=fuse_cfg["bands"],
+                                    native_res=native_res, engulf_thr=fuse_cfg["engulf_thr"],
+                                    cross_arm_only=fuse_cfg["cross_arm_only"])
 
-    ext = ".gpkg" if output_format == "gpkg" else ".shp"
-    rule_str = rule if engulf_thr is None else f"{rule}-engulf{int(round(engulf_thr * 100)):02d}"
-    scales_str = "-".join(str(s) if isinstance(s, int) else f"{s[0]}sr{s[1]}" for s in scales)
-    out_mask = output_dir / (in_raster.stem + f"-predictions-fused-{rule_str}-{scales_str}-mask" + ext)
     outlines_to_shp(fused, out_mask)
     audit.to_csv(out_mask.with_suffix("").as_posix() + "-audit.csv", index=False)
+    presets.write_manifest(
+        out_mask, config=resolved_config, inputs={"raster": in_raster},
+        outputs={"files": [out_mask.name], "n_fused": int(len(fused)),
+                 "n_suppressed": int(len(audit)),
+                 "n_pooled": int(sum(len(g) for g in per_scale.values())),
+                 "per_scale_counts": {str(k): int(len(v)) for k, v in per_scale.items()}},
+        same_arm_suppressions=int((~audit.cross_scale).sum()) if len(audit) else 0)
     return fused, audit, per_scale
