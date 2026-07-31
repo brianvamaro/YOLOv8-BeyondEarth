@@ -471,16 +471,8 @@ def matched_recall(reference, fused, cluster_thr=DEFAULT_CLUSTER_THR, metric="di
 
 def _max_bipartite_matching(rows, cols, n_rows, n_cols):
     """Row indices in a maximum-cardinality matching of the sparse bipartite graph rows->cols."""
-    from scipy.sparse import coo_matrix
-    from scipy.sparse.csgraph import maximum_bipartite_matching
-
-    if len(rows) == 0:
-        return np.empty(0, dtype=np.int64)
-    graph = coo_matrix((np.ones(len(rows), dtype=bool), (rows, cols)),
-                       shape=(n_rows, n_cols)).tocsr()
-    # perm_type="column": for each row, the column it is matched to, or -1
-    pairing = maximum_bipartite_matching(graph, perm_type="column")
-    return np.flatnonzero(pairing >= 0)
+    from YOLOv8BeyondEarth.matching import max_cardinality_matching
+    return max_cardinality_matching(rows, cols, n_rows, n_cols)
 
 
 def duplicate_rate(fused, audit_thr=0.0, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou",

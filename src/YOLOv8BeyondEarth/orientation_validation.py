@@ -37,16 +37,24 @@ def matched_area_ratio(model_gdf, ref_gdf, rom=None, min_radius_m=1.0):
     same equirectangular grid; reprojecting throws a bogus datum shift). If ``rom`` (a GeoDataFrame
     or geometry) is given, both sets are first clipped to boulders whose centroid falls inside it.
 
-    Each reference polygon is matched to the nearest model centroid, accepted if within
-    ``max(ref_equiv_radius, min_radius_m)`` (map units). Returns
-    ``(df, stats)`` where ``df`` has one row per matched reference boulder
-    (``ref_area, model_area, ratio, ref_dia``) and ``stats`` is a dict with match/recall/
-    over-detection fractions. Ratio > 1 ⇒ model masks larger than the reference annotation;
+    Each reference polygon is matched to **at most one** model detection, within
+    ``max(ref_equiv_radius, min_radius_m)`` (map units), by an optimal one-to-one assignment
+    (:func:`matching.unique_centroid_match`). It used to be a nearest-centroid query, which is
+    many-to-one: several references could all claim the same prediction, so a model that merged two
+    neighbouring boulders into one still scored full recall and its merged mask was counted twice
+    in the ratio distribution (review item G2-05, which flags this as a possible contributor to
+    the 1.37x -> 1.02x result).
+
+    Returns ``(df, stats)`` where ``df`` has one row per matched reference boulder
+    (``ref_area, model_area, ratio, ref_dia``) and ``stats`` is a dict with the full match/unmatched
+    flow counts on both sides. Ratio > 1 ⇒ model masks larger than the reference annotation;
     < 1 ⇒ tighter. (Whether > 1 means overshoot vs the *true* boulder depends on the reference's
     own accuracy — see the shadow caveat above.)
     """
     from scipy.spatial import cKDTree
     import shapely
+
+    from .matching import unique_centroid_match
 
     m, r = model_gdf.copy(), ref_gdf.copy()
     if rom is not None:
@@ -59,20 +67,25 @@ def matched_area_ratio(model_gdf, ref_gdf, rom=None, min_radius_m=1.0):
         g["_dia"] = 2 * np.sqrt(g["_area"].to_numpy() / np.pi)
     mc = np.c_[m.geometry.centroid.x.to_numpy(), m.geometry.centroid.y.to_numpy()]
     rc = np.c_[r.geometry.centroid.x.to_numpy(), r.geometry.centroid.y.to_numpy()]
-    tree = cKDTree(mc)
-    dist, idx = tree.query(rc, k=1)
     ref_rad = r["_dia"].to_numpy() / 2
-    ok = dist <= np.maximum(ref_rad, min_radius_m)
-    ref_a = r["_area"].to_numpy()[ok]
-    mod_a = m["_area"].to_numpy()[idx[ok]]
+    ref_idx, mod_idx = unique_centroid_match(rc, mc, np.maximum(ref_rad, min_radius_m))
+    ref_a = r["_area"].to_numpy()[ref_idx]
+    mod_a = m["_area"].to_numpy()[mod_idx]
     df = pd.DataFrame(dict(ref_area=ref_a, model_area=mod_a, ratio=mod_a / ref_a,
-                           ref_dia=r["_dia"].to_numpy()[ok]))
+                           ref_dia=r["_dia"].to_numpy()[ref_idx],
+                           ref_index=ref_idx, model_index=mod_idx))
     # over-detection: model polys with no reference within their own radius
-    rdist, _ = cKDTree(rc).query(mc, k=1)
+    rdist, _ = cKDTree(rc).query(mc, k=1) if len(rc) and len(mc) else (np.full(len(mc), np.inf), None)
     over = rdist > np.maximum(m["_dia"].to_numpy() / 2, min_radius_m)
-    stats = dict(n_ref=len(r), n_model=len(m), n_matched=int(ok.sum()),
-                 recall=float(ok.mean()), median_ratio=float(np.median(df.ratio)),
-                 over_detection_frac=float(over.mean()))
+    n_matched = int(len(ref_idx))
+    stats = dict(n_ref=len(r), n_model=len(m), n_matched=n_matched,
+                 n_ref_unmatched=int(len(r) - n_matched),
+                 n_model_unmatched=int(len(m) - n_matched),
+                 recall=float(n_matched / len(r)) if len(r) else np.nan,
+                 precision=float(n_matched / len(m)) if len(m) else np.nan,
+                 median_ratio=float(np.median(df.ratio)) if n_matched else np.nan,
+                 over_detection_frac=float(over.mean()) if len(m) else np.nan)
+    assert df.ref_index.is_unique and df.model_index.is_unique, "matching is not one-to-one"
     return df, stats
 
 

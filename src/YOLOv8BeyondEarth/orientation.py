@@ -365,8 +365,15 @@ def refine_peak(angles, sigma=4.0):
     return float((c[i] + (0.5 * (y0 - y2) / den if den else 0.0)) % 180.0)
 
 
-def bootstrap_peak_ci(angles, n_boot=400, ci=(2.5, 97.5), sigma=4.0, seed=0):
+def bootstrap_peak_ci(angles, n_boot=400, ci=(2.5, 97.5), sigma=4.0, seed=0, groups=None):
     """Refined peak azimuth and its bootstrap CI. Returns ``(peak, lo, hi)`` in degrees.
+
+    ``groups``: optional per-boulder cluster label (tile, ROM, scene). **Pass it whenever the
+    boulders are not independent** — which is essentially always, since thousands of detections
+    typically come from a handful of tiles or scenes (review item G2-06). Resampling individual
+    boulders treats every detection as independent evidence and produces an interval far narrower
+    than the data supports: the current Mars matched comparison is 96 rocks from six tiles, so the
+    honest sample size is six. With ``groups``, whole clusters are resampled with replacement.
 
     CAVEAT: the percentile CI is taken on the linear angle values, so it is only meaningful when
     the peak sits away from the 0/180 wrap (true for the HiRISE diagonal peaks ~115-145).
@@ -376,9 +383,58 @@ def bootstrap_peak_ci(angles, n_boot=400, ci=(2.5, 97.5), sigma=4.0, seed=0):
     if n == 0:
         return np.nan, np.nan, np.nan
     rng = np.random.default_rng(seed)
-    boot = np.array([refine_peak(a[rng.integers(0, n, n)], sigma) for _ in range(n_boot)])
-    lo, hi = np.percentile(boot, ci)
+    if groups is None:
+        boot = [refine_peak(a[rng.integers(0, n, n)], sigma) for _ in range(n_boot)]
+    else:
+        members = _group_members(groups, n)
+        k = len(members)
+        boot = []
+        for _ in range(n_boot):
+            pick = np.concatenate([members[i] for i in rng.integers(0, k, k)])
+            boot.append(refine_peak(a[pick], sigma))
+    lo, hi = np.percentile(np.asarray(boot, dtype=float), ci)
     return refine_peak(a, sigma), float(lo), float(hi)
+
+
+def _group_members(groups, n):
+    """List of index arrays, one per distinct cluster label."""
+    groups = np.asarray(groups)
+    if len(groups) != n:
+        raise ValueError(f"groups has {len(groups)} labels for {n} angles")
+    return [np.flatnonzero(groups == g) for g in pd.unique(groups)]
+
+
+def peak_ci_report(angles, groups=None, n_boot=400, ci=(2.5, 97.5), sigma=4.0, seed=0):
+    """Peak azimuth with cluster-aware uncertainty **and the diagnostics that qualify it**.
+
+    A headline peak is only as strong as the number of *independent* units behind it, so this
+    reports that number alongside the interval, and re-estimates the peak with each cluster left
+    out in turn. A leave-one-out spread comparable to the interval width means the result rests on
+    one tile or one scene and the interval is understating the real uncertainty (review item
+    G2-06).
+
+    Returns a dict: ``peak``, ``lo``, ``hi``, ``n``, ``n_clusters``,
+    ``leave_one_out`` (per-cluster peak with that cluster removed), ``loo_spread`` (max - min),
+    and ``cluster_bootstrap`` (whether clustering was applied at all).
+    """
+    a = np.asarray(angles, dtype=float) % 180.0
+    peak, lo, hi = bootstrap_peak_ci(a, n_boot=n_boot, ci=ci, sigma=sigma, seed=seed,
+                                     groups=groups)
+    out = {"peak": peak, "lo": lo, "hi": hi, "n": int(len(a)),
+           "cluster_bootstrap": groups is not None}
+    if groups is None:
+        out.update(n_clusters=None, leave_one_out={}, loo_spread=np.nan)
+        return out
+    members = _group_members(groups, len(a))
+    labels = list(pd.unique(np.asarray(groups)))
+    loo = {}
+    for label, idx in zip(labels, members):
+        keep = np.setdiff1d(np.arange(len(a)), idx, assume_unique=False)
+        loo[label] = refine_peak(a[keep], sigma) if len(keep) else np.nan
+    finite = [v for v in loo.values() if np.isfinite(v)]
+    out.update(n_clusters=len(members), leave_one_out=loo,
+               loo_spread=float(max(finite) - min(finite)) if len(finite) > 1 else 0.0)
+    return out
 
 
 def meridian_convergence(tif_path):
