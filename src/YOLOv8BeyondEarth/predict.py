@@ -21,6 +21,60 @@ from shptools_BOULDERING import shp
 
 #from torchvision.ops import (nms as nms_torch, batched_nms as batched_nms_torch)
 
+# --- inference/output contract -------------------------------------------------------------------
+# Bumped whenever a change alters the numeric content of a saved catalog, so a file can never be
+# ambiguous about which convention produced it. Recorded in every result manifest.
+#   1  original: `conf` never reached ultralytics (effective 0.25 regardless of the request) and
+#      slice-truncated detections had their confidence overwritten with the literal 0.10.
+#   2  (2026-07-30, review item X-01/X-02): the requested threshold is passed to the model, and
+#      `score` is the detector's real confidence; truncation priority moved to `nms_prio`.
+INFERENCE_CONTRACT_VERSION = 2
+
+# Column order of the per-slice detection frame. `score` is the detector's real confidence;
+# `nms_prio` is the suppression ordering key (see `edge_priority`).
+_DETECTION_COLUMNS = ['score', 'nms_prio', 'polygon', 'category_id', 'category_name',
+                      'is_within_slice']
+
+
+def _to_bgr(image):
+    """RGB -> BGR for the ultralytics numpy path, matching ``sahi``'s own model wrapper.
+
+    ``sahi.slicing.slice_image`` reads through PIL and hands back **RGB** arrays, while
+    ultralytics treats a numpy input as **BGR** (the ``cv2.imread`` convention) — which is why
+    ``sahi``'s ``UltralyticsDetectionModel`` flips before calling the model. This pipeline called
+    the model directly and skipped that flip. For the single-band rasters it runs on the PNG is
+    grayscale-replicated (R == G == B), so the flip is a no-op and no saved result changes; it
+    matters only if a true colour product is ever fed in. ``np.ascontiguousarray`` because the
+    reversed view has a negative stride.
+    """
+    arr = np.asarray(image)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        return arr
+    return np.ascontiguousarray(arr[:, :, ::-1])
+
+
+def edge_priority(score, is_within_slice):
+    """NMS/fusion ordering key: real confidence for interior detections, demoted for truncated ones.
+
+    Overlapping slices mean a boulder clipped by a slice boundary is usually *also* seen whole by
+    the neighbouring slice. Suppression must always keep the whole copy, which the original code
+    achieved by overwriting the truncated copy's ``score`` with the literal 0.10 — destroying the
+    detector's real confidence and putting sub-threshold rows in every catalog (review X-02).
+
+    The ordering job now lives here instead. Interior detections map onto ``(0.5, 1.0]`` and
+    truncated ones onto ``(0, 0.5]``, so:
+
+    - every untruncated detection outranks every truncated one, whatever the confidence threshold
+      (the old fixed 0.10 failed this below ``conf=0.10``);
+    - ordering *within* each group still follows real confidence — the old code tied every
+      truncated row at exactly 0.10 and let array order break it;
+    - values stay strictly positive, which ``lsnms.nms`` requires (it silently drops ``score <= 0``).
+    """
+    score = np.asarray(score, dtype=float)
+    within = np.asarray(is_within_slice, dtype=bool)
+    return np.where(within, 0.5 + 0.5 * score, 0.5 * score)
+
+
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
                   min_area_threshold, downscale_pred, contour_method="skimage", executor=None,
                   remask_fn=None, image=None, coord_scale=1.0):
@@ -62,7 +116,7 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
 
     # if no predictions
     if prediction_result.boxes.data.size()[0] == 0:
-        return pd.DataFrame(columns=['score', 'polygon', 'category_id', 'category_name', 'is_within_slice'])
+        return pd.DataFrame(columns=_DETECTION_COLUMNS)
 
     conf_mask = prediction_result.boxes.data[:, 4] >= detection_model.confidence_threshold
     result_boxes = prediction_result.boxes.data[conf_mask]
@@ -114,8 +168,9 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
                                        np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
                                                       polygon_slice[:, 1].max() <= max_edge_distance))
 
-            # if at edge set score to a low value
-            score = prediction[4] if is_polygon_within_slice else 0.10
+            # X-02: `score` is always the detector's real confidence. Slice-truncated detections
+            # are demoted for *suppression ordering only*, in `nms_prio`.
+            score = float(prediction[4])
             if coord_scale != 1.0:   # streamed SR: SR px -> native px (shift is in native px)
                 polygon_slice = polygon_slice * coord_scale
             shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
@@ -144,11 +199,14 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         category_names.append(res[3])
         is_polygon_within_slice_list.append(res[4])
 
-    data = {'score': scores, 'polygon': polygons,
+    data = {'score': scores,
+            'nms_prio': edge_priority(scores, is_polygon_within_slice_list).tolist()
+                        if scores else [],
+            'polygon': polygons,
             'category_id': category_ids, 'category_name': category_names,
             'is_within_slice': is_polygon_within_slice_list}
 
-    return pd.DataFrame(data)
+    return pd.DataFrame(data, columns=_DETECTION_COLUMNS)
 
 
 def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_threshold,
@@ -189,8 +247,9 @@ def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_
             "and without masks every detection would be silently dropped by the area gate. "
             "Use a -seg model.")
 
-    prediction_results = detection_model.model(image, imgsz=detection_model.image_size, verbose=False,
-                                               device=detection_model.device)
+    prediction_results = detection_model.model(_to_bgr(image), imgsz=detection_model.image_size,
+                                               conf=detection_model.confidence_threshold,
+                                               verbose=False, device=detection_model.device)
     return _result_to_df(prediction_results[0], detection_model, has_mask, shift_amount, slice_size,
                          min_area_threshold, downscale_pred, contour_method)
 
@@ -231,6 +290,9 @@ def get_sliced_prediction(in_raster,
         detection_model: model.DetectionModel
         confidence_threshold: float
             minimum confidence threshold, values below will be automatically filtered away.
+            Passed straight through to ultralytics as ``conf=`` — before contract version 2 it
+            was not, so every run silently used ultralytics' own 0.25 default no matter what was
+            requested, and any catalog named ``ct-010`` is really a 0.25 catalog (review X-01).
         has_mask: bool
             Whether the model produces masks. Must be ``True`` unless ``remask_fn`` is given
             (the polygon pipeline needs a mask source) — ``False`` without a ``remask_fn``
@@ -302,6 +364,14 @@ def get_sliced_prediction(in_raster,
     Returns:
         ``(gdf, gdf_nms)`` — a tuple of GeoDataFrames: all kept detections and the post-NMS
         subset. ``gdf_nms`` is ``None`` when ``postprocess=False``.
+
+        Score columns (contract version 2, review X-02):
+
+        - ``score`` — the detector's **real** confidence, never overwritten. Every row therefore
+          satisfies ``score >= confidence_threshold``. In contract-version-1 catalogs this column
+          instead held the literal 0.10 for any slice-truncated detection.
+        - ``nms_prio`` — the suppression ordering key (see :func:`edge_priority`); untruncated
+          detections outrank truncated ones. Fusion uses it for the same reason NMS does.
     """
 
     if not has_mask and remask_fn is None:
@@ -367,7 +437,9 @@ def get_sliced_prediction(in_raster,
                 batch_images = [cv2.resize(img, (slice_size, slice_size),
                                            interpolation=cv2.INTER_LANCZOS4)
                                 for img in batch_images]
-            prediction_results = detection_model.model(batch_images, imgsz=detection_model.image_size,
+            prediction_results = detection_model.model([_to_bgr(img) for img in batch_images],
+                                                       imgsz=detection_model.image_size,
+                                                       conf=detection_model.confidence_threshold,
                                                        verbose=False, device=detection_model.device)
             for j, prediction_result in enumerate(prediction_results):
                 df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
@@ -381,7 +453,7 @@ def get_sliced_prediction(in_raster,
             executor.shutdown()
 
     if len(frames) == 0:
-        df_all = pd.DataFrame(columns=['score', 'polygon', 'category_id', 'category_name', 'is_within_slice'])
+        df_all = pd.DataFrame(columns=_DETECTION_COLUMNS)
     else:
         df_all = pd.concat(frames, ignore_index=True)
     gdf = add_geometries(in_raster, df_all)
@@ -447,14 +519,17 @@ def get_sliced_prediction(in_raster,
         # layers, so callers treat a missing NMS file as an empty catalog.
         if len(gdf) == 0:
             return gdf, gdf.copy()
-        # Non-maximum suppression (NMS)
+        # Non-maximum suppression (NMS). Ordered by `nms_prio`, not `score`: the truncated copy
+        # of a boulder straddling a slice boundary must lose to the whole copy from the
+        # neighbouring slice, while `score` keeps the detector's real confidence (X-02).
+        nms_scores = gdf.nms_prio.to_numpy(dtype=float)
         # regardless of the classes ids (right now is a class agnoistic not supported)
         if postprocess_class_agnostic:
-            keep = nms(boxes=np.stack(gdf.bbox.values), scores=gdf.score.values,
+            keep = nms(boxes=np.stack(gdf.bbox.values), scores=nms_scores,
                        iou_threshold=postprocess_match_threshold, class_ids=None, rtree_leaf_size=32)
         # or taking into account the classes ids
         else:
-            keep = nms(boxes=np.stack(gdf.bbox.values), scores=gdf.score.values,
+            keep = nms(boxes=np.stack(gdf.bbox.values), scores=nms_scores,
                        iou_threshold=postprocess_match_threshold, class_ids=gdf.category_id.values, rtree_leaf_size=32)
 
         # saving post-processed predictions (the NMS mask layer is the primary deliverable)

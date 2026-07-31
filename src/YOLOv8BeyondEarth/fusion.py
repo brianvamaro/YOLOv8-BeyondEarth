@@ -167,6 +167,18 @@ def _greedy_suppress(n, order, ii, jj, vals):
     return keeper, pair_val
 
 
+def _keep_score(pool):
+    """The confidence used as fusion's tiebreak, honouring the X-02 score contract.
+
+    Contract version 2 keeps the detector's real confidence in ``score`` and puts truncation
+    demotion in ``nms_prio``; version 1 catalogs have only ``score``, with truncated rows already
+    overwritten to 0.10. Preferring ``nms_prio`` when present makes both read the same way here —
+    truncated members sort last — while ``score`` stays the honest confidence for everything else.
+    """
+    col = "nms_prio" if "nms_prio" in pool.columns else "score"
+    return pool[col].to_numpy(dtype=float)
+
+
 def _priority_order(pool, rule, in_band=None):
     """Pool indices in keep-priority order (highest priority first).
 
@@ -179,7 +191,7 @@ def _priority_order(pool, rule, in_band=None):
     arm gets deleted. As a priority, in-band members win their clusters and an out-of-band
     detection with no in-band partner is rescued — parity-exact by construction.
     """
-    score = pool["score"].to_numpy(dtype=float)
+    score = _keep_score(pool)
     if rule == "score":
         return np.argsort(-score, kind="stable")
     within = pool["is_within_slice"].to_numpy(dtype=bool)
