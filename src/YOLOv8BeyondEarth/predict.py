@@ -1,4 +1,7 @@
+import logging
 import os
+import warnings
+
 import cv2
 import geopandas as gpd
 import numpy as np
@@ -34,6 +37,97 @@ INFERENCE_CONTRACT_VERSION = 2
 # `nms_prio` is the suppression ordering key (see `edge_priority`).
 _DETECTION_COLUMNS = ['score', 'nms_prio', 'polygon', 'category_id', 'category_name',
                       'is_within_slice']
+
+
+CONTOUR_METHODS = ("skimage", "cv2")
+OUTPUT_FORMATS = ("shp", "gpkg")
+
+logger = logging.getLogger(__name__)
+
+#: Fraction of the model's detections that may be discarded for *unexpected* reasons before the
+#: run warns. Area-gate and edge drops are intentional and excluded from the count.
+_DISCARD_WARN_FRACTION = 0.01
+
+
+def _report_discards(gdf, discarded, n_kept):
+    """Attach the per-reason discard tally to the result and warn if failures look systematic.
+
+    Detections vanishing one at a time inside a broad ``except Exception`` is how a broken
+    re-masker or tracer reads as "a quiet scene" (review item X-05). Intentional drops (the area
+    gate, interior slice truncation, exact duplicates) are recorded but never warned about.
+    """
+    tally = {k: v for k, v in discarded.items() if v}
+    gdf.attrs["discarded"] = tally
+    expected = {"below_area_gate", "slice_truncated_interior", "duplicate_geometry",
+                "remask_returned_none"}
+    unexpected = sum(v for k, v in tally.items() if k not in expected)
+    total = n_kept + sum(tally.values())
+    if unexpected and total and unexpected / total > _DISCARD_WARN_FRACTION:
+        warnings.warn(
+            f"{unexpected} of {total} detections ({unexpected / total:.1%}) were discarded for "
+            f"unexpected reasons: "
+            f"{ {k: v for k, v in tally.items() if k not in expected} }. "
+            "This is a pipeline failure, not an empty scene.", RuntimeWarning, stacklevel=3)
+    if tally:
+        logger.info("discarded detections by reason: %s", tally)
+
+
+def _validate_prediction_args(*, in_raster, detection_model, confidence_threshold, output_dir,
+                              slice_size, inference_size, overlap_height_ratio,
+                              overlap_width_ratio, min_area_threshold,
+                              postprocess_match_threshold, batch_size, contour_method,
+                              output_format, n_workers, remask_fn, sr_factor):
+    """Reject every invalid argument up front, before any raster is read (review item X-05).
+
+    These used to surface — if at all — as an ``AttributeError`` deep inside the batch loop, a
+    ``TypeError`` from ``Path(None)``, or silently: an unknown ``contour_method`` fell through to
+    skimage and an unknown ``output_format`` fell through to shapefile, so a run asked for one
+    thing and quietly delivered another. Checked in the order a caller is most likely to have got
+    wrong, cheapest first.
+    """
+    if int(sr_factor) < 1:
+        raise ValueError(f"sr_factor must be >= 1, got {sr_factor}")
+    if int(slice_size) <= 0:
+        raise ValueError(f"slice_size must be positive, got {slice_size}")
+    if int(slice_size) % int(sr_factor) != 0:
+        raise ValueError(f"slice_size ({slice_size}) must be divisible by sr_factor "
+                         f"({sr_factor}) — the native slicing window is slice_size / sr_factor")
+    if int(inference_size) <= 0:
+        raise ValueError(f"inference_size must be positive, got {inference_size}")
+    if int(batch_size) <= 0:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    if not 0.0 <= float(confidence_threshold) <= 1.0:
+        raise ValueError(f"confidence_threshold must be in [0, 1], got {confidence_threshold}")
+    for name, value in (("overlap_height_ratio", overlap_height_ratio),
+                        ("overlap_width_ratio", overlap_width_ratio)):
+        if not 0.0 <= float(value) < 1.0:
+            raise ValueError(f"{name} must be in [0, 1), got {value}")
+    if not 0.0 < float(postprocess_match_threshold) <= 1.0:
+        raise ValueError("postprocess_match_threshold must be in (0, 1], got "
+                         f"{postprocess_match_threshold}")
+    if min_area_threshold is not None and int(min_area_threshold) < 0:
+        raise ValueError(f"min_area_threshold must be >= 0 or None, got {min_area_threshold}")
+    if n_workers is not None and int(n_workers) < 1:
+        raise ValueError(f"n_workers must be >= 1 or None, got {n_workers}")
+    if contour_method not in CONTOUR_METHODS:
+        raise ValueError(f"contour_method must be one of {CONTOUR_METHODS}, got "
+                         f"{contour_method!r} — it used to fall through to skimage silently")
+    if output_format not in OUTPUT_FORMATS:
+        raise ValueError(f"output_format must be one of {OUTPUT_FORMATS}, got "
+                         f"{output_format!r} — it used to fall through to shapefile silently")
+    if remask_fn is not None and not callable(remask_fn):
+        raise TypeError(f"remask_fn must be callable, got {type(remask_fn).__name__}")
+    if output_dir is None:
+        raise ValueError("output_dir is required")
+    if in_raster is None:
+        raise ValueError("in_raster is required")
+    if not Path(in_raster).exists():
+        raise FileNotFoundError(f"in_raster does not exist: {in_raster}")
+    if detection_model is None:
+        raise ValueError("detection_model is required")
+    for attr in ("model", "device", "category_mapping"):
+        if not hasattr(detection_model, attr):
+            raise TypeError(f"detection_model is missing .{attr} — expected a sahi DetectionModel")
 
 
 def _to_bgr(image):
@@ -77,7 +171,7 @@ def edge_priority(score, is_within_slice):
 
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
                   min_area_threshold, downscale_pred, contour_method="skimage", executor=None,
-                  remask_fn=None, image=None, coord_scale=1.0):
+                  remask_fn=None, image=None, coord_scale=1.0, stats=None):
     """Convert a single ultralytics Result (one slice) into the detections DataFrame.
 
     This is the per-slice core extracted from ``YOLOv8`` so the model can be called on a
@@ -109,6 +203,11 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     inference yields polygons in SR px, and ``coord_scale = 1/f`` maps them back onto the native
     grid that ``shift_amount`` lives on. Edge logic runs in the (SR) slice frame, before scaling.
     Default ``1.0`` = untouched (bit-identical).
+
+    ``stats``: an optional dict accumulating **why** detections were discarded, keyed by reason
+    (``below_area_gate``, ``no_contour``, ``degenerate_polygon``, ``remask_returned_none``,
+    ``trace_failed:<ExcType>``). Without it a systematic failure is indistinguishable from an
+    empty scene (review item X-05).
     """
     extract_polygon = binary_mask_to_polygon_cv if contour_method == "cv2" else binary_mask_to_polygon
     shift_x = shift_amount[0]
@@ -126,6 +225,11 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         # Solution G: swap the mask producer, keep YOLO's boxes/scores. ``remask_fn`` returns a
         # per-box list of slice-resolution masks (or None to drop that detection).
         masks_np = remask_fn(image, boxes_np[:, :4])
+        # X-05: `zip` below would silently truncate to the shorter of the two, losing detections
+        # without a trace. A re-masker that returns the wrong count is a bug in the re-masker.
+        if len(masks_np) != len(boxes_np):
+            raise ValueError(f"remask_fn returned {len(masks_np)} masks for {len(boxes_np)} "
+                             "boxes — it must return exactly one entry per box (None to drop)")
     else:
         # has_mask=False is rejected by the public entry points (polygon pipeline needs masks)
         result_masks = prediction_result.masks.data[conf_mask]
@@ -134,16 +238,32 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
         # sees -> geometry-neutral, just without two full-array writes per detection.
         masks_np = (result_masks >= 0.5).to(torch.float32).cpu().detach().numpy()
+        if len(masks_np) != len(boxes_np):
+            raise ValueError(f"model returned {len(masks_np)} masks for {len(boxes_np)} boxes "
+                             "— box/mask cardinality must match")
 
     min_edge_distance = 0.05 * slice_size
     max_edge_distance = 0.95 * slice_size
 
+    def _drop(reason):
+        """Record why a detection was discarded. Counts are reported by the public wrapper."""
+        if stats is not None:
+            stats[reason] = stats.get(reason, 0) + 1
+        return None
+
     def _process_detection(item):
         """Mask -> (score, polygon, category_id, category_name, is_within_slice) or None.
-        Pure and free of shared mutable state, so it is safe to run across threads."""
+
+        Every discard is counted by reason (X-05): this used to swallow *all* exceptions and
+        return None, so a systematic failure — a broken re-masker, an unmapped class, a bad
+        tracer — looked exactly like "there were no boulders here".
+
+        Free of shared mutable state apart from the `stats` counter, whose increments are
+        CPython-atomic dict operations, so it stays safe across the thread pool.
+        """
         prediction, bool_mask = item
         if bool_mask is None:          # re-masker dropped this detection (e.g. background-grab)
-            return None
+            return _drop("remask_returned_none")
         category_id = int(prediction[5])
 
         if downscale_pred and bool_mask.shape[0] != slice_size:
@@ -158,32 +278,44 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         # changes nothing today and everything if inference_size is ever raised past 4x slice_size.
         area = mask_support_area(bool_mask)
         if area <= (min_area_threshold if min_area_threshold is not None else 0):
-            return None
+            return _drop("below_area_gate")
 
+        # Only genuine geometry failures are tolerated here. A KeyError from an unmapped class,
+        # or anything else, is a configuration bug and must propagate rather than quietly
+        # shrinking the catalog.
         try:
             polygon = extract_polygon(bool_mask)
-            if polygon is None or len(polygon) < 3:
-                return None
-            if downscale_pred:
-                polygon_slice = polygon
-            else:
-                polygon_slice = np.stack([(polygon[:, 0] / bool_mask.shape[0]) * slice_size,
-                                          (polygon[:, 1] / bool_mask.shape[0]) * slice_size], axis=-1)
-            is_polygon_within_slice = (np.logical_and(polygon_slice[:, 0].min() >= min_edge_distance,
-                                                      polygon_slice[:, 0].max() <= max_edge_distance) and
-                                       np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
-                                                      polygon_slice[:, 1].max() <= max_edge_distance))
+        except (ValueError, IndexError, cv2.error) as exc:
+            return _drop(f"trace_failed:{type(exc).__name__}")
+        if polygon is None:
+            return _drop("no_contour")
+        if len(polygon) < 3:
+            return _drop("degenerate_polygon")
 
-            # X-02: `score` is always the detector's real confidence. Slice-truncated detections
-            # are demoted for *suppression ordering only*, in `nms_prio`.
-            score = float(prediction[4])
-            if coord_scale != 1.0:   # streamed SR: SR px -> native px (shift is in native px)
-                polygon_slice = polygon_slice * coord_scale
-            shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
+        if downscale_pred:
+            polygon_slice = polygon
+        else:
+            polygon_slice = np.stack([(polygon[:, 0] / bool_mask.shape[0]) * slice_size,
+                                      (polygon[:, 1] / bool_mask.shape[0]) * slice_size], axis=-1)
+        is_polygon_within_slice = (np.logical_and(polygon_slice[:, 0].min() >= min_edge_distance,
+                                                  polygon_slice[:, 0].max() <= max_edge_distance) and
+                                   np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
+                                                  polygon_slice[:, 1].max() <= max_edge_distance))
+
+        # X-02: `score` is always the detector's real confidence. Slice-truncated detections
+        # are demoted for *suppression ordering only*, in `nms_prio`.
+        score = float(prediction[4])
+        if coord_scale != 1.0:   # streamed SR: SR px -> native px (shift is in native px)
+            polygon_slice = polygon_slice * coord_scale
+        shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
+        try:
             category_name = detection_model.category_mapping[str(category_id)]
-            return (score, shifted_polygon, category_id, category_name, is_polygon_within_slice)
-        except Exception:
-            return None
+        except KeyError:
+            raise KeyError(
+                f"model emitted class id {category_id}, which is not in category_mapping "
+                f"({sorted(detection_model.category_mapping)}). Dropping it silently would "
+                "shrink the catalog with no record — fix the mapping or the weights.") from None
+        return (score, shifted_polygon, category_id, category_name, is_polygon_within_slice)
 
     items = list(zip(boxes_np, masks_np))
     if executor is not None and len(items) > 1:
@@ -378,7 +510,22 @@ def get_sliced_prediction(in_raster,
           instead held the literal 0.10 for any slice-truncated detection.
         - ``nms_prio`` — the suppression ordering key (see :func:`edge_priority`); untruncated
           detections outrank truncated ones. Fusion uses it for the same reason NMS does.
+
+        ``gdf.attrs["discarded"]`` holds the per-reason count of detections the model produced but
+        the pipeline did not keep, and ``gdf.attrs["resolved_config"]`` the parameters that
+        produced the result (review items X-05 and G1-01).
+
+    Raises:
+        ValueError / FileNotFoundError for any invalid argument, before any work is done.
     """
+    _validate_prediction_args(
+        in_raster=in_raster, detection_model=detection_model,
+        confidence_threshold=confidence_threshold, output_dir=output_dir, slice_size=slice_size,
+        inference_size=inference_size, overlap_height_ratio=overlap_height_ratio,
+        overlap_width_ratio=overlap_width_ratio, min_area_threshold=min_area_threshold,
+        postprocess_match_threshold=postprocess_match_threshold, batch_size=batch_size,
+        contour_method=contour_method, output_format=output_format, n_workers=n_workers,
+        remask_fn=remask_fn, sr_factor=sr_factor)
 
     if not has_mask and remask_fn is None:
         raise NotImplementedError(
@@ -388,12 +535,8 @@ def get_sliced_prediction(in_raster,
             "masks from the boxes.")
 
     sr_factor = int(sr_factor)
-    if sr_factor < 1:
-        raise ValueError(f"sr_factor must be >= 1, got {sr_factor}")
-    if slice_size % sr_factor != 0:
-        raise ValueError(f"slice_size ({slice_size}) must be divisible by sr_factor "
-                         f"({sr_factor}) — the native slicing window is slice_size / sr_factor")
     native_slice = slice_size // sr_factor   # window on the native grid; == slice_size when sr=1
+    discarded = {}                           # detection -> reason it was not kept (X-05)
 
     # convert in_raster tif file to png file
     in_raster = Path(in_raster)
@@ -447,11 +590,15 @@ def get_sliced_prediction(in_raster,
                                                        imgsz=detection_model.image_size,
                                                        conf=detection_model.confidence_threshold,
                                                        verbose=False, device=detection_model.device)
+            if len(prediction_results) != len(batch_images):
+                raise ValueError(f"model returned {len(prediction_results)} results for "
+                                 f"{len(batch_images)} slices — results would be paired with the "
+                                 "wrong shift_amounts")
             for j, prediction_result in enumerate(prediction_results):
                 df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
                                    slice_size, min_area_threshold, downscale_pred, contour_method,
                                    executor=executor, remask_fn=remask_fn, image=batch_images[j],
-                                   coord_scale=1.0 / sr_factor)
+                                   coord_scale=1.0 / sr_factor, stats=discarded)
                 if df.shape[0] > 0:
                     frames.append(df)
     finally:
@@ -488,11 +635,16 @@ def get_sliced_prediction(in_raster,
     gdf.loc[edge_idx, "is_at_edge"] = True
 
     # keep edge predictions close to the edge of the footprint of the raster, but otherwise remove edge predictions
+    n_before_edge = len(gdf)
     gdf = gdf.loc[np.logical_or(gdf.is_at_edge == True, gdf.is_within_slice == True)]
+    discarded["slice_truncated_interior"] = int(n_before_edge - len(gdf))
 
     # remove duplicates
+    n_before_dedup = len(gdf)
     gdf = gdf.drop_duplicates(subset="geometry", ignore_index=True)
+    discarded["duplicate_geometry"] = int(n_before_dedup - len(gdf))
     gdf["id"] = gdf.index
+    _report_discards(gdf, discarded, n_kept=len(gdf))
 
     # save predictions before post-processing (include if downscaling is done or not...)
     ext = ".gpkg" if output_format == "gpkg" else ".shp"
@@ -540,6 +692,7 @@ def get_sliced_prediction(in_raster,
 
         # saving post-processed predictions (the NMS mask layer is the primary deliverable)
         gdf_nms = gdf.loc[keep]
+        gdf_nms.attrs = dict(gdf.attrs)   # .loc does not reliably carry attrs across
         if save_bbox:
             bboxes_to_shp(gdf_nms, out_bbox_shp.with_name(out_bbox_shp.stem + "-nms" + ext))
         outlines_to_shp(gdf_nms, out_mask_shp.with_name(out_mask_shp.stem + "-nms" + ext))
