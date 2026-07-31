@@ -39,9 +39,10 @@ from shptools_BOULDERING import shp
 INFERENCE_CONTRACT_VERSION = 2
 
 # Column order of the per-slice detection frame. `score` is the detector's real confidence;
-# `nms_prio` is the suppression ordering key (see `edge_priority`).
+# `nms_prio` is the suppression ordering key (see `edge_priority`); `mask_src` names which
+# producer this row's geometry came from ("yolo", or the remask tag, e.g. "sam2").
 _DETECTION_COLUMNS = ['score', 'nms_prio', 'polygon', 'category_id', 'category_name',
-                      'is_within_slice']
+                      'is_within_slice', 'mask_src']
 
 
 CONTOUR_METHODS = ("skimage", "cv2")
@@ -203,7 +204,7 @@ def edge_priority(score, is_within_slice):
 
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
                   min_area_threshold, downscale_pred, contour_method="skimage", executor=None,
-                  remask_fn=None, image=None, coord_scale=1.0, stats=None):
+                  remask_fn=None, image=None, coord_scale=1.0, stats=None, remask_tag=None):
     """Convert a single ultralytics Result (one slice) into the detections DataFrame.
 
     This is the per-slice core extracted from ``YOLOv8`` so the model can be called on a
@@ -237,9 +238,14 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     Default ``1.0`` = untouched (bit-identical).
 
     ``stats``: an optional dict accumulating **why** detections were discarded, keyed by reason
-    (``below_area_gate``, ``no_contour``, ``degenerate_polygon``, ``remask_returned_none``,
-    ``trace_failed:<ExcType>``). Without it a systematic failure is indistinguishable from an
-    empty scene (review item X-05).
+    (``below_area_gate``, ``no_contour``, ``degenerate_polygon``, ``remask_failed_no_fallback``,
+    ``trace_failed:<ExcType>``), plus the non-fatal ``remask_fallback_to_yolo``. Without it a
+    systematic failure is indistinguishable from an empty scene (review item X-05).
+
+    ``remask_tag``: the name recorded in ``mask_src`` for successfully re-masked rows (e.g.
+    ``"sam2"``). Rows that fell back to the detector's own mask are tagged ``"yolo"``, so a
+    downstream comparison can report both success-only and intention-to-treat summaries
+    (review item G2-03).
     """
     extract_polygon = binary_mask_to_polygon_cv if contour_method == "cv2" else binary_mask_to_polygon
     shift_x = shift_amount[0]
@@ -253,26 +259,37 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     result_boxes = prediction_result.boxes.data[conf_mask]
     boxes_np = result_boxes.cpu().detach().numpy()
 
+    def _yolo_masks():
+        # Threshold the whole mask batch in one GPU op (equivalent to the old per-mask
+        # ``bool_mask[bool_mask>=0.5]=1; [<0.5]=0``) before moving to CPU. Kept as float32 {0.,1.}
+        # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
+        # sees -> geometry-neutral, just without two full-array writes per detection.
+        out = (prediction_result.masks.data[conf_mask] >= 0.5).to(torch.float32).cpu().detach().numpy()
+        if len(out) != len(boxes_np):
+            raise ValueError(f"model returned {len(out)} masks for {len(boxes_np)} boxes "
+                             "— box/mask cardinality must match")
+        return out
+
+    fallback_masks = None
     if remask_fn is not None:
         # Solution G: swap the mask producer, keep YOLO's boxes/scores. ``remask_fn`` returns a
-        # per-box list of slice-resolution masks (or None to drop that detection).
+        # per-box list of slice-resolution masks, or None where the re-mask failed its guards.
         masks_np = remask_fn(image, boxes_np[:, :4])
         # X-05: `zip` below would silently truncate to the shorter of the two, losing detections
         # without a trace. A re-masker that returns the wrong count is a bug in the re-masker.
         if len(masks_np) != len(boxes_np):
             raise ValueError(f"remask_fn returned {len(masks_np)} masks for {len(boxes_np)} "
                              "boxes — it must return exactly one entry per box (None to drop)")
+        # G2-03: a failed re-mask used to delete the detection, which is not detector-preserving —
+        # a saved wrapper check lost 177 of 26,112 rows (0.68%) and one no-overlap run logged 777
+        # native-SAM failures, so the "identical detections, different masks" premise of Solution G
+        # did not actually hold and the SAM/YOLO comparison was over slightly different
+        # populations. The detector's own mask is kept instead, tagged in `mask_src`.
+        if has_mask and getattr(prediction_result, "masks", None) is not None:
+            fallback_masks = _yolo_masks()
     else:
         # has_mask=False is rejected by the public entry points (polygon pipeline needs masks)
-        result_masks = prediction_result.masks.data[conf_mask]
-        # Threshold the whole mask batch in one GPU op (equivalent to the old per-mask
-        # ``bool_mask[bool_mask>=0.5]=1; [<0.5]=0``) before moving to CPU. Kept as float32 {0.,1.}
-        # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
-        # sees -> geometry-neutral, just without two full-array writes per detection.
-        masks_np = (result_masks >= 0.5).to(torch.float32).cpu().detach().numpy()
-        if len(masks_np) != len(boxes_np):
-            raise ValueError(f"model returned {len(masks_np)} masks for {len(boxes_np)} boxes "
-                             "— box/mask cardinality must match")
+        masks_np = _yolo_masks()
 
     min_edge_distance = 0.05 * slice_size
     max_edge_distance = 0.95 * slice_size
@@ -293,9 +310,14 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         Free of shared mutable state apart from the `stats` counter, whose increments are
         CPython-atomic dict operations, so it stays safe across the thread pool.
         """
-        prediction, bool_mask = item
-        if bool_mask is None:          # re-masker dropped this detection (e.g. background-grab)
-            return _drop("remask_returned_none")
+        prediction, bool_mask, fallback = item
+        mask_src = remask_tag or "yolo"
+        if bool_mask is None:          # re-masker failed its guards (e.g. background-grab)
+            if fallback is None:
+                return _drop("remask_failed_no_fallback")
+            bool_mask, mask_src = fallback, "yolo"
+            if stats is not None:      # counted, but the detection survives
+                stats["remask_fallback_to_yolo"] = stats.get("remask_fallback_to_yolo", 0) + 1
         category_id = int(prediction[5])
 
         if downscale_pred and bool_mask.shape[0] != slice_size:
@@ -349,9 +371,12 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
                 f"model emitted class id {category_id}, which is not in category_mapping "
                 f"({sorted(detection_model.category_mapping)}). Dropping it silently would "
                 "shrink the catalog with no record — fix the mapping or the weights.") from None
-        return (score, shifted_polygon, category_id, category_name, is_polygon_within_slice)
+        return (score, shifted_polygon, category_id, category_name, is_polygon_within_slice,
+                mask_src)
 
-    items = list(zip(boxes_np, masks_np))
+    n = len(boxes_np)
+    items = list(zip(boxes_np, masks_np,
+                     fallback_masks if fallback_masks is not None else [None] * n))
     if executor is not None and len(items) > 1:
         results = executor.map(_process_detection, items)
     else:
@@ -362,6 +387,7 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
     category_ids = []
     category_names = []
     is_polygon_within_slice_list = []
+    mask_srcs = []
     for res in results:
         if res is None:
             continue
@@ -370,13 +396,15 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         category_ids.append(res[2])
         category_names.append(res[3])
         is_polygon_within_slice_list.append(res[4])
+        mask_srcs.append(res[5])
 
     data = {'score': scores,
             'nms_prio': edge_priority(scores, is_polygon_within_slice_list).tolist()
                         if scores else [],
             'polygon': polygons,
             'category_id': category_ids, 'category_name': category_names,
-            'is_within_slice': is_polygon_within_slice_list}
+            'is_within_slice': is_polygon_within_slice_list,
+            'mask_src': mask_srcs}
 
     return pd.DataFrame(data, columns=_DETECTION_COLUMNS)
 
@@ -553,6 +581,11 @@ def get_sliced_prediction(in_raster,
           instead held the literal 0.10 for any slice-truncated detection.
         - ``nms_prio`` — the suppression ordering key (see :func:`edge_priority`); untruncated
           detections outrank truncated ones. Fusion uses it for the same reason NMS does.
+        - ``mask_src`` — which producer this row's geometry came from: ``"yolo"``, or ``mask_tag``
+          when a ``remask_fn`` succeeded. A failed re-mask **keeps the detection** with the
+          detector's own mask rather than deleting the row, so Solution G is genuinely
+          detector-preserving (review item G2-03); the count is in
+          ``attrs["discarded"]["remask_fallback_to_yolo"]``.
 
         ``gdf.attrs["discarded"]`` holds the per-reason count of detections the model produced but
         the pipeline did not keep, and ``gdf.attrs["resolved_config"]`` the parameters that
@@ -657,7 +690,8 @@ def get_sliced_prediction(in_raster,
                 df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
                                    slice_size, min_area_threshold, downscale_pred, contour_method,
                                    executor=executor, remask_fn=remask_fn, image=batch_images[j],
-                                   coord_scale=1.0 / sr_factor, stats=discarded)
+                                   coord_scale=1.0 / sr_factor, stats=discarded,
+                                   remask_tag=mask_tag)
                 if df.shape[0] > 0:
                     frames.append(df)
     finally:

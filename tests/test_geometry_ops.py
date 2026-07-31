@@ -240,6 +240,68 @@ def test_structure_tensor_orientation_convention():
     assert structure_tensor_orientation(ns)[1] > 0.5
 
 
+def _axial_gap(a, b):
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d)
+
+
+def test_orientation_field_reads_axis_aligned_structure():
+    """Review item G2-07. The field built its minor eigenvector as ``(Jxy, l_min - Jxx)``, which
+    is ``(0, 0)`` for any diagonal tensor — so horizontal and vertical structure both came back as
+    azimuth 0 and the regional raw-texture panel was invalid."""
+    from YOLOv8BeyondEarth.orientation import orientation_field
+
+    def middle(img):
+        az, coh = orientation_field(img, grad_sigma=1.0, integ_sigma=3.0)
+        c = img.shape[0] // 2
+        return az[c, c], coh[c, c]
+
+    ns = np.zeros((61, 61)); ns[:, 30] = 1.0            # vertical line in image = North-South
+    ew = np.zeros((61, 61)); ew[30, :] = 1.0            # horizontal = East-West
+    az_ns, _ = middle(ns)
+    az_ew, _ = middle(ew)
+    assert _axial_gap(az_ns, 0.0) < 1.0
+    assert _axial_gap(az_ew, 90.0) < 1.0
+    assert _axial_gap(az_ns, az_ew) > 45.0, "N-S and E-W must not read the same azimuth"
+
+
+def test_orientation_field_matches_the_scalar_implementation():
+    """The acceptance criterion: field and scalar agree on horizontal, vertical, both diagonals,
+    isotropic input, and randomized tensors. They now share one formula, so agreement is exact."""
+    from YOLOv8BeyondEarth.orientation import (
+        _tensor_azimuth_coherence, orientation_field, structure_tensor_orientation)
+
+    cases = {
+        "ns": (lambda: np.tile(np.where(np.arange(81) == 40, 1.0, 0.0), (81, 1)).T),
+        "ew": (lambda: np.tile(np.where(np.arange(81) == 40, 1.0, 0.0), (81, 1))),
+        "nwse": (lambda: np.eye(81)),
+        "nesw": (lambda: np.fliplr(np.eye(81))),
+        "isotropic": (lambda: np.full((81, 81), 0.5)),
+    }
+    for name, make in cases.items():
+        img = make()
+        az_field, coh_field = orientation_field(img, grad_sigma=1.0, integ_sigma=3.0)
+        az_scalar, coh_scalar = structure_tensor_orientation(img, smooth=1.0)
+        if name == "isotropic":
+            assert coh_field[40, 40] < 1e-6 and coh_scalar < 1e-6   # no axis to agree on
+            continue
+        assert _axial_gap(az_field[40, 40], az_scalar) < 2.0, name
+        assert coh_field[40, 40] > 0.5 and coh_scalar > 0.5, name
+
+    # randomized tensors: the shared kernel must agree with an explicit eigendecomposition
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        gx, gy = rng.normal(size=64), rng.normal(size=64)
+        Jxx, Jyy, Jxy = float(gx @ gx), float(gy @ gy), float(gx @ gy)
+        az, coh = _tensor_azimuth_coherence(Jxx, Jyy, Jxy)
+        evals, evecs = np.linalg.eigh(np.array([[Jxx, Jxy], [Jxy, Jyy]]))
+        vx, vy = evecs[:, 0]
+        az_ref = np.degrees(np.arctan2(vx, -vy)) % 180.0
+        coh_ref = (evals[1] - evals[0]) / (evals[1] + evals[0] + 1e-12)
+        assert _axial_gap(float(az), az_ref) < 1e-8
+        assert float(coh) == pytest.approx(coh_ref, abs=1e-9)
+
+
 def test_axial_distance_wraps_mod180():
     """axial_distance is the mod-180 distance in [0,90]: 10 vs 170 are 20 apart, 0 vs 90 are 90."""
     from YOLOv8BeyondEarth.orientation import axial_distance

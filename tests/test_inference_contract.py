@@ -165,7 +165,8 @@ def test_result_to_df_keeps_real_confidence_for_truncated_detections():
     df = _result_to_df(result, _fake_model([], 0.1), True, (0, 0), SLICE, None, False)
 
     assert list(df.columns) == ['score', 'nms_prio', 'polygon', 'category_id', 'category_name',
-                                'is_within_slice']
+                                'is_within_slice', 'mask_src']
+    assert set(df.mask_src) == {"yolo"}
     trunc = df[~df.is_within_slice].iloc[0]
     whole = df[df.is_within_slice].iloc[0]
     assert trunc.score == pytest.approx(0.93, abs=1e-6)
@@ -218,6 +219,79 @@ def test_nms_prio_survives_the_file_round_trip(raster_128, monkeypatch, tmp_path
 
 def test_contract_version_is_recorded():
     assert INFERENCE_CONTRACT_VERSION >= 2
+
+
+# --- G2-03: Solution G must be genuinely detector-preserving --------------------------------------
+
+def _remask_result(rects):
+    boxes = np.zeros((len(rects), 6), dtype=np.float32)
+    masks = np.zeros((len(rects), SLICE, SLICE), dtype=np.float32)
+    for i, (x0, y0, x1, y1, score) in enumerate(rects):
+        boxes[i] = [x0, y0, x1, y1, score, 0]
+        masks[i, y0:y1 + 1, x0:x1 + 1] = 1.0
+    return SimpleNamespace(boxes=SimpleNamespace(data=torch.from_numpy(boxes)),
+                           masks=SimpleNamespace(data=torch.from_numpy(masks)))
+
+
+def test_failed_remask_keeps_the_detection_with_the_yolo_mask():
+    """A failed SAM re-mask used to delete the row. A saved wrapper check lost 177 of 26,112 rows
+    (0.68%), so the "identical detections, different masks" premise of Solution G did not hold and
+    the SAM/YOLO comparison ran over slightly different populations."""
+    rects = [(10, 10, 25, 25, 0.80), (35, 35, 50, 50, 0.60), (12, 40, 24, 52, 0.45)]
+    result = _remask_result(rects)
+    model = _fake_model([], 0.1)
+
+    def remask(image, boxes):
+        # SAM succeeds on the first box only; the rest hit the background-grab guard
+        out = [None] * len(boxes)
+        m = np.zeros((SLICE, SLICE), np.float32)
+        m[10:26, 10:26] = 1.0
+        out[0] = m
+        return out
+
+    baseline = _result_to_df(result, model, True, (0, 0), SLICE, None, False)
+    df = _result_to_df(result, model, True, (0, 0), SLICE, None, False,
+                       remask_fn=remask, image=np.zeros((SLICE, SLICE, 3), np.uint8),
+                       remask_tag="sam2")
+
+    assert len(df) == len(baseline) == 3, "row count is not invariant to re-masking"
+    np.testing.assert_allclose(df.score.values, baseline.score.values)
+    assert list(df.mask_src) == ["sam2", "yolo", "yolo"]
+
+
+def test_mask_src_records_a_fully_successful_remask():
+    rects = [(10, 10, 25, 25, 0.80)]
+    result = _remask_result(rects)
+
+    def remask(image, boxes):
+        m = np.zeros((SLICE, SLICE), np.float32)
+        m[10:26, 10:26] = 1.0
+        return [m]
+
+    df = _result_to_df(result, _fake_model([], 0.1), True, (0, 0), SLICE, None, False,
+                       remask_fn=remask, image=np.zeros((SLICE, SLICE, 3), np.uint8),
+                       remask_tag="sam2")
+    assert list(df.mask_src) == ["sam2"]
+
+
+def test_mask_src_reaches_the_catalog_on_disk(raster_128, monkeypatch, tmp_path):
+    """Downstream analysis needs to be able to split success-only from intention-to-treat."""
+    import geopandas as gpd
+    per_slice = [[(20, 20, 40, 40, 0.42), (5, 5, 15, 15, 0.31)]]
+
+    def remask(image, boxes):
+        out = [None] * len(boxes)
+        m = np.zeros((SLICE, SLICE), np.float32)
+        m[20:41, 20:41] = 1.0
+        out[0] = m
+        return out
+
+    _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch, save_prenms=True,
+         remask_fn=remask, mask_tag="sam2")
+    written = sorted(tmp_path.glob("*-mask-sam2-nms.gpkg"))
+    assert written, sorted(p.name for p in tmp_path.iterdir())
+    back = gpd.read_file(written[0])
+    assert set(back.mask_src) == {"sam2", "yolo"}
 
 
 # --- fusion honours the new ordering key ---------------------------------------------------------

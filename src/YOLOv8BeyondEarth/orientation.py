@@ -435,6 +435,34 @@ def plot_rose(ax, angle180, bins=36, color="tab:blue", title=None, density=True,
 # ground-truth boulder orientation. Azimuth convention matches ``ellipse_angle180`` (North=0,
 # East=90, clockwise, [0,180)). Validated on synthetic lines (N-S->0, E-W->90, NW-SE diag->135).
 
+def _tensor_azimuth_coherence(Jxx, Jyy, Jxy):
+    """Structure-tensor long-axis azimuth ([0,180) from North) and coherence ([0,1]).
+
+    Shared by the scalar and whole-image entry points so the two cannot disagree, and written as a
+    **half-angle formula** rather than an explicit eigenvector (review item G2-07).
+
+    The field implementation used to build the minor eigenvector as ``(Jxy, l_min - Jxx)``. That is
+    the right eigenvector only while the tensor is non-diagonal: for ``Jxy == 0`` with
+    ``Jxx <= Jyy`` — any purely horizontal structure, and every axis-aligned synthetic test case —
+    it collapses to ``(0, 0)``, ``arctan2`` returns 0, and a horizontal line reads the same
+    azimuth as a vertical one. The half-angle form has no degenerate branch: the dominant-gradient
+    direction is ``0.5 * atan2(2 Jxy, Jxx - Jyy)`` and the structure axis is its perpendicular,
+    both well defined as ``Jxy -> 0``.
+
+    Accepts scalars or arrays and returns the same shape.
+    """
+    Jxx = np.asarray(Jxx, dtype=float)
+    Jyy = np.asarray(Jyy, dtype=float)
+    Jxy = np.asarray(Jxy, dtype=float)
+    disc = np.sqrt(np.maximum((Jxx - Jyy) ** 2 + 4.0 * Jxy * Jxy, 0.0))
+    coh = disc / (Jxx + Jyy + 1e-12)              # (l_max - l_min) / (l_max + l_min)
+
+    phi = 0.5 * np.arctan2(2.0 * Jxy, Jxx - Jyy)  # dominant gradient direction
+    vx, vy = -np.sin(phi), np.cos(phi)            # perpendicular = the structure (long) axis
+    az = np.degrees(np.arctan2(vx, -vy)) % 180.0  # East = vx, North = -vy
+    return az, coh
+
+
 def structure_tensor_orientation(patch, weight=None, smooth=1.0):
     """Long-axis azimuth ([0,180) from North) and coherence ([0,1]) of a raw image patch via
     the gradient structure tensor.
@@ -446,28 +474,23 @@ def structure_tensor_orientation(patch, weight=None, smooth=1.0):
     gy, gx = np.gradient(a)                       # gx = d/dcol (East), gy = d/drow (South)
     w = np.ones_like(a) if weight is None else np.asarray(weight, dtype=float)
     Jxx = float(np.sum(w * gx * gx)); Jyy = float(np.sum(w * gy * gy)); Jxy = float(np.sum(w * gx * gy))
-    evals, evecs = np.linalg.eigh(np.array([[Jxx, Jxy], [Jxy, Jyy]]))   # ascending eigenvalues
-    coh = float((evals[1] - evals[0]) / (evals[1] + evals[0] + 1e-12))
-    vx, vy = evecs[:, 0]                          # smallest-eigenvalue evec = structure (long) axis
-    az = float(np.degrees(np.arctan2(vx, -vy)) % 180.0)   # East=vx, North=-vy
-    return az, coh
+    az, coh = _tensor_azimuth_coherence(Jxx, Jyy, Jxy)
+    return float(az), float(coh)
 
 
 def orientation_field(img, grad_sigma=1.0, integ_sigma=4.0):
     """Per-pixel structure-tensor azimuth-from-North ([0,180)) and coherence for a whole image.
 
-    Same convention/caveats as :func:`structure_tensor_orientation`. ``grad_sigma`` sets the
-    texture scale of the gradient; ``integ_sigma`` the neighbourhood the tensor is averaged over.
-    Returns ``(azimuth, coherence)`` arrays the shape of ``img``.
+    Same convention/caveats as :func:`structure_tensor_orientation`, and now the same maths — see
+    :func:`_tensor_azimuth_coherence` for the degenerate-eigenvector defect this carried (review
+    item G2-07: horizontal and vertical structure both read azimuth 0, which invalidated the
+    regional raw-texture panel).
+
+    ``grad_sigma`` sets the texture scale of the gradient; ``integ_sigma`` the neighbourhood the
+    tensor is averaged over. Returns ``(azimuth, coherence)`` arrays the shape of ``img``.
     """
     a = gaussian_filter(np.asarray(img, dtype=float), grad_sigma)
     gy, gx = np.gradient(a)
     Jxx = gaussian_filter(gx * gx, integ_sigma); Jyy = gaussian_filter(gy * gy, integ_sigma)
     Jxy = gaussian_filter(gx * gy, integ_sigma)
-    tr = Jxx + Jyy
-    disc = np.sqrt(np.maximum((Jxx - Jyy) ** 2 + 4 * Jxy * Jxy, 0.0))
-    l_max = (tr + disc) / 2; l_min = (tr - disc) / 2
-    coh = (l_max - l_min) / (l_max + l_min + 1e-12)
-    vx = Jxy; vy = l_min - Jxx                    # eigenvector for the smaller eigenvalue
-    az = np.degrees(np.arctan2(vx, -vy)) % 180.0
-    return az, coh
+    return _tensor_azimuth_coherence(Jxx, Jyy, Jxy)

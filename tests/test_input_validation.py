@@ -172,11 +172,21 @@ def test_area_gate_and_remask_drops_are_counted_separately(model):
     df = _result_to_df(res, model, True, (0, 0), SLICE, 6, False, stats=stats)
     assert len(df) == 1 and stats == {"below_area_gate": 1}
 
+    # a re-mask that fails on every box falls back to the detector's own mask (G2-03) — the rows
+    # survive, and the fallback is counted rather than reported as a drop
     stats = {}
-    _result_to_df(res, model, True, (0, 0), SLICE, None, False, stats=stats,
-                  remask_fn=lambda img, boxes: [None, None],
-                  image=np.zeros((SLICE, SLICE, 3), np.uint8))
-    assert stats == {"remask_returned_none": 2}
+    df = _result_to_df(res, model, True, (0, 0), SLICE, None, False, stats=stats,
+                       remask_fn=lambda img, boxes: [None, None],
+                       image=np.zeros((SLICE, SLICE, 3), np.uint8), remask_tag="sam2")
+    assert len(df) == 2 and stats == {"remask_fallback_to_yolo": 2}
+    assert set(df.mask_src) == {"yolo"}
+
+    # with no detector mask to fall back on there is nothing to keep, and that IS a drop
+    stats = {}
+    df = _result_to_df(res, model, False, (0, 0), SLICE, None, False, stats=stats,
+                       remask_fn=lambda img, boxes: [None, None],
+                       image=np.zeros((SLICE, SLICE, 3), np.uint8))
+    assert len(df) == 0 and stats == {"remask_failed_no_fallback": 2}
 
 
 def test_discard_tally_is_attached_to_the_result(raster, model, tmp_path, monkeypatch):
