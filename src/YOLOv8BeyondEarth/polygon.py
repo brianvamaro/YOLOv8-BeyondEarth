@@ -19,6 +19,13 @@ It is **not** area-calibrated and must not feed size, SFD, density or area-compa
 The mask-support level (:data:`MASK_SUPPORT_LEVEL`) is the same 0.5, so the area gate counts
 exactly the pixels the traced polygon encloses (review item G1-06).
 """
+import logging
+import os
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
+
 import cv2
 import numpy as np
 import shapely
@@ -27,6 +34,8 @@ import rasterio as rio
 import geopandas as gpd
 
 from shapely.geometry import (box, Polygon)
+
+logger = logging.getLogger(__name__)
 
 #: The level set traced by the production contour extractor, and therefore the threshold that
 #: defines a pixel as "supported" for the area gate. Fractional masks (an ``INTER_AREA``-downscaled
@@ -104,21 +113,95 @@ def add_geometries(in_raster, df):
     gdf["bbox"] = gdf.geometry.bounds.values.tolist()
     return gdf
 
-def bboxes_to_shp(gdf, out_shp):
+#: Shapefile drivers write every layer as a set of sibling files; a promotion has to move them all.
+_SHAPEFILE_SIDECARS = (".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx")
+
+
+class VectorWriteError(RuntimeError):
+    """A vector write did not survive its own readback — nothing was promoted."""
+
+
+def write_vector(gdf, out_path, *, validate=True):
+    """Write a layer transactionally: temp destination -> validate -> atomic promote.
+
+    ``gdf.to_file(path)`` writes in place, so an interruption (or a driver hitting the shapefile
+    2 GB / field limits) leaves a partial file that looks finished to resume logic. That is not
+    hypothetical here: a prior large shapefile completed with 67% null geometries and was consumed
+    as if valid — see ``notebooks/Shapefile_truncation_postmortem`` and review item G1-03.
+
+    The layer is written into a private temp directory, read back and checked for feature count,
+    null and invalid geometry and schema, and only then moved into place. On any failure the temp
+    directory is removed and :class:`VectorWriteError` is raised, so the destination either holds
+    a validated layer or holds nothing at all.
+
+    Readback reads geometry only (``columns=[]``), which keeps validation cheap next to a
+    multi-hour inference run even at ~1e6 features.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{out_path.stem}-", dir=out_path.parent))
+    tmp_path = staging / out_path.name
+    try:
+        gdf.to_file(tmp_path)
+        if validate:
+            _validate_written_layer(tmp_path, gdf)
+        _promote(tmp_path, out_path)
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        if isinstance(exc, VectorWriteError):
+            raise
+        raise VectorWriteError(f"failed writing {out_path.name}: {exc}") from exc
+    shutil.rmtree(staging, ignore_errors=True)
+    return out_path
+
+
+def _validate_written_layer(tmp_path, gdf):
+    back = gpd.read_file(tmp_path, columns=[])
+    if len(back) != len(gdf):
+        raise VectorWriteError(
+            f"{tmp_path.name}: wrote {len(gdf)} features but read back {len(back)}")
+    n_null = int(back.geometry.isna().sum()) + int(back.geometry.is_empty.sum())
+    if n_null:
+        raise VectorWriteError(
+            f"{tmp_path.name}: {n_null} of {len(back)} geometries came back null or empty "
+            "(the shapefile-truncation failure mode)")
+    n_invalid = int((~back.geometry.is_valid).sum())
+    if n_invalid:
+        logger.warning("%s: %d of %d written geometries are topologically invalid",
+                       tmp_path.name, n_invalid, len(back))
+
+
+def _promote(tmp_path, out_path):
+    """Move the staged layer (and any driver sidecars) onto the destination."""
+    moved = []
+    for suffix in ([""] if tmp_path.suffix != ".shp" else _SHAPEFILE_SIDECARS):
+        src = tmp_path if suffix == "" else tmp_path.with_suffix(suffix)
+        if not src.exists():
+            continue
+        dst = out_path if suffix == "" else out_path.with_suffix(suffix)
+        os.replace(src, dst)
+        moved.append(dst)
+    if not moved:
+        raise VectorWriteError(f"{tmp_path.name}: driver produced no output file")
+    return moved
+
+
+def bboxes_to_shp(gdf, out_shp, *, validate=True):
     if len(gdf) == 0:   # pyogrio cannot write a featureless layer; callers treat missing = empty
         return
     gdf_copy = gdf.rename(columns={"category_id": "cat_id", "category_name": "cat_name", "is_within_slice": "isin_slice"})
     # vectorized box construction from the [minx, miny, maxx, maxy] bbox column
     bbox_arr = np.asarray(gdf_copy.bbox.tolist(), dtype=float).reshape(-1, 4)
     gdf_copy["geometry"] = shapely.box(bbox_arr[:, 0], bbox_arr[:, 1], bbox_arr[:, 2], bbox_arr[:, 3])
-    gdf_copy.drop(columns=['bbox', 'polygon']).to_file(out_shp)
+    write_vector(gdf_copy.drop(columns=['bbox', 'polygon']), out_shp, validate=validate)
 
-def outlines_to_shp(gdf, out_shp):
+def outlines_to_shp(gdf, out_shp, *, validate=True):
     if len(gdf) == 0:   # pyogrio cannot write a featureless layer; callers treat missing = empty
         return
     gdf_copy = gdf.rename(columns={"category_id": "cat_id", "category_name": "cat_name", "is_within_slice": "isin_slice"})
     # errors="ignore": fused catalogs (fusion.fuse_predictions) may not carry bbox/polygon
-    gdf_copy.drop(columns=['bbox', 'polygon'], errors="ignore").to_file(out_shp)
+    write_vector(gdf_copy.drop(columns=['bbox', 'polygon'], errors="ignore"), out_shp,
+                 validate=validate)
 
 def close_contour(contour):
     if not np.array_equal(contour[0], contour[-1]):

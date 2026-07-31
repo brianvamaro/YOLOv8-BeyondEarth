@@ -1,5 +1,9 @@
+import json
 import logging
 import os
+import shutil
+import tempfile
+import time
 import warnings
 
 import cv2
@@ -10,6 +14,7 @@ import torch
 
 from concurrent.futures import ThreadPoolExecutor
 
+from YOLOv8BeyondEarth import presets
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
                                        shift_polygon, mask_support_area,
                                        add_geometries, bboxes_to_shp, outlines_to_shp)
@@ -128,6 +133,33 @@ def _validate_prediction_args(*, in_raster, detection_model, confidence_threshol
     for attr in ("model", "device", "category_mapping"):
         if not hasattr(detection_model, attr):
             raise TypeError(f"detection_model is missing .{attr} — expected a sahi DetectionModel")
+
+
+def _ensure_png(in_raster, raster_identity):
+    """Convert the raster to 8-bit PNG once, reusing an earlier conversion of the same bytes.
+
+    ``tiff_to_png`` reads the whole TIFF and re-encodes it on every call, then overwrites the same
+    output path — so a multiscale run redid the identical conversion once per arm, and two runs on
+    different rasters with the same stem would clobber each other's PNG (review item G1-07). A
+    sidecar records which source produced the PNG; the conversion is skipped when it still matches.
+    """
+    out_png = in_raster.with_name(in_raster.stem + ".png")
+    stamp = out_png.with_name(out_png.name + ".source.json")
+    key = {"sha256": raster_identity.get("sha256"), "bytes": raster_identity.get("bytes"),
+           "path": raster_identity.get("path")}
+    if out_png.exists() and stamp.exists():
+        try:
+            if json.loads(stamp.read_text()) == key:
+                logger.debug("reusing %s (source unchanged)", out_png.name)
+                return out_png
+        except (OSError, json.JSONDecodeError):
+            pass
+    raster_convert.tiff_to_png(in_raster, out_png)   # only work with 8bit
+    try:
+        stamp.write_text(json.dumps(key))
+    except OSError:                                  # read-only data dir: just skip the cache
+        logger.debug("could not write %s; PNG will be reconverted next run", stamp.name)
+    return out_png
 
 
 def _to_bgr(image):
@@ -415,12 +447,21 @@ def get_sliced_prediction(in_raster,
                           n_workers: int = None,
                           remask_fn=None,
                           mask_tag: str = None,
-                          sr_factor: int = 1):
+                          sr_factor: int = 1,
+                          on_conflict: str = "error"):
     """
     Function for slice image + get predicion for each slice + combine predictions in full image.
 
+    .. warning::
+       **These defaults are not a production configuration.** They are the historical generic
+       defaults (no area gate, NMS 0.5, Shapefile, every intermediate layer, prototype-resolution
+       masks), which reproduce neither the geometry, the count, the cost nor the output safety of
+       any benchmarked run. Call :func:`predict_production` — or pass
+       ``**presets.GOAL1_PRODUCTION`` — for the configuration Goal 1 actually measured
+       (review item G1-01).
+
     The time to run the script is dependent on the number of predictions over the whole image. This is because we need
-    to loop through each prediction and transform the bool_mask to polygon. 
+    to loop through each prediction and transform the bool_mask to polygon.
 
     Args:
         in_raster: str or Path()
@@ -537,16 +578,32 @@ def get_sliced_prediction(in_raster,
     sr_factor = int(sr_factor)
     native_slice = slice_size // sr_factor   # window on the native grid; == slice_size when sr=1
     discarded = {}                           # detection -> reason it was not kept (X-05)
+    started = time.perf_counter()
 
-    # convert in_raster tif file to png file
     in_raster = Path(in_raster)
     output_dir = Path(output_dir)
-    out_png = in_raster.with_name(in_raster.stem + ".png")
-    raster_convert.tiff_to_png(in_raster, out_png) # only work with 8bit
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # create temporary directory
-    tmp_dir = (Path.home() / "tmp")
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # Every parameter that defines the result, so the manifest can answer "what made this file"
+    # and a differing config cannot silently overwrite it (G1-01/G1-07).
+    resolved_config = {
+        "inference_contract_version": INFERENCE_CONTRACT_VERSION,
+        "confidence_threshold": float(confidence_threshold), "slice_size": int(slice_size),
+        "inference_size": int(inference_size), "sr_factor": sr_factor,
+        "overlap_height_ratio": float(overlap_height_ratio),
+        "overlap_width_ratio": float(overlap_width_ratio),
+        "min_area_threshold": min_area_threshold, "downscale_pred": bool(downscale_pred),
+        "postprocess": bool(postprocess),
+        "postprocess_match_threshold": float(postprocess_match_threshold),
+        "postprocess_class_agnostic": bool(postprocess_class_agnostic),
+        "contour_method": contour_method, "output_format": output_format,
+        "batch_size": int(batch_size), "mask_tag": mask_tag,
+        "remask_fn": getattr(remask_fn, "__name__", None) if remask_fn else None,
+        "model_path": str(getattr(detection_model, "model_path", None)),
+    }
+
+    raster_identity = presets.file_identity(in_raster)
+    out_png = _ensure_png(in_raster, raster_identity)
 
     # set model's confidence_threshold and inference size
     detection_model.image_size = inference_size
@@ -613,14 +670,21 @@ def get_sliced_prediction(in_raster,
 
     # keep edge predictions (within 10% of slice size from the true footprint edge)
 
-    # extract true footprint
-    gdf_true_footprint = raster.true_footprint(in_raster, tmp_dir / "true-footprint.shp")
-    in_res = raster_metadata.get_resolution(in_raster)[0]
-    in_meta = raster_metadata.get_profile(in_raster)
-    gpd.GeoDataFrame(geometry=gdf_true_footprint.geometry.boundary.values, crs=in_meta["crs"].to_wkt()).to_file(
-        tmp_dir / "true-footprint-as-a-line.shp")
-    gdf_line_buffer = shp.buffer(tmp_dir / "true-footprint-as-a-line.shp", native_slice * 0.10 * in_res,
-                                 (tmp_dir / "footprint-buffer.shp"))
+    # extract true footprint. Per-run temp directory (G1-04): this used to be a fixed
+    # ~/tmp/true-footprint.shp shared by every process on the machine, so two concurrent scenes --
+    # exactly what Goal 1 proposes and Goal 4 requires -- would overwrite each other's footprint
+    # and cross-contaminate their edge classification with no error at all.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="bouldernet-run-"))
+    try:
+        gdf_true_footprint = raster.true_footprint(in_raster, tmp_dir / "true-footprint.shp")
+        in_res = raster_metadata.get_resolution(in_raster)[0]
+        in_meta = raster_metadata.get_profile(in_raster)
+        gpd.GeoDataFrame(geometry=gdf_true_footprint.geometry.boundary.values, crs=in_meta["crs"].to_wkt()).to_file(
+            tmp_dir / "true-footprint-as-a-line.shp")
+        gdf_line_buffer = shp.buffer(tmp_dir / "true-footprint-as-a-line.shp", native_slice * 0.10 * in_res,
+                                     (tmp_dir / "footprint-buffer.shp"))
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # Flag boulders touching the footprint-edge buffer. We only need the boolean flag, not the
     # materialized intersection geometries, so use a spatial join (intersects predicate)
@@ -663,6 +727,17 @@ def get_sliced_prediction(in_raster,
 
     out_bbox_shp = output_dir / bbox_filename
     out_mask_shp = output_dir / mask_filename
+    gdf.attrs["resolved_config"] = resolved_config
+
+    # The filename encodes only confidence, slice, inference size and overlap — not the contour
+    # method, NMS threshold, area gate, mask source or model. Two different configurations
+    # therefore resolve to the same name, and the second used to silently replace the first with
+    # something the name misdescribes. The manifest makes that detectable; this makes it fatal
+    # unless explicitly allowed (G1-07).
+    nms_mask_shp = out_mask_shp.with_name(out_mask_shp.stem + "-nms" + ext)
+    presets.check_config_conflict(nms_mask_shp if postprocess else out_mask_shp,
+                                  resolved_config, on_conflict)
+
     # The pre-NMS files are intermediate, and bbox files aren't needed by many workflows.
     # Gate both so a dense full-image run can avoid writing ~1e6-feature layers it won't use.
     if save_prenms:
@@ -671,12 +746,30 @@ def get_sliced_prediction(in_raster,
         outlines_to_shp(gdf, out_mask_shp)
 
 
+    def _finish(gdf_nms, written):
+        """Serialize the resolved config and provenance beside the primary deliverable (G1-01)."""
+        presets.write_manifest(
+            nms_mask_shp if postprocess else out_mask_shp,
+            config=resolved_config,
+            inputs={"raster": in_raster,
+                    **({"weights": getattr(detection_model, "model_path", None)}
+                       if getattr(detection_model, "model_path", None) else {})},
+            outputs={"files": [p.name for p in written],
+                     "n_detections": int(len(gdf)),
+                     "n_after_nms": None if gdf_nms is None else int(len(gdf_nms))},
+            raster_identity=raster_identity,
+            crs=str(gdf.crs) if len(gdf) else None,
+            discarded=gdf.attrs.get("discarded", {}),
+            wall_seconds=round(time.perf_counter() - started, 3),
+            n_slices=int(num_slices))
+        return gdf, gdf_nms
+
     if postprocess:
         # Zero detections on the whole raster (sparse tiles): NMS input would be an empty
         # stack. Short-circuit to an empty gdf_nms; the *_to_shp writers skip featureless
         # layers, so callers treat a missing NMS file as an empty catalog.
         if len(gdf) == 0:
-            return gdf, gdf.copy()
+            return _finish(gdf.copy(), [])
         # Non-maximum suppression (NMS). Ordered by `nms_prio`, not `score`: the truncated copy
         # of a boulder straddling a slice boundary must lose to the whole copy from the
         # neighbouring slice, while `score` keeps the detector's real confidence (X-02).
@@ -693,12 +786,34 @@ def get_sliced_prediction(in_raster,
         # saving post-processed predictions (the NMS mask layer is the primary deliverable)
         gdf_nms = gdf.loc[keep]
         gdf_nms.attrs = dict(gdf.attrs)   # .loc does not reliably carry attrs across
+        written = []
         if save_bbox:
-            bboxes_to_shp(gdf_nms, out_bbox_shp.with_name(out_bbox_shp.stem + "-nms" + ext))
-        outlines_to_shp(gdf_nms, out_mask_shp.with_name(out_mask_shp.stem + "-nms" + ext))
-        return gdf, gdf_nms
+            nms_bbox = out_bbox_shp.with_name(out_bbox_shp.stem + "-nms" + ext)
+            bboxes_to_shp(gdf_nms, nms_bbox)
+            written.append(nms_bbox)
+        outlines_to_shp(gdf_nms, nms_mask_shp)
+        written.append(nms_mask_shp)
+        return _finish(gdf_nms, written)
     else:
-        return gdf, None
+        return _finish(None, [out_mask_shp] if save_prenms else [])
+
+
+def predict_production(in_raster, detection_model, output_dir, preset="goal1_production",
+                       **overrides):
+    """Run single-scale sliced inference in a **named, versioned** configuration (G1-01).
+
+    ``get_sliced_prediction``'s own defaults are the historical generic ones and reproduce no
+    benchmarked result; this resolves :data:`presets.GOAL1_PRODUCTION` (or any named preset)
+    instead, rejects override keys the preset does not define — a typo would otherwise silently
+    fall back to the preset value — and records the resolved configuration in the manifest beside
+    the output.
+
+        gdf, gdf_nms = predict_production(raster, model, out_dir)
+        gdf, gdf_nms = predict_production(raster, model, out_dir, slice_size=256)
+    """
+    config = presets.resolve(preset, **overrides)
+    call = {k: v for k, v in config.items() if not k.startswith("_")}
+    return get_sliced_prediction(in_raster, detection_model, output_dir=output_dir, **call)
 
 
 def get_multiscale_prediction(in_raster,
