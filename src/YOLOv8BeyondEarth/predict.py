@@ -8,7 +8,7 @@ import torch
 from concurrent.futures import ThreadPoolExecutor
 
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
-                                       shift_polygon,
+                                       shift_polygon, mask_support_area,
                                        add_geometries, bboxes_to_shp, outlines_to_shp)
 from lsnms import nms
 
@@ -149,8 +149,14 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         if downscale_pred and bool_mask.shape[0] != slice_size:
             bool_mask = cv2.resize(bool_mask, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
 
-        # number of pixels; min_area_threshold=None (the documented default) means no area gate
-        area = np.count_nonzero(bool_mask == 1)
+        # Supported pixels at the level the tracer uses; min_area_threshold=None (the documented
+        # default) means no area gate. Counting `== 1` instead — as this did before G1-06 — is
+        # equivalent for a hard mask but discards downscaled boulders that have ample support at
+        # 0.5 yet few *fully covered* pixels. That only arises when the prototype mask is LARGER
+        # than slice_size; every current production config upscales instead (prototype 256 from
+        # imgsz 1024 -> slice 256 or 512), and INTER_AREA upscaling emits pure {0, 1}. So this
+        # changes nothing today and everything if inference_size is ever raised past 4x slice_size.
+        area = mask_support_area(bool_mask)
         if area <= (min_area_threshold if min_area_threshold is not None else 0):
             return None
 

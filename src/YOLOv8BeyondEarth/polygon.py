@@ -1,3 +1,24 @@
+"""Mask -> polygon -> georeferenced geometry, and THE pixel-boundary convention.
+
+Pixel-boundary convention (review item X-03)
+--------------------------------------------
+Every production geometry in this project — sizes, SFDs, area calibration, IoU, AP, orientation
+cohorts — is traced by :func:`binary_mask_to_polygon`, i.e. **skimage marching squares at the 0.5
+level set** of the mask. A pixel is a unit square centred on its integer index, so the boundary of
+a solid block runs half a pixel outside the outermost pixel *centres*, and marching squares clips
+the four corners at 45 degrees. A solid 5x5 block therefore encloses **~24.5**, not 25 (the 2%
+shortfall is the corner clipping, and it shrinks as blobs grow).
+
+:func:`binary_mask_to_polygon_cv` is a *different* convention: ``cv2.findContours`` follows
+boundary pixel **centres**, so the same 5x5 block encloses **16.0** — a 36% area deficit and about
+19% on equivalent diameter, worst for the smallest boulders. It is fast and its effect on
+*orientation* was measured to be negligible (~0.5 deg median), which is what it was adopted for.
+It is **not** area-calibrated and must not feed size, SFD, density or area-comparison work.
+``tests/test_pixel_convention.py`` pins both numbers so the gap cannot drift unnoticed.
+
+The mask-support level (:data:`MASK_SUPPORT_LEVEL`) is the same 0.5, so the area gate counts
+exactly the pixels the traced polygon encloses (review item G1-06).
+"""
 import cv2
 import numpy as np
 import shapely
@@ -6,6 +27,12 @@ import rasterio as rio
 import geopandas as gpd
 
 from shapely.geometry import (box, Polygon)
+
+#: The level set traced by the production contour extractor, and therefore the threshold that
+#: defines a pixel as "supported" for the area gate. Fractional masks (an ``INTER_AREA``-downscaled
+#: prototype) must use the same number in both places or the gate rejects boulders the tracer
+#: would happily have outlined.
+MASK_SUPPORT_LEVEL = 0.5
 
 
 def is_within_slice(polygon, slice_height, slice_width):
@@ -115,12 +142,45 @@ def _mask_bounds(binary_mask):
     x0 = int(cols.argmax()); x1 = len(cols) - int(cols[::-1].argmax())
     return y0, y1, x0, x1
 
+def mask_support_area(binary_mask):
+    """Number of pixels enclosed by the traced polygon, i.e. pixels at or above the 0.5 level.
+
+    THE area definition for the pre-tracing gate (review item G1-06). The gate used to count only
+    pixels *exactly* equal to 1, which is the same thing for a hard {0, 1} mask but wrong after an
+    ``INTER_AREA`` downscale, where partially-covered pixels carry fractional values: a boulder
+    could have plenty of support at the 0.5 level the tracer uses and still be discarded for
+    having fewer than N *fully covered* pixels. Counting at :data:`MASK_SUPPORT_LEVEL` keeps the
+    gate and the tracer talking about the same region.
+    """
+    return int(np.count_nonzero(np.asarray(binary_mask) >= MASK_SUPPORT_LEVEL))
+
+
+def _enclosed_area(contour):
+    """Absolute shoelace area of a closed ring given as (N, 2) coordinates."""
+    if len(contour) < 3:
+        return 0.0
+    x, y = contour[:, 0], contour[:, 1]
+    return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
 def binary_mask_to_polygon(binary_mask):
-    """Converts a binary mask to polygon representation
+    """Trace a mask to a polygon at the 0.5 level set — the production convention.
+
     Args:
-        binary_mask: a 2D binary numpy array where '1's represent the object
-        tolerance: Maximum distance from original points of polygon to approximated
-            polygonal chain. If tolerance is 0, the original coordinate array is returned.
+        binary_mask: a 2D numpy array; values >= 0.5 are inside the object. Hard {0, 1} masks and
+            fractional (``INTER_AREA``-downscaled) masks are both accepted.
+
+    Returns an ``(N, 2)`` float array of ``(x, y) = (col, row)`` vertices in the mask's own frame,
+    or ``None`` if the mask is empty or no contour closes.
+
+    **Component selection.** ``find_contours`` returns one ring per connected boundary — several
+    if the mask is disconnected, plus one per hole. This keeps the ring enclosing the **greatest
+    area** and discards the rest, so a mask that fragmented into a blob plus specks yields the
+    blob. It used to keep the ring with the most *vertices*, which is not the same thing and fails
+    in exactly the case that matters: a thin, ragged, disconnected artifact has a long perimeter
+    and therefore many vertices, so it could replace the larger compact boulder beside it
+    (review item X-03). Picking by area also correctly prefers an outer boundary over its own
+    hole.
     """
     # Crop to the object's bounding box before tracing. ``find_contours`` scans the whole
     # array, so contouring a small boulder inside a full slice-size mask wastes most of the
@@ -134,29 +194,30 @@ def binary_mask_to_polygon(binary_mask):
 
     # pad mask to close contours of shapes which start and end at an edge
     padded_binary_mask = np.pad(sub, pad_width=1, mode='constant', constant_values=0)
-    contours = skimage.measure.find_contours(padded_binary_mask, 0.5)
+    contours = skimage.measure.find_contours(padded_binary_mask, MASK_SUPPORT_LEVEL)
 
     if not contours:
         return None
-    # Pick the largest contour (by vertex count); handles disconnected masks where
-    # find_contours returns multiple arrays of different lengths.
-    contour_arr = max(contours, key=len) - 1  # largest contour; undo padding offset
+    contour_arr = max(contours, key=_enclosed_area) - 1  # largest ring; undo padding offset
     contour = np.flip(contour_arr, axis=1)  # (x, y) = (col, row) in the cropped frame
     contour[:, 0] += x0  # shift back to full-mask coordinates -> identical geometry
     contour[:, 1] += y0
     return contour
 
 def binary_mask_to_polygon_cv(binary_mask):
-    """Faster OpenCV alternative to ``binary_mask_to_polygon``.
+    """Faster OpenCV alternative to :func:`binary_mask_to_polygon` — **orientation only**.
 
-    Uses ``cv2.findContours`` (RETR_EXTERNAL, CHAIN_APPROX_SIMPLE) and keeps the largest
-    external contour. Returns an (N, 2) float array of (x, y) = (col, row) coordinates in the
-    same convention as ``binary_mask_to_polygon``, or ``None`` if no contour is found.
+    Uses ``cv2.findContours`` (RETR_EXTERNAL, CHAIN_APPROX_SIMPLE) and keeps the largest external
+    contour by enclosed area. Returns an (N, 2) float array of (x, y) = (col, row) coordinates, or
+    ``None`` if no contour is found.
 
-    NOTE: this produces *different* (sparser) vertices than skimage. Its effect on boulder
-    orientation was measured to be negligible (~0.5 deg median) — see
-    ``notebooks/Goal2_orientation_cv2_vs_skimage.ipynb`` — but it is opt-in
-    (``contour_method="cv2"`` in ``get_sliced_prediction``), not the default.
+    **Different boundary convention — see the module docstring.** ``findContours`` follows
+    boundary pixel *centres* rather than the 0.5 level set, so its polygons are inscribed: a solid
+    5x5 block encloses 16.0 against skimage's ~24.5 (about -19% on equivalent diameter, and worse
+    the smaller the boulder). The effect on *angles* is negligible (~0.5 deg median — see
+    ``notebooks/Goal2_orientation_cv2_vs_skimage.ipynb``), which is the only axis it was validated
+    on and the only one it is cleared for. It stays opt-in (``contour_method="cv2"``) and
+    uncalibrated for area, so no size, SFD, density or area-comparison product may be built on it.
     """
     # Crop to the object's bounding box before tracing (see binary_mask_to_polygon): cheaper
     # and geometry-identical after shifting the contour back.
@@ -166,11 +227,18 @@ def binary_mask_to_polygon_cv(binary_mask):
     y0, y1, x0, x1 = bounds
     sub = binary_mask[y0:y1, x0:x1]
 
-    mask_uint8 = (sub.astype(np.uint8) * 255)
+    # threshold at the same level the skimage tracer uses, so a fractional (downscaled) mask
+    # defines the same inside/outside region under both tracers
+    mask_uint8 = (np.asarray(sub) >= MASK_SUPPORT_LEVEL).astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    contour = max(contours, key=cv2.contourArea).squeeze(1).astype(float)
+    # largest by enclosed area; degenerate 1-px-wide blobs all measure 0, so fall back to the
+    # longest outline rather than picking arbitrarily
+    best = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(best) == 0:
+        best = max(contours, key=len)
+    contour = best.squeeze(1).astype(float)
     contour[:, 0] += x0  # (x, y) cropped-frame -> full-mask coordinates
     contour[:, 1] += y0
     return contour
@@ -179,8 +247,9 @@ def check_mask_validity(binary_mask, min_area_threshold=4):
 
     # I need to be careful if I mix height, width...
     # at least two cells in height or width
-    rows = np.any(binary_mask, axis=1)
-    cols = np.any(binary_mask, axis=0)
+    inside = np.asarray(binary_mask) >= MASK_SUPPORT_LEVEL   # same level the tracer uses
+    rows = np.any(inside, axis=1)
+    cols = np.any(inside, axis=0)
 
     # is the mask at least a pixel in width or height?
     if not np.any(rows) or not np.any(cols):
@@ -189,14 +258,14 @@ def check_mask_validity(binary_mask, min_area_threshold=4):
         wh_criteria = True
 
     # number of pixels
-    area = len(binary_mask[binary_mask == 1])
+    area = mask_support_area(binary_mask)
 
     # number of blobs
-    n_blobs = skimage.measure.label(binary_mask).max()
+    n_blobs = skimage.measure.label(inside).max()
 
     # is there any holes in the mask?
-    padded_binary_mask = np.pad(binary_mask, pad_width=1, mode='constant', constant_values=0)
-    n_contours = len(skimage.measure.find_contours(padded_binary_mask, 0.5))
+    padded_binary_mask = np.pad(inside, pad_width=1, mode='constant', constant_values=0)
+    n_contours = len(skimage.measure.find_contours(padded_binary_mask, MASK_SUPPORT_LEVEL))
     if n_contours == 1:
         contour_criteria = True
     else:
