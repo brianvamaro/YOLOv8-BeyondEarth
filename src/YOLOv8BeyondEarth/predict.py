@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from YOLOv8BeyondEarth import presets
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
-                                       shift_polygon, mask_support_area,
+                                       shift_polygon, mask_support_area, rescale_pixel_coords,
                                        add_geometries, bboxes_to_shp, outlines_to_shp)
 from lsnms import nms
 
@@ -325,10 +325,12 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
             return _drop("degenerate_polygon")
 
         if downscale_pred:
+            # the *mask* was resized by cv2, which is already pixel-centre correct
             polygon_slice = polygon
         else:
-            polygon_slice = np.stack([(polygon[:, 0] / bool_mask.shape[0]) * slice_size,
-                                      (polygon[:, 1] / bool_mask.shape[0]) * slice_size], axis=-1)
+            # the mask stayed in the model's frame (ultralytics returns masks at `imgsz`, not at
+            # slice_size), so the coordinates carry the rescale — centre-aware (G3-10)
+            polygon_slice = rescale_pixel_coords(polygon, slice_size / bool_mask.shape[0])
         is_polygon_within_slice = (np.logical_and(polygon_slice[:, 0].min() >= min_edge_distance,
                                                   polygon_slice[:, 0].max() <= max_edge_distance) and
                                    np.logical_and(polygon_slice[:, 1].min() >= min_edge_distance,
@@ -338,7 +340,7 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         # are demoted for *suppression ordering only*, in `nms_prio`.
         score = float(prediction[4])
         if coord_scale != 1.0:   # streamed SR: SR px -> native px (shift is in native px)
-            polygon_slice = polygon_slice * coord_scale
+            polygon_slice = rescale_pixel_coords(polygon_slice, coord_scale)
         shifted_polygon = shift_polygon(polygon_slice, shift_x, shift_y)
         try:
             category_name = detection_model.category_mapping[str(category_id)]

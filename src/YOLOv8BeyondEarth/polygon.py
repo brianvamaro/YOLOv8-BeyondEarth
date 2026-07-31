@@ -57,6 +57,29 @@ def is_within_slice(polygon, slice_height, slice_width):
 def shift_polygon(polygon, shift_x, shift_y):
             return (np.stack([polygon[:, 0] + shift_x, polygon[:, 1] + shift_y], axis=-1))
 
+def rescale_pixel_coords(coords, scale):
+    """Map pixel *indices* between two grids covering the same ground, centre-aware.
+
+    A pixel index ``p`` names the pixel whose centre sits at ``p + 0.5`` in edge coordinates, so
+    rescaling by ``s`` is ``(p + 0.5) * s - 0.5`` — not ``p * s``. The naive form leaves a constant
+    ``0.5 * (1 - s)`` offset in *both* axes, which is a rigid translation of every polygon in the
+    catalog: sizes and angles survive it, absolute position does not (review item G3-10).
+
+    Two places need it, and both used the naive form:
+
+    - the streamed-SR arm mapping SR px back to the native grid (``s = 1/f``): **0.25 native px**
+      at ``f = 2``;
+    - ``downscale_pred=False`` mapping the model's mask frame onto the slice
+      (``s = slice_size / mask_size``): **0.375 slice px** for a 1024 px mask on a 256 px slice.
+
+    ``cv2.resize`` already uses this convention, which is why ``downscale_pred=True`` — where the
+    *mask* is resized rather than the coordinates — was never affected.
+    """
+    scale = float(scale)
+    if scale == 1.0:
+        return coords
+    return (np.asarray(coords, dtype=float) + 0.5) * scale - 0.5
+
 def get_bbox_index(row, src):
     row_min, col_min = src.index(x=row.bbox[0], y=row.bbox[1])
     row_max, col_max = src.index(x=row.bbox[2], y=row.bbox[3])
