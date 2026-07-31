@@ -12,10 +12,23 @@ angle is preserved without any aspect correction; the fit is done directly in no
 
 Output mirrors the source tree at ``data_prieur/boulder2024_obb/{split}/`` with ``labels/`` written
 fresh (overwrite, never append) and ``images/`` wired as a directory **junction** to the original
-images (zero-copy, no admin needed on Windows). Also writes ``boulder2024_obb.yaml``.
+images (zero-copy, no admin needed on Windows). Also writes ``boulder2024_obb.yaml`` and an audit
+JSON.
 
-Run:  python scripts/build_obb_labels.py
+**Edge policy (review item G2-08).** A box that extends past the tile edge used to have its
+corners clipped to [0, 1] *independently*, which does not clip a rectangle — it deforms it into a
+quadrilateral with the wrong angle and aspect, for 3.4% of instances. Since the OBB head is being
+trained precisely to read angle, teaching it deformed boxes defeats the exercise. The policy is now
+explicit:
+
+``drop``  (default) — omit boxes that leave the tile. Honest, at the cost of under-representing
+          edge boulders; the counts are written to the audit so the bias is quantified.
+``keep``  — emit the true rectangle with out-of-range coordinates intact.
+
+Run:  python scripts/build_obb_labels.py [--edge-policy drop|keep]
 """
+import argparse
+import json
 import os
 import sys
 import subprocess
@@ -31,6 +44,21 @@ DST = os.path.join(REPO, "data_prieur", "boulder2024_obb")
 SPLITS = ("train", "validation", "test")
 TILE_PX = 500                      # boulder2024 tile size (square)
 DENSIFY = 1.0 / TILE_PX            # ellipse densify spacing = 1 px, in normalized units
+EDGE_POLICIES = ("drop", "keep")
+
+
+def is_rectangle(corners, atol=1e-5, rtol=1e-3):
+    """True if the 4 ordered corners form a rectangle: equal diagonals sharing a midpoint.
+
+    Tolerances allow for the 6-decimal label format, whose rounding is ~5e-7 per coordinate and
+    therefore a relative error of ~1e-5 on a box a few hundredths of a tile across.
+    """
+    c = np.asarray(corners, dtype=float).reshape(4, 2)
+    d1, d2 = c[2] - c[0], c[3] - c[1]                      # the two diagonals
+    n1, n2 = float(np.linalg.norm(d1)), float(np.linalg.norm(d2))
+    tol = atol + rtol * max(n1, n2)
+    mid_ok = bool(np.allclose((c[0] + c[2]) / 2, (c[1] + c[3]) / 2, atol=tol, rtol=0))
+    return bool(mid_ok and abs(n1 - n2) <= tol)
 
 
 def parse_seg_row(row):
@@ -45,27 +73,35 @@ def parse_seg_row(row):
     return cls, xy.reshape(-1, 2)
 
 
-def convert_file(src_txt, dst_txt):
-    """Convert one seg label file to OBB. Returns (n_in, n_out, n_outside) counts."""
+def convert_file(src_txt, dst_txt, edge_policy="drop"):
+    """Convert one seg label file to OBB. Returns a per-file count dict."""
     with open(src_txt) as f:
         rows = [r.strip() for r in f if r.strip()]
-    out_lines, n_in, n_outside = [], 0, 0
+    out_lines = []
+    counts = {"n_in": 0, "n_bad_fit": 0, "n_edge": 0, "n_edge_dropped": 0}
     for row in rows:
         cls, poly = parse_seg_row(row)
         if cls is None:
             continue
-        n_in += 1
+        counts["n_in"] += 1
         # fit in normalized space (isotropic since tiles are square)
         corners, _, _ = ellipse_obb(Polygon(poly), DENSIFY)
         if corners is None:
+            counts["n_bad_fit"] += 1
             continue               # degenerate polygon / failed fit -> dropped
         if (corners < 0).any() or (corners > 1).any():
-            n_outside += 1
-        corners = np.clip(corners, 0.0, 1.0)   # ultralytics expects normalized in [0,1]
+            counts["n_edge"] += 1
+            if edge_policy == "drop":
+                counts["n_edge_dropped"] += 1
+                continue
+        # every emitted label must still be a rectangle — this is what independent corner
+        # clipping silently broke
+        assert is_rectangle(corners), f"non-rectangular OBB emitted from {src_txt}"
         out_lines.append(cls + " " + " ".join(f"{c:.6f}" for c in corners.flatten()))
     with open(dst_txt, "w") as f:                # overwrite (never append)
         f.write("\n".join(out_lines) + ("\n" if out_lines else ""))
-    return n_in, len(out_lines), n_outside
+    counts["n_out"] = len(out_lines)
+    return counts
 
 
 def ensure_images_junction(src_images, dst_images):
@@ -80,7 +116,13 @@ def ensure_images_junction(src_images, dst_images):
 
 
 def main():
-    tot_in = tot_out = tot_drop = tot_outside = 0
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--edge-policy", choices=EDGE_POLICIES, default="drop",
+                    help="what to do with boxes extending past the tile edge (see the docstring)")
+    args = ap.parse_args()
+
+    audit = {"edge_policy": args.edge_policy, "splits": {}}
+    total = {"n_in": 0, "n_out": 0, "n_bad_fit": 0, "n_edge": 0, "n_edge_dropped": 0}
     for split in SPLITS:
         s_lbl = os.path.join(SRC, split, "labels")
         s_img = os.path.join(SRC, split, "images")
@@ -89,24 +131,38 @@ def main():
         os.makedirs(d_lbl, exist_ok=True)
         ensure_images_junction(s_img, d_img)
         files = [f for f in os.listdir(s_lbl) if f.endswith(".txt")]
-        s_in = s_out = s_drop = s_outside = 0
+        acc = {k: 0 for k in total}
         for fn in files:
-            n_in, n_out, n_outside = convert_file(os.path.join(s_lbl, fn), os.path.join(d_lbl, fn))
-            s_in += n_in; s_out += n_out; s_drop += (n_in - n_out); s_outside += n_outside
-        print(f"{split:>11}: {len(files):>4} files  {s_in:>7} seg -> {s_out:>7} obb  "
-              f"(dropped {s_drop} bad fits, {s_outside} clipped to edge)")
-        tot_in += s_in; tot_out += s_out; tot_drop += s_drop; tot_outside += s_outside
+            counts = convert_file(os.path.join(s_lbl, fn), os.path.join(d_lbl, fn),
+                                  edge_policy=args.edge_policy)
+            for k in acc:
+                acc[k] += counts[k]
+        acc["n_files"] = len(files)
+        audit["splits"][split] = acc
+        for k in total:
+            total[k] += acc[k]
+        print(f"{split:>11}: {len(files):>4} files  {acc['n_in']:>7} seg -> {acc['n_out']:>7} obb  "
+              f"({acc['n_bad_fit']} bad fits, {acc['n_edge']} edge-crossing, "
+              f"{acc['n_edge_dropped']} dropped by policy)")
 
     yaml_path = os.path.join(DST, "boulder2024_obb.yaml")
     with open(yaml_path, "w") as f:
         f.write("# OBB labels for boulder2024, built from the shipped seg polygons via the unbiased\n"
                 "# EllipseModel fit (scripts/build_obb_labels.py). Solution H (docs/solutions/H_...).\n"
+                f"# edge policy: {args.edge_policy}; see boulder2024_obb_audit.json\n"
                 f"path: {DST.replace(os.sep, '/')}\n"
                 "train: train/images\nval: validation/images\ntest: test/images\n"
                 "nc: 1\nnames:\n  0: boulder\n")
-    print(f"\nTOTAL: {tot_in} seg -> {tot_out} obb  (dropped {tot_drop} = "
-          f"{100*tot_drop/max(tot_in,1):.2f}%, {tot_outside} edge-clipped)")
-    print(f"wrote {yaml_path}")
+    audit["total"] = total
+    audit_path = os.path.join(DST, "boulder2024_obb_audit.json")
+    with open(audit_path, "w") as f:
+        json.dump(audit, f, indent=2)
+
+    edge_frac = 100 * total["n_edge"] / max(total["n_in"], 1)
+    print(f"\nTOTAL: {total['n_in']} seg -> {total['n_out']} obb  "
+          f"({total['n_bad_fit']} bad fits, {total['n_edge']} edge-crossing = {edge_frac:.2f}%, "
+          f"{total['n_edge_dropped']} dropped)")
+    print(f"wrote {yaml_path}\nwrote {audit_path}")
 
 
 if __name__ == "__main__":

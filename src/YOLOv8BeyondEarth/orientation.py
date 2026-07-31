@@ -18,12 +18,20 @@ from concurrent.futures import ThreadPoolExecutor
 
 def _fit_ellipse(geom, res):
     """Shared EllipseModel fit for a boulder polygon. Returns ``(xc, yc, a, b, theta)`` in the
-    polygon's own coordinates (centre restored), or ``None`` if the fit fails.
+    polygon's own coordinates, or ``None`` if the fit fails.
 
     The polygon is first densified to ``res`` spacing (``shapely.segmentize``) so the fit is not
     dominated by uneven vertex spacing — important to compare extractors with different vertex
     densities (e.g. skimage vs cv2). ``theta`` is the skimage math-angle (radians) of the ``a``
     semi-axis; ``a``/``b`` are the semi-axes (not necessarily major/minor-ordered).
+
+    The fit runs on mean-shifted coordinates for conditioning, and the returned centre is the
+    **fitted** one shifted back. It used to return the coordinate mean itself and throw the fitted
+    offset away, which is only the same thing for a polygon whose vertices are symmetric about the
+    ellipse centre. Across 26,830 validation polygons the error was 0.157 px median, 0.702 px p99
+    and 7.216 px maximum, with 2.1% above half a pixel (review item G2-08). Orientation was never
+    affected — ``ellipse_angle180`` uses only ``theta`` — but every OBB label built from this was
+    displaced.
     """
     if geom is None or geom.is_empty:
         return None
@@ -35,14 +43,14 @@ def _fit_ellipse(geom, res):
     if g.geom_type != "Polygon" or g.exterior is None:
         return None
     xy = np.asarray(g.exterior.coords)
-    centre = xy.mean(axis=0)
+    shift = xy.mean(axis=0)
     model = EllipseModel()
-    if not model.estimate(xy - centre):
+    if not model.estimate(xy - shift):
         return None
-    _, _, a, b, theta = model.params
+    xc, yc, a, b, theta = model.params
     if not (a > 0 and b > 0):
         return None
-    return float(centre[0]), float(centre[1]), float(a), float(b), float(theta)
+    return float(xc + shift[0]), float(yc + shift[1]), float(a), float(b), float(theta)
 
 
 def ellipse_angle180(geom, res):
