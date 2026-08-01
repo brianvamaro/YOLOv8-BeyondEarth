@@ -473,6 +473,7 @@ def get_sliced_prediction(in_raster,
                           contour_method: str = "skimage",
                           save_bbox: bool = True,
                           save_prenms: bool = True,
+                          save_nms: bool = True,
                           output_format: str = "shp",
                           n_workers: int = None,
                           remask_fn=None,
@@ -541,6 +542,10 @@ def get_sliced_prediction(in_raster,
         save_prenms: bool
             Write the pre-NMS (un-suppressed) layers. Default ``True``. Set ``False`` to write
             only the final post-NMS layer(s) — useful for dense full-image runs.
+        save_nms: bool
+            Write the post-NMS layer. Default ``True``. The multiscale wrapper sets ``False``
+            because its deliverable is the *fused* layer; the per-arm layers were being written
+            anyway, contradicting the wrapper's own contract (review item G3-09).
         output_format: str
             ``"shp"`` (default) or ``"gpkg"``. GeoPackage avoids the shapefile 2 GB / field
             limits and is faster to write for very large (~1e6-feature) outputs.
@@ -823,12 +828,13 @@ def get_sliced_prediction(in_raster,
         gdf_nms = gdf.loc[keep]
         gdf_nms.attrs = dict(gdf.attrs)   # .loc does not reliably carry attrs across
         written = []
-        if save_bbox:
-            nms_bbox = out_bbox_shp.with_name(out_bbox_shp.stem + "-nms" + ext)
-            bboxes_to_shp(gdf_nms, nms_bbox)
-            written.append(nms_bbox)
-        outlines_to_shp(gdf_nms, nms_mask_shp)
-        written.append(nms_mask_shp)
+        if save_nms:
+            if save_bbox:
+                nms_bbox = out_bbox_shp.with_name(out_bbox_shp.stem + "-nms" + ext)
+                bboxes_to_shp(gdf_nms, nms_bbox)
+                written.append(nms_bbox)
+            outlines_to_shp(gdf_nms, nms_mask_shp)
+            written.append(nms_mask_shp)
         return _finish(gdf_nms, written)
     else:
         return _finish(None, [out_mask_shp] if save_prenms else [])
@@ -854,6 +860,39 @@ def predict_production(in_raster, detection_model, output_dir, preset="goal1_pro
 
 _UNSET = object()   # lets an explicit `engulf_thr=None` mean "off" rather than "use the preset"
 
+#: Largest raster (native pixels) the in-memory multiscale wrapper will accept. The tracked dev
+#: crop is 4.2e6 px; the HiRISE scene is 1.9e9. Phase 4 measured 24-78 GB of commit growth on
+#: full scenes and adopted a subprocess-per-arm rule for exactly that reason.
+MAX_IN_MEMORY_PX = 200_000_000
+
+
+def _check_in_memory_budget(in_raster, scales, max_px, allow):
+    """Refuse a full-scene in-memory multiscale run (review item G3-09).
+
+    ``get_multiscale_prediction`` holds every arm's catalog *and* the pooled copy in one process.
+    That is fine on a crop and ruinous on a scene: phase 4 measured 24-78 GB of commit growth and
+    concluded one subprocess per arm, but the wrapper never enforced it, so an ordinary call on a
+    full scene would thrash the pagefile rather than fail. It now fails, with the alternative named.
+    """
+    if allow:
+        return
+    import rasterio
+    try:
+        with rasterio.open(in_raster) as src:
+            n_px = int(src.width) * int(src.height)
+    except rasterio.errors.RasterioError:
+        # a missing or unreadable raster is not a memory problem; the per-arm call reports it
+        # with a better message than this guard could
+        return
+    if n_px > max_px:
+        raise MemoryError(
+            f"{Path(in_raster).name} is {n_px / 1e6:.0f} Mpx, over the {max_px / 1e6:.0f} Mpx "
+            f"in-memory limit for {len(scales)} arms. This wrapper keeps every arm plus a pooled "
+            "copy resident; phase 4 measured 24-78 GB of commit growth on full scenes and adopted "
+            "one subprocess per arm. Use scripts/run_multiscale_arms.py, which runs each arm in "
+            "its own process and fuses the persisted per-arm layers, or pass allow_in_memory=True "
+            "if you have the RAM and mean it.")
+
 
 def get_multiscale_prediction(in_raster,
                               detection_model=None,
@@ -868,6 +907,8 @@ def get_multiscale_prediction(in_raster,
                               output_dir=None,
                               output_format: str = "gpkg",
                               on_conflict: str = "error",
+                              allow_in_memory: bool = False,
+                              max_in_memory_px: int = MAX_IN_MEMORY_PX,
                               **kwargs):
     """Goal 3: run ``get_sliced_prediction`` once per scale and fuse into one catalog.
 
@@ -881,12 +922,21 @@ def get_multiscale_prediction(in_raster,
     Pass ``preset=None`` plus explicit arguments for a generic run; any argument you do pass
     overrides the preset.
 
+    .. warning::
+       **This wrapper is for crops, not scenes.** It keeps every arm's catalog and the pooled copy
+       resident in one process. Phase 4 measured 24-78 GB of commit growth on full scenes and
+       adopted one subprocess per arm; rasters above ``max_in_memory_px`` are now refused with a
+       pointer to ``scripts/run_multiscale_arms.py`` rather than left to thrash the pagefile
+       (review item G3-09). ``allow_in_memory=True`` overrides.
+
     ``scales`` uses the same keys as :func:`YOLOv8BeyondEarth.fusion.fuse_predictions`: an int
     is a native slice size, a ``(slice_size, sr_factor)`` tuple is a streamed-SR arm. Per-scale
-    passes run with their own intra-scale NMS on and per-scale file output off
-    (``save_prenms=False, save_bbox=False``); the fused mask layer is the one file written, as
-    ``<stem>-predictions-fused-<rule>-...-mask.gpkg``, with the suppression audit table next to it
-    as ``...-audit.csv`` and the resolved-config manifest as ``...-manifest.json``.
+    passes run with their own intra-scale NMS on and **all** per-scale file output off
+    (``save_prenms=False, save_bbox=False, save_nms=False``) — the per-arm NMS layers used to be
+    written regardless, contradicting the wrapper's promise of one fused deliverable. The fused
+    mask layer is the one file written, as ``<stem>-predictions-fused-<rule>-...-mask.gpkg``, with
+    the suppression audit table next to it as ``...-audit.csv`` and the resolved-config manifest as
+    ``...-manifest.json``.
 
     ``cluster_thr=None`` uses the calibrated ``fusion.DEFAULT_CLUSTER_THR`` (a DIoU value —
     pass an explicit threshold if ``metric="iou"``). ``bands``/``rule``/``metric``/``engulf_thr``/
@@ -937,13 +987,15 @@ def get_multiscale_prediction(in_raster,
                        "inference_contract_version": INFERENCE_CONTRACT_VERSION}
     presets.check_config_conflict(out_mask, resolved_config, on_conflict)
 
+    _check_in_memory_budget(in_raster, scales, max_in_memory_px, allow_in_memory)
+
     per_scale = {}
     for key in scales:
         slice_size, sr_factor = (key if isinstance(key, (tuple, list)) else (key, 1))
         _, gdf_nms = get_sliced_prediction(
             in_raster, detection_model, slice_size=int(slice_size), sr_factor=int(sr_factor),
             output_dir=output_dir, output_format=output_format,
-            save_prenms=False, save_bbox=False, postprocess=True,
+            save_prenms=False, save_bbox=False, save_nms=False, postprocess=True,
             on_conflict=on_conflict, **kwargs)
         per_scale[key] = gdf_nms
 
