@@ -642,6 +642,26 @@ def get_sliced_prediction(in_raster,
         "model_path": str(getattr(detection_model, "model_path", None)),
     }
 
+    # Output names depend only on parameters known now, so resolve them and refuse a conflicting
+    # configuration BEFORE any inference runs. Checking at write time instead means a full scene
+    # burns its whole compute budget and then raises on the last line (G1-07 follow-up).
+    ext = ".gpkg" if output_format == "gpkg" else ".shp"
+    ss_str = str(slice_size) if sr_factor == 1 else f"{slice_size}sr{sr_factor}"
+    bbox_filename = in_raster.stem + "-predictions-ct-" + str(int(confidence_threshold * 100)).zfill(3) + "-ss-" + \
+        ss_str + "-is-" + str(inference_size) + "-ov-" + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox" + ext
+    mask_filename = bbox_filename.replace("-bbox" + ext, "-mask" + ext)
+    if downscale_pred:
+        bbox_filename = bbox_filename.replace("-bbox" + ext, "-downscaled-bbox" + ext)
+        mask_filename = mask_filename.replace("-mask" + ext, "-downscaled-mask" + ext)
+    if mask_tag:  # keep a re-masked layer (e.g. SAM2) from overwriting the plain YOLO one
+        bbox_filename = bbox_filename.replace("-bbox" + ext, f"-bbox-{mask_tag}" + ext)
+        mask_filename = mask_filename.replace("-mask" + ext, f"-mask-{mask_tag}" + ext)
+    out_bbox_shp = output_dir / bbox_filename
+    out_mask_shp = output_dir / mask_filename
+    nms_mask_shp = out_mask_shp.with_name(out_mask_shp.stem + "-nms" + ext)
+    presets.check_config_conflict(nms_mask_shp if postprocess else out_mask_shp,
+                                  resolved_config, on_conflict)
+
     raster_identity = presets.file_identity(in_raster)
     out_png = _ensure_png(in_raster, raster_identity)
 
@@ -751,33 +771,8 @@ def get_sliced_prediction(in_raster,
     gdf["id"] = gdf.index
     _report_discards(gdf, discarded, n_kept=len(gdf))
 
-    # save predictions before post-processing (include if downscaling is done or not...)
-    ext = ".gpkg" if output_format == "gpkg" else ".shp"
-    ss_str = str(slice_size) if sr_factor == 1 else f"{slice_size}sr{sr_factor}"
-    bbox_filename = in_raster.stem + "-predictions-ct-" + str(int(confidence_threshold * 100)).zfill(3) + "-ss-" + \
-        ss_str + "-is-" + str(inference_size) + "-ov-" + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox" + ext
-    mask_filename = bbox_filename.replace("-bbox" + ext, "-mask" + ext)
-
-    if downscale_pred:
-        bbox_filename = bbox_filename.replace("-bbox" + ext, "-downscaled-bbox" + ext)
-        mask_filename = mask_filename.replace("-mask" + ext, "-downscaled-mask" + ext)
-
-    if mask_tag:  # keep a re-masked layer (e.g. SAM2) from overwriting the plain YOLO one
-        bbox_filename = bbox_filename.replace("-bbox" + ext, f"-bbox-{mask_tag}" + ext)
-        mask_filename = mask_filename.replace("-mask" + ext, f"-mask-{mask_tag}" + ext)
-
-    out_bbox_shp = output_dir / bbox_filename
-    out_mask_shp = output_dir / mask_filename
+    # output paths and the conflict check were resolved before inference ran
     gdf.attrs["resolved_config"] = resolved_config
-
-    # The filename encodes only confidence, slice, inference size and overlap — not the contour
-    # method, NMS threshold, area gate, mask source or model. Two different configurations
-    # therefore resolve to the same name, and the second used to silently replace the first with
-    # something the name misdescribes. The manifest makes that detectable; this makes it fatal
-    # unless explicitly allowed (G1-07).
-    nms_mask_shp = out_mask_shp.with_name(out_mask_shp.stem + "-nms" + ext)
-    presets.check_config_conflict(nms_mask_shp if postprocess else out_mask_shp,
-                                  resolved_config, on_conflict)
 
     # The pre-NMS files are intermediate, and bbox files aren't needed by many workflows.
     # Gate both so a dense full-image run can avoid writing ~1e6-feature layers it won't use.
@@ -792,13 +787,12 @@ def get_sliced_prediction(in_raster,
         presets.write_manifest(
             nms_mask_shp if postprocess else out_mask_shp,
             config=resolved_config,
-            inputs={"raster": in_raster,
+            inputs={"raster": raster_identity,   # already hashed for the PNG cache; don't redo it
                     **({"weights": getattr(detection_model, "model_path", None)}
                        if getattr(detection_model, "model_path", None) else {})},
             outputs={"files": [p.name for p in written],
                      "n_detections": int(len(gdf)),
                      "n_after_nms": None if gdf_nms is None else int(len(gdf_nms))},
-            raster_identity=raster_identity,
             crs=str(gdf.crs) if len(gdf) else None,
             discarded=gdf.attrs.get("discarded", {}),
             wall_seconds=round(time.perf_counter() - started, 3),

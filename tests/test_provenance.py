@@ -209,6 +209,40 @@ def test_a_different_config_cannot_silently_overwrite(scene, model, tmp_path, mo
     assert record["config"]["contour_method"] == "cv2"
 
 
+def test_conflict_is_detected_before_any_inference_runs(scene, model, tmp_path, monkeypatch):
+    """The check has to happen up front. Doing it at write time means a full scene burns hours of
+    GPU and *then* raises on the last line, throwing the whole run away."""
+    out = tmp_path / "out"
+    _run(scene, model, out, monkeypatch)
+
+    calls = []
+
+    def counting_model(images, **kw):
+        calls.append(len(images) if isinstance(images, list) else 1)
+        return [_result([(20, 20, 40, 40, 0.8)])]
+
+    model.model = counting_model
+    with pytest.raises(FileExistsError, match="different configuration"):
+        _run(scene, model, out, monkeypatch, contour_method="cv2")
+    assert calls == [], "inference ran before the conflict was detected"
+
+
+def test_manifest_does_not_rehash_an_already_identified_input(scene, model, tmp_path,
+                                                              monkeypatch):
+    """Hashing the raster is not free at scene scale (1.9 GB for HiRISE), and a three-arm run
+    would otherwise re-read it six times."""
+    seen = []
+    real = presets.file_identity
+
+    def counting(path):
+        seen.append(str(path))
+        return real(path)
+
+    monkeypatch.setattr(presets, "file_identity", counting)
+    _run(scene, model, tmp_path / "out", monkeypatch)
+    assert sum(1 for s in seen if s.endswith("scene.tif")) == 1, seen
+
+
 def test_no_shared_temporary_files_between_runs(scene, model, tmp_path, monkeypatch):
     """G1-04: the footprint used to be written to a fixed ~/tmp/true-footprint.shp, shared by
     every process on the machine."""

@@ -203,14 +203,21 @@ def check_config_conflict(out_path, config, on_conflict="error"):
 
 
 def write_manifest(out_path, *, config, inputs=None, outputs=None, **extra):
-    """Serialize the resolved config and full provenance beside a result. Written atomically."""
+    """Serialize the resolved config and full provenance beside a result. Written atomically.
+
+    An ``inputs`` value may be a path *or* an already-computed :func:`file_identity` dict. Passing
+    the dict matters at scene scale: hashing the 1.9 GB HiRISE raster takes real time, the caller
+    has usually done it already for the PNG cache, and a three-arm multiscale run would otherwise
+    re-hash the same 1.9 GB six times.
+    """
     path = manifest_path(out_path)
     record = {
         "written_utc": datetime.now(timezone.utc).isoformat(),
         "config_hash": config_hash(config),
         "config": _jsonable(config),
         "code": code_identity(),
-        "inputs": {k: file_identity(v) for k, v in (inputs or {}).items()},
+        "inputs": {k: (v if isinstance(v, dict) else file_identity(v))
+                   for k, v in (inputs or {}).items()},
         "outputs": _jsonable(outputs or {}),
         **{k: _jsonable(v) for k, v in extra.items()},
     }
