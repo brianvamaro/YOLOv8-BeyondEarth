@@ -74,6 +74,85 @@ def ellipse_angle180(geom, res):
     return angle180, aspect
 
 
+#: The angle estimators that exist in this codebase. ``"ellipse"`` is the registered production
+#: readout; ``"moments"`` is a different estimator that several validation runners used instead.
+ANGLE_ESTIMATORS = ("ellipse", "moments")
+
+
+def mask_to_polygon_geom(mask, contour_method="skimage"):
+    """Clean a binary mask and trace it into a **geographic-frame** shapely polygon, or ``None``.
+
+    One place, because there were four (review item G2-02): the cleanup (largest connected blob,
+    holes filled — a boulder is solid, and a second blob is a neighbour that crept into the window)
+    and the row-flip that turns image rows into a North-up frame were copy-pasted into
+    ``detect_orientations``, ``detect_binary_masks``, ``angles_from_masks`` and the SAM re-masker,
+    where they could drift apart silently.
+    """
+    import shapely
+    from .polygon import binary_mask_to_polygon, binary_mask_to_polygon_cv
+    from .orientation_validation import largest_blob_fill
+
+    clean = largest_blob_fill(np.asarray(mask) >= 0.5)
+    if clean is None:
+        return None, 0
+    trace = binary_mask_to_polygon_cv if contour_method == "cv2" else binary_mask_to_polygon
+    poly = trace(clean)
+    if poly is None or len(poly) < 3:
+        return None, int(clean.sum())
+    # y = -row: the tracer works in image coordinates (row increasing south), the angle convention
+    # is North-up. Getting this wrong flips chirality, which is exactly the class of bug the
+    # HiRISE investigation spent five hypotheses on.
+    return shapely.geometry.Polygon(np.c_[poly[:, 0], -poly[:, 1]]), int(clean.sum())
+
+
+def mask_readout(mask, estimator="ellipse", contour_method="skimage", res=1.0):
+    """THE mask -> ``(angle180, aspect, diameter_px)`` readout, shared by production and validation.
+
+    ``estimator="ellipse"`` (default) is the registered production path: clean -> production tracer
+    -> ``EllipseModel``. ``"moments"`` is the weighted-second-moment estimator that the T1/T3/T5
+    runners used instead of the one the plan registered — kept available, because it reads soft
+    masks that have no threshold, but no longer the accidental default. The two do not agree in
+    general; earlier work showed the choice can change chirality, so a null measured with one and
+    interpreted against a plan written for the other is not the registered test.
+
+    ``diameter_px`` is the area-equivalent diameter of the cleaned mask, identically for both
+    estimators, so only the *angle* differs between them.
+    """
+    if estimator not in ANGLE_ESTIMATORS:
+        raise ValueError(f"estimator must be one of {ANGLE_ESTIMATORS}, got {estimator!r}")
+    if estimator == "moments":
+        from .orientation_validation import angles_from_moments
+        row = angles_from_moments([np.asarray(mask, dtype=float)]).iloc[0]
+        return float(row.angle180), float(row.aspect), float(row.diameter_px)
+
+    geom, area_px = mask_to_polygon_geom(mask, contour_method=contour_method)
+    if geom is None:
+        return np.nan, np.nan, (2.0 * np.sqrt(area_px / np.pi) if area_px else np.nan)
+    angle, aspect = ellipse_angle180(geom, res)
+    return float(angle), float(aspect), float(2.0 * np.sqrt(area_px / np.pi))
+
+
+def is_mask_within_slice(mask, slice_size=None, edge_frac=0.05):
+    """Production's slice-truncation test, applied to a mask instead of a polygon.
+
+    ``get_sliced_prediction`` discards detections whose polygon comes within ``edge_frac`` of a
+    slice boundary, because their masks are clipped — and then keeps them only at the raster's true
+    footprint edge. The Goal-2 tiling helpers had no such rule, so every null pooled clipped
+    boulders that production would never have emitted; a clipped mask has a spurious straight edge
+    aligned with the tile, which is a *cardinal* bias fed straight into a cardinal-bias test
+    (review item G2-02).
+    """
+    m = np.asarray(mask) >= 0.5
+    if not m.any():
+        return False
+    size = slice_size if slice_size is not None else m.shape[0]
+    lo, hi = edge_frac * size, (1.0 - edge_frac) * size
+    rows, cols = np.flatnonzero(m.any(axis=1)), np.flatnonzero(m.any(axis=0))
+    # the tracer's 0.5 isoline extends half a pixel beyond the outermost pixel centres
+    return bool(cols[0] - 0.5 >= lo and cols[-1] + 0.5 <= hi
+                and rows[0] - 0.5 >= lo and rows[-1] + 0.5 <= hi)
+
+
 def ellipse_obb(geom, res):
     """Oriented bounding box from the unbiased EllipseModel fit of a boulder polygon.
 

@@ -175,88 +175,93 @@ def regional_orientation_hist(raster_path, crop=1024, n_crops=24, scales=((1, 4)
     return centers, {s: agg[s] / max(n, 1) for s in scales}
 
 
+def slice_masks_to_slice_res(prediction_result, slice_size):
+    """Model masks -> slice-resolution binary masks, exactly as production does it.
+
+    ultralytics returns ``masks.data`` at ``imgsz``, not at ``slice_size``, so this is a genuine
+    ``INTER_AREA`` downscale (see G3-10) — the same one ``_result_to_df`` performs under
+    ``downscale_pred=True``.
+    """
+    import cv2
+
+    if prediction_result.masks is None or len(prediction_result.masks.data) == 0:
+        return []
+    out = []
+    for m in prediction_result.masks.data.cpu().numpy():
+        mm = (m >= 0.5).astype(np.float32)
+        if mm.shape[0] != slice_size:
+            mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
+        out.append((mm >= 0.5).astype(np.uint8))
+    return out
+
+
 def detect_orientations(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
-                        aspect_min=1.0):
+                        aspect_min=1.0, estimator="ellipse", drop_edge=True,
+                        contour_method="skimage"):
     """Tile a raw image array into ``slice_size`` windows, run YOLO on each, and return a
     DataFrame ``[angle180, aspect, diameter_px]`` for every detection (geographic long-axis
     azimuth measured in the *image's own* frame).
 
-    A minimal reimplementation of the sliced pipeline (mask >=0.5 -> resize to slice -> largest
-    connected blob -> contour -> EllipseModel), without NMS/edge handling — enough to get an
-    orientation *distribution* for transform / rotation tests on a single array. ``img`` is a 2D
-    uint8/0-255 array; non-overlapping tiles keep double-counting negligible.
+    A reimplementation of the sliced pipeline for a single in-memory array, with two things the
+    review found it had wrong (G2-02):
+
+    - the angle comes from :func:`orientation.mask_readout`, the *one* mask-cleanup -> polygon ->
+      ``EllipseModel`` readout production uses, rather than a local copy that could drift;
+    - ``drop_edge=True`` applies production's slice-truncation rule. It used to keep tile-edge
+      objects, whose masks are clipped by the tile boundary and therefore carry a spurious
+      straight edge aligned to the grid — a cardinal bias, fed into tests measuring cardinal bias.
+
+    Tiles are non-overlapping, so a boulder clipped here has no whole counterpart to recover it;
+    dropping is the honest choice and matches what production emits away from a footprint edge.
+    Pass ``drop_edge=False`` to reproduce the pre-fix numbers.
     """
-    import cv2
-    import shapely
-    from scipy.ndimage import label, binary_fill_holes
-    from .polygon import binary_mask_to_polygon
+    from .orientation import is_mask_within_slice, mask_readout
 
     H, W = img.shape
     rows = []
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
-            res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False, device=device)
-            r0 = res[0]
-            if r0.masks is None or len(r0.masks.data) == 0:
-                continue
-            for m in r0.masks.data.cpu().numpy():
-                mm = (m >= 0.5).astype(np.float32)
-                if mm.shape[0] != slice_size:
-                    mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
-                mb = (mm >= 0.5).astype(np.uint8)
-                lab, n = label(mb)
-                if n == 0:
+            r0 = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
+                       device=device)[0]
+            for mb in slice_masks_to_slice_res(r0, slice_size):
+                if drop_edge and not is_mask_within_slice(mb, slice_size):
                     continue
-                if n > 1:
-                    big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
-                    mb = (lab == big).astype(np.uint8)
-                mb = binary_fill_holes(mb).astype(np.uint8)        # solid boulder -> single contour
-                poly = binary_mask_to_polygon(mb)
-                if poly is None or len(poly) < 5:
-                    continue
-                a, asp = ellipse_angle180(shapely.geometry.Polygon(np.c_[poly[:, 0], -poly[:, 1]]), 1.0)
+                a, asp, dpx = mask_readout(mb, estimator=estimator,
+                                           contour_method=contour_method)
                 if np.isfinite(asp) and asp >= aspect_min:
-                    rows.append((a, asp, 2 * np.sqrt(int(mb.sum()) / np.pi)))
+                    rows.append((a, asp, dpx))
     return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
 
 
-def detect_binary_masks(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):
+def detect_binary_masks(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
+                        drop_edge=True):
     """Tile ``img`` like :func:`detect_orientations` but return every detection's processed
     **binary mask** (bbox-cropped) instead of tracing it — so different mask→polygon tracers can
     be compared on the *same* masks (Test 3d, the contour-tracer chirality swap).
 
-    Mask handling is identical to :func:`detect_orientations` (>=0.5 -> resize to slice ->
-    largest blob -> fill holes). Cropping to the blob's bounding box (both tracers crop
-    internally anyway) keeps a cached run small; orientation is translation-invariant.
+    Mask handling is identical to :func:`detect_orientations` — same slice-resolution downscale,
+    same ``largest_blob_fill`` cleanup, same ``drop_edge`` rule (G2-02) — so the two helpers see
+    the same population. Cropping to the blob's bounding box (both tracers crop internally anyway)
+    keeps a cached run small; orientation is translation-invariant.
     """
-    import cv2
-    from scipy.ndimage import label, binary_fill_holes
+    from .orientation import is_mask_within_slice
 
     H, W = img.shape
     masks = []
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
-            res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
-                        device=device)
-            r0 = res[0]
-            if r0.masks is None or len(r0.masks.data) == 0:
-                continue
-            for m in r0.masks.data.cpu().numpy():
-                mm = (m >= 0.5).astype(np.float32)
-                if mm.shape[0] != slice_size:
-                    mm = cv2.resize(mm, (slice_size, slice_size), interpolation=cv2.INTER_AREA)
-                mb = (mm >= 0.5).astype(np.uint8)
-                lab, n = label(mb)
-                if n == 0:
+            r0 = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
+                       device=device)[0]
+            for mb in slice_masks_to_slice_res(r0, slice_size):
+                if drop_edge and not is_mask_within_slice(mb, slice_size):
                     continue
-                if n > 1:
-                    big = 1 + int(np.argmax([(lab == j).sum() for j in range(1, n + 1)]))
-                    mb = (lab == big).astype(np.uint8)
-                mb = binary_fill_holes(mb).astype(np.uint8)
-                ys, xs = np.nonzero(mb)
-                masks.append(mb[ys.min():ys.max() + 1, xs.min():xs.max() + 1].copy())
+                clean = largest_blob_fill(mb)
+                if clean is None:
+                    continue
+                ys, xs = np.nonzero(clean)
+                masks.append(clean[ys.min():ys.max() + 1, xs.min():xs.max() + 1].copy())
     return masks
 
 
@@ -942,20 +947,13 @@ def angles_from_masks(masks, method="skimage"):
     CHAIN_APPROX_SIMPLE legitimately returns 4-corner outlines for the tiny blocky blobs that are
     exactly the Test 3d subject, and ``ellipse_angle180`` densifies (segmentize) before fitting, so
     a 4-vertex square is a valid input, not a degenerate one.
-    """
-    import shapely
-    from .polygon import binary_mask_to_polygon, binary_mask_to_polygon_cv
-    from .orientation import ellipse_angle180
 
-    trace = binary_mask_to_polygon if method == "skimage" else binary_mask_to_polygon_cv
-    rows = []
-    for mb in masks:
-        poly = trace(mb)
-        if poly is None or len(poly) < 3:
-            rows.append((np.nan, np.nan, np.nan))
-            continue
-        ang, asp = ellipse_angle180(shapely.geometry.Polygon(np.c_[poly[:, 0], -poly[:, 1]]), 1.0)
-        rows.append((ang, asp, 2 * np.sqrt(int(mb.sum()) / np.pi)))
+    Routed through :func:`orientation.mask_readout` (G2-02), so the tracer comparison runs on the
+    production readout rather than a local copy of it.
+    """
+    from .orientation import mask_readout
+
+    rows = [mask_readout(mb, estimator="ellipse", contour_method=method) for mb in masks]
     return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
 
 
