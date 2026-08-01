@@ -475,6 +475,135 @@ def _max_bipartite_matching(rows, cols, n_rows, n_cols):
     return max_cardinality_matching(rows, cols, n_rows, n_cols)
 
 
+def decompose_against_baseline(fused, audit, baseline_key):
+    """Split a fusion result relative to one arm: what it **kept**, **added** and **removed**.
+
+    Exact, from the provenance columns rather than a geometric re-match: a fused row tagged with
+    ``baseline_key`` is a baseline mask that survived verbatim, an audit row tagged with it is a
+    baseline mask that fusion *suppressed*, and everything else in ``fused`` is an addition from
+    another arm.
+
+    Why it exists (review item G3-05): phase 4 explained a non-regressed orientation distribution
+    as "256 masks untouched, fusion only adds" — but the engulf pass can suppress 256 rows, and
+    HiRISE ended with 6,307 fewer 256-sourced rows after fusion than before. An additions-only
+    argument cannot be made about a set that also lost members; the three groups have to be
+    reported separately so the removals can be inspected on their own terms.
+
+    Returns ``{"kept", "added", "removed_audit", "n_baseline", "removed_fraction"}``.
+    """
+    key = str(baseline_key)
+    kept = fused[fused["scale_key"].astype(str) == key]
+    added = fused[fused["scale_key"].astype(str) != key]
+    removed = (audit[audit["scale_key"].astype(str) == key] if len(audit) else audit)
+    n_baseline = len(kept) + len(removed)
+    return {"kept": kept, "added": added, "removed_audit": removed,
+            "n_baseline": int(n_baseline), "n_kept": int(len(kept)), "n_added": int(len(added)),
+            "n_removed": int(len(removed)),
+            "removed_fraction": float(len(removed) / n_baseline) if n_baseline else 0.0}
+
+
+def orientation_decomposition(fused, audit, baseline_key, res, aspect_min=1.35, dpx_min=8.0):
+    """Orientation summary of the kept / added / removed groups separately (review item G3-05).
+
+    A fused rose that looks like the baseline's is only evidence of "no orientation change" if the
+    groups that differ are themselves unremarkable. Reporting the removed group is the part that
+    was missing: masks fusion *deleted* can carry a distinct orientation signature, and pooling
+    them away is how a change hides.
+    """
+    from .orientation import boulder_orientations, grid_fraction, grid_fraction_uniform
+
+    parts = decompose_against_baseline(fused, audit, baseline_key)
+    rows = []
+    for name in ("kept", "added"):
+        g = parts[name]
+        if len(g) == 0:
+            rows.append({"group": name, "n": 0, "n_well_resolved": 0,
+                         "grid_fraction": np.nan, "median_angle": np.nan})
+            continue
+        df = boulder_orientations(g, res=res, n_workers=1)
+        sub = df[(df.aspect_ra > aspect_min) & (df.diameter_m / res >= dpx_min)]
+        rows.append({"group": name, "n": int(len(g)), "n_well_resolved": int(len(sub)),
+                     "grid_fraction": float(grid_fraction(sub.angle180.to_numpy()))
+                                      if len(sub) else np.nan,
+                     "median_angle": float(np.median(sub.angle180)) if len(sub) else np.nan})
+    out = pd.DataFrame(rows)
+    out.attrs["uniform_grid_fraction"] = grid_fraction_uniform(10.0)
+    out.attrs["n_removed"] = parts["n_removed"]
+    out.attrs["removed_fraction"] = parts["removed_fraction"]
+    out.attrs["baseline_untouched"] = parts["n_removed"] == 0
+    return out
+
+
+def isotropic_arms(scales, n_per_arm, extent=4000.0, dpx_range=(6.0, 24.0), aspect=2.0,
+                   res=1.0, seed=0, jitter=0.4):
+    """Content-free detection sets: random positions, **uniform** orientations, several arms.
+
+    The standing Goal-3 null. Each arm sees the same underlying objects with a small localisation
+    jitter, so fusion has genuine cross-arm clusters to resolve, but there is no orientation
+    structure anywhere in the input — any anisotropy in the fused output is manufactured by the
+    fusion rule itself.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(n_per_arm)
+    cx = rng.uniform(0, extent, n)
+    cy = rng.uniform(0, extent, n)
+    dpx = rng.uniform(*dpx_range, n)
+    theta = rng.uniform(0, np.pi, n)                      # uniform on the half-circle
+    a = dpx * res * np.sqrt(aspect) / 2.0
+    b = dpx * res / np.sqrt(aspect) / 2.0
+
+    out = {}
+    for key in scales:
+        jx = rng.normal(0, jitter * res, n)
+        jy = rng.normal(0, jitter * res, n)
+        geoms = [shapely.affinity.rotate(
+                     shapely.affinity.scale(shapely.Point(cx[i] + jx[i], cy[i] + jy[i]).buffer(1.0, quad_segs=24),
+                                            xfact=a[i], yfact=b[i]),
+                     np.degrees(theta[i]), origin="center")
+                 for i in range(n)]
+        out[key] = gpd.GeoDataFrame({"score": rng.uniform(0.3, 0.95, n),
+                                     "category_id": 0, "category_name": "boulder",
+                                     "is_within_slice": True},
+                                    geometry=geoms, crs="EPSG:32631")
+    return out
+
+
+def fusion_orientation_null(scales=(512, 256, (256, 2)), rule="bands", bands=None,
+                            engulf_thr=0.7, cross_arm_only=True, n_per_arm=1500, res=1.0,
+                            n_boot=400, seed=0, tol_deg=10.0):
+    """Run **the production rule** on content-free isotropic input and gate on an interval.
+
+    Two gaps this closes (review item G3-05): the standing null was never run against
+    ``256pref_engulf`` — the rule that actually ships — and its bootstrap intervals were computed
+    and then not used, so the gate was a point comparison that could not distinguish a real
+    anisotropy from sampling noise.
+
+    Returns the fused grid fraction with a percentile interval, the isotropic baseline, and
+    ``passes`` = whether that baseline lies inside the interval. A *pass* is "the fused rose is
+    consistent with isotropy", which is the only claim a null of this kind supports.
+    """
+    from .orientation import boulder_orientations, grid_fraction, grid_fraction_uniform
+
+    if rule == "bands" and bands is None:
+        bands = {256: (0.0, np.inf)}
+    gdfs = isotropic_arms(scales, n_per_arm, res=res, seed=seed)
+    fused, audit = fuse_predictions(gdfs, rule=rule, bands=bands, native_res=res,
+                                    engulf_thr=engulf_thr, cross_arm_only=cross_arm_only)
+    angles = boulder_orientations(fused, res=res, n_workers=1).angle180.to_numpy()
+    observed = float(grid_fraction(angles, tol_deg=tol_deg))
+    uniform = float(grid_fraction_uniform(tol_deg))
+
+    rng = np.random.default_rng(seed + 1)
+    boot = [grid_fraction(rng.choice(angles, len(angles), replace=True), tol_deg=tol_deg)
+            for _ in range(n_boot)]
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    return {"rule": rule, "engulf_thr": engulf_thr, "cross_arm_only": cross_arm_only,
+            "n_fused": int(len(fused)), "n_pooled": int(sum(len(g) for g in gdfs.values())),
+            "n_suppressed": int(len(audit)),
+            "grid_fraction": observed, "lo": float(lo), "hi": float(hi),
+            "uniform": uniform, "passes": bool(lo <= uniform <= hi)}
+
+
 def duplicate_rate(fused, audit_thr=0.0, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou",
                    native_res=None, bands=((3, 4), (4, 6), (6, 8), (8, 10), (10, 14),
                                            (14, np.inf))):
@@ -485,8 +614,13 @@ def duplicate_rate(fused, audit_thr=0.0, cluster_thr=DEFAULT_CLUSTER_THR, metric
     inflates SFD counts). Pairs >= cluster_thr in a fused output are clustering bugs by
     construction and are reported separately. Returns a per-band DataFrame with ``n_dets,
     n_near_pairs, n_bug_pairs, near_pair_rate`` (pairs / detections; target < ~1–2%).
-    Rates are an upper bound: adjacent distinct boulders can land in the audit window too —
-    the phase-3 spot-check is what separates them.
+
+    .. warning::
+       ``near_pair_rate`` is a **geometric upper bound, not a duplicate rate** (review item
+       G3-06). Adjacent distinct boulders land in the same window, and nothing here has seen the
+       imagery. The <2% gate should be quoted against a *validated* classifier — see
+       :func:`duplicate_audit_sample` for building the blinded sample and
+       :func:`heuristic_precision` for turning returned labels into the number the gate needs.
     """
     boxes = fused.geometry.bounds.to_numpy(dtype=float)
     ii, jj, vals = _candidate_pairs(boxes, max(audit_thr, 1e-9), metric)
@@ -505,4 +639,100 @@ def duplicate_rate(fused, audit_thr=0.0, cluster_thr=DEFAULT_CLUSTER_THR, metric
         rows.append(dict(band=f"{lo}-{'inf' if not np.isfinite(hi) else hi}", n_dets=n,
                          n_near_pairs=int(near.sum()), n_bug_pairs=int(bug.sum()),
                          near_pair_rate=(float(near.sum()) / n if n else np.nan)))
+    return pd.DataFrame(rows)
+
+
+# --- validating the duplicate heuristic (review item G3-06) --------------------------------------
+
+def duplicate_audit_sample(fused, native_res, audit_thr=0.0, cluster_thr=DEFAULT_CLUSTER_THR,
+                           metric="diou", n_per_band=40,
+                           bands=((3, 4), (4, 6), (6, 8), (8, 10), (10, 14), (14, np.inf)),
+                           seed=0):
+    """A **blinded, size-stratified** sample of surviving near-pairs, for a human to label.
+
+    :func:`duplicate_rate` calls a surviving pair with polygon containment >= 0.5 a "true
+    duplicate" without ever looking at the imagery. Production already removes everything at
+    containment >= 0.7, so the label is being applied in the 0.5-0.7 band — precisely the
+    ambiguous one, where a partly-overlapping neighbour and a genuine double-count look the same
+    geometrically. The <2% gate therefore rests on an unvalidated classifier (review item G3-06).
+
+    This produces the sample that fixes that: pairs drawn evenly across size bands, each row
+    carrying the two polygons, the metric, the containment and the heuristic's own verdict — but
+    the verdict in a separate column and the rows shuffled, so an auditor labelling
+    ``is_duplicate`` from the imagery is not led by it. Feed the labelled frame to
+    :func:`heuristic_precision`.
+    """
+    boxes = fused.geometry.bounds.to_numpy(dtype=float)
+    ii, jj, vals = _candidate_pairs(boxes, max(audit_thr, 1e-9), metric)
+    near = vals < cluster_thr
+    ii, jj, vals = ii[near], jj[near], vals[near]
+    if len(ii) == 0:
+        return pd.DataFrame(columns=["pair_id", "index_a", "index_b", "band", "metric",
+                                     "containment", "heuristic_is_duplicate", "is_duplicate"])
+
+    geoms = fused.geometry.values
+    small_first = shapely.area(geoms[ii]) <= shapely.area(geoms[jj])
+    lo_i = np.where(small_first, ii, jj)
+    hi_i = np.where(small_first, jj, ii)
+    contain = _poly_containment(geoms[lo_i], geoms[hi_i])
+    dpx = equivalent_diameter_px(fused, native_res)
+    pair_dpx = np.maximum(dpx[ii], dpx[jj])
+
+    rng = np.random.default_rng(seed)
+    picks = []
+    for lo, hi in bands:
+        in_band = np.flatnonzero((pair_dpx >= lo) & (pair_dpx < hi))
+        if len(in_band) == 0:
+            continue
+        take = rng.choice(in_band, min(n_per_band, len(in_band)), replace=False)
+        label = f"{lo}-{'inf' if not np.isfinite(hi) else hi}"
+        picks.extend((int(k), label) for k in take)
+
+    rows = [{"pair_id": n, "index_a": int(ii[k]), "index_b": int(jj[k]), "band": band,
+             "metric": float(vals[k]), "containment": float(contain[k]),
+             "heuristic_is_duplicate": bool(contain[k] >= 0.5),
+             "is_duplicate": pd.NA}
+            for n, (k, band) in enumerate(picks)]
+    out = pd.DataFrame(rows)
+    # shuffle so the auditor does not work through the bands in order and infer the answer
+    return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
+def heuristic_precision(labelled, heuristic_col="heuristic_is_duplicate",
+                        truth_col="is_duplicate"):
+    """Turn a labelled audit sample into the number the <2% gate actually needs.
+
+    Reports the containment heuristic's precision and recall against human labels, with Wilson
+    intervals, overall and per size band. Until this exists, ``near_pair_rate`` is a geometric
+    upper bound wearing a duplicate rate's name.
+    """
+    df = labelled.dropna(subset=[truth_col]).copy()
+    if len(df) == 0:
+        raise ValueError(f"no rows have a {truth_col!r} label yet")
+    df[truth_col] = df[truth_col].astype(bool)
+    df[heuristic_col] = df[heuristic_col].astype(bool)
+
+    def _wilson(k, n, z=1.96):
+        if n == 0:
+            return (np.nan, np.nan)
+        p = k / n
+        d = 1 + z * z / n
+        centre = (p + z * z / (2 * n)) / d
+        half = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+        return (max(0.0, centre - half), min(1.0, centre + half))
+
+    def _summarise(sub, band):
+        tp = int((sub[heuristic_col] & sub[truth_col]).sum())
+        fp = int((sub[heuristic_col] & ~sub[truth_col]).sum())
+        fn = int((~sub[heuristic_col] & sub[truth_col]).sum())
+        p_lo, p_hi = _wilson(tp, tp + fp)
+        r_lo, r_hi = _wilson(tp, tp + fn)
+        return {"band": band, "n": int(len(sub)), "tp": tp, "fp": fp, "fn": fn,
+                "precision": tp / (tp + fp) if tp + fp else np.nan,
+                "precision_lo": p_lo, "precision_hi": p_hi,
+                "recall": tp / (tp + fn) if tp + fn else np.nan,
+                "recall_lo": r_lo, "recall_hi": r_hi}
+
+    rows = [_summarise(df, "all")]
+    rows += [_summarise(sub, band) for band, sub in df.groupby("band", sort=True)]
     return pd.DataFrame(rows)
