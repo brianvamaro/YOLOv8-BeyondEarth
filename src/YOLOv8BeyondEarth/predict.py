@@ -841,6 +841,7 @@ def get_sliced_prediction(in_raster,
 
 
 def predict_production(in_raster, detection_model, output_dir, preset="goal1_production",
+                       on_conflict="error", remask_fn=None, mask_tag=None, n_workers=None,
                        **overrides):
     """Run single-scale sliced inference in a **named, versioned** configuration (G1-01).
 
@@ -850,12 +851,19 @@ def predict_production(in_raster, detection_model, output_dir, preset="goal1_pro
     fall back to the preset value — and records the resolved configuration in the manifest beside
     the output.
 
+    ``**overrides`` are *preset* parameters, so a typo raises. Arguments that are not part of the
+    scientific configuration — ``on_conflict``, ``remask_fn``, ``mask_tag``, ``n_workers`` — are
+    named explicitly and pass straight through, since they change nothing about what the result
+    means.
+
         gdf, gdf_nms = predict_production(raster, model, out_dir)
         gdf, gdf_nms = predict_production(raster, model, out_dir, slice_size=256)
     """
     config = presets.resolve(preset, **overrides)
     call = {k: v for k, v in config.items() if not k.startswith("_")}
-    return get_sliced_prediction(in_raster, detection_model, output_dir=output_dir, **call)
+    return get_sliced_prediction(in_raster, detection_model, output_dir=output_dir,
+                                 on_conflict=on_conflict, remask_fn=remask_fn, mask_tag=mask_tag,
+                                 n_workers=n_workers, **call)
 
 
 _UNSET = object()   # lets an explicit `engulf_thr=None` mean "off" rather than "use the preset"
