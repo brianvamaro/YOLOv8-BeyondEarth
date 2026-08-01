@@ -89,6 +89,99 @@ def matched_area_ratio(model_gdf, ref_gdf, rom=None, min_radius_m=1.0):
     return df, stats
 
 
+#: Area definitions that appear in this project. Only the first is the production convention.
+AREA_CONVENTIONS = ("polygon_skimage", "polygon_cv2", "pixel_count")
+
+
+def mask_areas(masks, convention="polygon_skimage", res=1.0):
+    """Area of each mask in map units squared under an explicitly named boundary convention.
+
+    ``polygon_skimage`` — the production convention: clean the mask, trace the 0.5 level set, take
+    the polygon's continuous area. A solid 5x5 block measures 24.5 px.
+    ``polygon_cv2`` — trace boundary pixel *centres* instead. The same block measures 16.0 px.
+    ``pixel_count`` — the integer count of supported pixels. The same block measures 25.
+
+    These are not interchangeable, and mixing them is review item G2-04: the published SAM/human
+    (1.06-1.27x) and YOLO/human (1.58-2.13x) factors compared a model **pixel count** against a
+    human **continuous polygon area**, so part of every one of them is the convention gap rather
+    than a real difference in how big the masks are.
+    """
+    from .orientation import mask_to_polygon_geom
+    from .polygon import mask_support_area
+
+    if convention not in AREA_CONVENTIONS:
+        raise ValueError(f"convention must be one of {AREA_CONVENTIONS}, got {convention!r}")
+    px_area = float(res) ** 2
+    out = []
+    for m in masks:
+        if convention == "pixel_count":
+            out.append(mask_support_area(m) * px_area)
+            continue
+        method = "cv2" if convention == "polygon_cv2" else "skimage"
+        geom, _ = mask_to_polygon_geom(m, contour_method=method)
+        out.append(np.nan if geom is None else geom.area * px_area)
+    return np.asarray(out, dtype=float)
+
+
+def convention_sensitivity(masks, res=1.0, conventions=AREA_CONVENTIONS):
+    """How far the *same* masks move when only the area convention changes (G2-04 acceptance).
+
+    Returns one row per convention with the median area and its ratio to the production
+    convention. Any calibration factor has to be quoted against a stated convention, and this is
+    the number that says how much that statement matters.
+    """
+    areas = {c: mask_areas(masks, convention=c, res=res) for c in conventions}
+    base = areas[AREA_CONVENTIONS[0]]
+    rows = []
+    for c, a in areas.items():
+        ok = np.isfinite(a) & np.isfinite(base) & (base > 0)
+        rows.append({"convention": c, "n": int(ok.sum()),
+                     "median_area": float(np.nanmedian(a)) if ok.any() else np.nan,
+                     "ratio_to_production": float(np.median(a[ok] / base[ok])) if ok.any() else np.nan})
+    return pd.DataFrame(rows)
+
+
+def area_calibration(model_gdf, ref_gdf, rom=None, min_radius_m=1.0, groups=None,
+                     n_boot=1000, seed=0):
+    """Model/reference area ratio on a **one-to-one** cohort, both sides continuous polygons.
+
+    This is what a calibration factor for Goal 4 has to be: the same quantity measured the same way
+    on both sides, over a cohort where each reference is used once. Both inputs must already carry
+    production-convention polygons — for a mask-based producer, trace it with
+    :func:`orientation.mask_to_polygon_geom` first rather than summing pixels.
+
+    ``groups`` labels the cluster each *reference* belongs to (tile, ROM, scene); when given, the
+    bootstrap resamples clusters rather than boulders, because boulders inside one tile are not
+    independent evidence (G2-06).
+
+    Returns ``(df, stats)``: the per-boulder table from :func:`matched_area_ratio`, and its stats
+    plus ``median_ratio_lo/hi``, ``n_clusters`` and the ``convention`` the factor is quoted for.
+    """
+    df, stats = matched_area_ratio(model_gdf, ref_gdf, rom=rom, min_radius_m=min_radius_m)
+    stats = dict(stats)
+    stats["convention"] = "polygon_skimage (production)"
+    ratios = df["ratio"].to_numpy(dtype=float)
+    ratios = ratios[np.isfinite(ratios)]
+    if len(ratios) == 0:
+        stats.update(median_ratio_lo=np.nan, median_ratio_hi=np.nan, n_clusters=None)
+        return df, stats
+
+    rng = np.random.default_rng(seed)
+    if groups is None:
+        boot = [np.median(rng.choice(ratios, len(ratios), replace=True)) for _ in range(n_boot)]
+        n_clusters = None
+    else:
+        labels = np.asarray(groups)[df["ref_index"].to_numpy()]
+        members = [np.flatnonzero(labels == g) for g in pd.unique(labels)]
+        k = len(members)
+        boot = [np.median(ratios[np.concatenate([members[i] for i in rng.integers(0, k, k)])])
+                for _ in range(n_boot)]
+        n_clusters = k
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    stats.update(median_ratio_lo=float(lo), median_ratio_hi=float(hi), n_clusters=n_clusters)
+    return df, stats
+
+
 def per_boulder_structure_tensor(gpkg_path, raster_path, res, n_fids=4000, aspect_min=1.35,
                                  pad_frac=1.5, pad_min_m=4.0, smooth=1.0, seed=1,
                                  n_total=None):
