@@ -52,15 +52,21 @@ def _pixel_bboxes(bounds_xy, transform):
 
     ``bounds_xy`` is an (N, 4) array of ``[minx, miny, maxx, maxy]``; returns (N, 4) float
     ``[x0, y0, x1, y1]`` in pixel coordinates.
+
+    Vectorized: this used to build the corners with a Python-level list comprehension calling the
+    affine once per boulder. Phase 5a exists to run on full scenes, and a full scene is ~1e6
+    boulders, so two million Python-level affine applications is not a detail.
     """
     inv = ~transform
     b = np.asarray(bounds_xy, dtype=float).reshape(-1, 4)
-    # the two opposite corners of each bbox
-    c0 = np.array([inv * (x, y) for x, y in zip(b[:, 0], b[:, 1])], dtype=float) - 0.5
-    c1 = np.array([inv * (x, y) for x, y in zip(b[:, 2], b[:, 3])], dtype=float) - 0.5
-    x0 = np.minimum(c0[:, 0], c1[:, 0]); x1 = np.maximum(c0[:, 0], c1[:, 0])
-    y0 = np.minimum(c0[:, 1], c1[:, 1]); y1 = np.maximum(c0[:, 1], c1[:, 1])
-    return np.stack([x0, y0, x1, y1], axis=-1)
+    a, bb, c, d, e, f = inv.a, inv.b, inv.c, inv.d, inv.e, inv.f
+    # the two opposite corners of each bbox, both through the inverse affine at once
+    cx0 = a * b[:, 0] + bb * b[:, 1] + c - 0.5
+    cy0 = d * b[:, 0] + e * b[:, 1] + f - 0.5
+    cx1 = a * b[:, 2] + bb * b[:, 3] + c - 0.5
+    cy1 = d * b[:, 2] + e * b[:, 3] + f - 0.5
+    return np.stack([np.minimum(cx0, cx1), np.minimum(cy0, cy1),
+                     np.maximum(cx0, cx1), np.maximum(cy0, cy1)], axis=-1)
 
 
 def _read_window_rgb(src, col_off, row_off, width, height):
@@ -81,13 +87,22 @@ def _read_window_rgb(src, col_off, row_off, width, height):
     return np.ascontiguousarray(rgb)
 
 
-def _group_windows(pix_boxes, window_size, pad, raster_width, raster_height):
+def _group_windows(pix_boxes, window_size, pad, raster_width, raster_height,
+                   max_growth=None, on_oversize=None):
     """Assign boxes to a fixed grid of windows by box centre; yield ``(window, member_indices)``.
 
     The window is the grid cell, expanded to fully contain its members plus ``pad`` and clipped to
     the raster — so an interior cell whose boulders sit well inside it is exactly
     ``window_size`` square (SAM sees the production scale), and only cells with a boulder
     straddling the boundary grow. Cells with no kept boulder are never read.
+
+    ``max_growth`` caps that expansion. SAM's encoder resizes whatever it is handed to a fixed
+    input, so window size *is* the effective resolution a boulder is seen at — the thing entry
+    gate 2 measured and the reason ``window_size`` defaults to 256. One outsized fused polygon in
+    a cell could previously grow its window without limit, so its neighbours were silently
+    re-masked at a different scale than the validated one. Oversized cells are now split: members
+    that fit are re-masked at the grid scale, and the outsized ones are reported through
+    ``on_oversize`` rather than dragging the cell with them.
     """
     cx = (pix_boxes[:, 0] + pix_boxes[:, 2]) / 2.0
     cy = (pix_boxes[:, 1] + pix_boxes[:, 3]) / 2.0
@@ -102,9 +117,23 @@ def _group_windows(pix_boxes, window_size, pad, raster_width, raster_height):
     starts = np.flatnonzero(np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)])
     ends = np.r_[starts[1:], len(order)]
 
+    limit = None if max_growth is None else float(max_growth) * window_size
+
     for s, e in zip(starts, ends):
         idx = order[s:e]
         cell_y, cell_x = int(keys[s, 0]), int(keys[s, 1])
+        if limit is not None:
+            # a member whose own extent already exceeds the cap cannot be re-masked at the grid
+            # scale; hold it out rather than letting it resize the window for everything else
+            span = np.maximum(pix_boxes[idx, 2] - pix_boxes[idx, 0],
+                              pix_boxes[idx, 3] - pix_boxes[idx, 1]) + 2 * pad
+            oversize = span > limit
+            if oversize.any():
+                if on_oversize is not None:
+                    on_oversize(idx[oversize])
+                idx = idx[~oversize]
+                if len(idx) == 0:
+                    continue
         # start from the grid cell, grow to cover members + pad, clip to the raster
         x0 = min(cell_x * window_size, int(np.floor(pix_boxes[idx, 0].min() - pad)))
         y0 = min(cell_y * window_size, int(np.floor(pix_boxes[idx, 1].min() - pad)))
@@ -125,7 +154,8 @@ def equivalent_diameter_px(gdf, native_res):
 
 def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_batch=96,
                    max_box_blowup=1.5, device=0, empty_cache_every=64, min_dpx=None,
-                   contour_method="skimage", native_res=None, progress=True):
+                   contour_method="skimage", native_res=None, progress=True,
+                   max_window_growth=2.0):
     """Re-mask a fused catalog with SAM2, one box prompt per kept boulder (phase 5a).
 
     Parameters
@@ -142,13 +172,21 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
         orientation trust-threshold analysis (``docs/README.md`` Coming next), so this ships as a
         knob rather than a baked-in default.
     native_res : map units per native px; read from the raster when None.
+    max_window_growth : cap on how far a cell may grow past ``window_size``, as a multiple of it.
+        SAM's encoder resizes its input, so the window size *is* the effective resolution a
+        boulder is seen at; without a cap one outsized fused polygon silently re-masked its whole
+        cell at a different scale than the validated 256. Members that cannot fit are held out and
+        keep their YOLO geometry with ``remask_note="oversize_window"``. ``None`` disables the cap
+        and restores the previous behaviour.
 
     Returns
     -------
     GeoDataFrame — one row per input row, in input order, with the SAM2 geometry where the
-    re-mask succeeded and the original geometry elsewhere. Adds ``mask_src`` (``"sam2"`` /
-    ``"yolo"``) and ``remask_note`` (``""``, ``"below_floor"``, ``"blowup"``, ``"no_mask"``,
-    ``"no_polygon"``). ``.attrs`` carries ``n_windows``, ``n_prompted``, ``n_sam``,
+    re-mask succeeded and the original geometry elsewhere. Sets ``mask_src`` (``"sam2"`` where this
+    pass replaced the geometry, otherwise **whatever produced the incoming geometry** — a fused
+    catalog may already carry SAM2 masks from the in-slice path) and ``remask_note`` (``""``,
+    ``"below_floor"``, ``"blowup"``, ``"no_mask"``, ``"no_polygon"``, ``"degenerate_box"``,
+    ``"oversize_window"``). ``.attrs`` carries ``n_windows``, ``n_prompted``, ``n_sam``,
     ``realigned_chunks`` and the config used.
     """
     if len(fused) == 0:
@@ -181,7 +219,13 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
         n_windows = n_prompted = n_sam = realigned = 0
 
         idx_eligible = np.flatnonzero(eligible)
-        groups = list(_group_windows(pix[idx_eligible], window_size, pad, width, height))
+
+        def _flag_oversize(local):
+            note[idx_eligible[local]] = "oversize_window"
+
+        groups = list(_group_windows(pix[idx_eligible], window_size, pad, width, height,
+                                     max_growth=max_window_growth,
+                                     on_oversize=_flag_oversize))
         for (col_off, row_off, w, h), local_idx in tqdm(groups, disable=not progress,
                                                         desc="remask windows"):
             rows = idx_eligible[local_idx]
@@ -201,11 +245,18 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
             n_prompted += len(rows)
 
             for k, gi in enumerate(rows):
+                box_area = ((boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1]))
+                if box_area <= 0:
+                    # a prompt box with no extent (clipped away at the raster edge, or a
+                    # degenerate fused geometry). It used to fall through to the blow-up guard
+                    # against an epsilon area, so *any* returned mask was called a blow-up and
+                    # the real cause never appeared in the notes.
+                    note[gi] = "degenerate_box"
+                    continue
                 mb = None if masks[k] is None else largest_blob_fill(masks[k].astype(np.uint8))
                 if mb is None:
                     note[gi] = "no_mask"
                     continue
-                box_area = max((boxes[k, 2] - boxes[k, 0]) * (boxes[k, 3] - boxes[k, 1]), 1e-9)
                 if mb.sum() > max_box_blowup * box_area:
                     note[gi] = "blowup"
                     continue
@@ -226,7 +277,13 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
 
     got = np.array([p is not None for p in polys])
     out = fused.copy()
-    out["mask_src"] = np.where(got, SRC_SAM, SRC_YOLO)
+    # Preserve whatever produced the *incoming* geometry where this pass did not replace it.
+    # Since G2-03 the sliced path also writes `mask_src`, so a fused catalog can already contain
+    # SAM2 geometry from the in-slice re-masker; writing a flat "yolo" for every non-replaced row
+    # would relabel those as YOLO masks and quietly misattribute their provenance.
+    prior = (fused["mask_src"].to_numpy(dtype=object) if "mask_src" in fused.columns
+             else np.full(len(fused), SRC_YOLO, dtype=object))
+    out["mask_src"] = np.where(got, SRC_SAM, prior)
     out["remask_note"] = note
 
     if got.any():
@@ -237,5 +294,7 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
 
     out.attrs.update(n_windows=n_windows, n_prompted=n_prompted, n_sam=n_sam,
                      realigned_chunks=realigned, window_size=window_size, pad=pad,
-                     min_dpx=min_dpx, max_box_blowup=max_box_blowup)
+                     min_dpx=min_dpx, max_box_blowup=max_box_blowup,
+                     max_window_growth=max_window_growth,
+                     n_oversize=int((note == "oversize_window").sum()))
     return out

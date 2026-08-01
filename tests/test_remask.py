@@ -327,3 +327,87 @@ def test_window_size_changes_sam_input_scale(scene):
     R.remask_windows(scene, gdf, s512, window_size=512, progress=False)
     assert s256.calls[0][0][:2] == (256, 256)
     assert s512.calls[0][0][:2] == (512, 512)
+
+
+# --- defects found reviewing the unreviewed phase-5a file (2026-08-01) --------------------------
+
+def test_pixel_bboxes_is_vectorized_and_unchanged(scene):
+    """Vectorizing the inverse affine must not move a single corner. Phase 5a runs on full scenes
+    (~1e6 boulders), where a Python-level affine call per corner is not a detail."""
+    with rio.open(scene) as src:
+        transform = src.transform
+    rng = np.random.default_rng(0)
+    x0 = rng.uniform(ORIGIN_X, ORIGIN_X + 200, 500)
+    y0 = rng.uniform(ORIGIN_Y - 200, ORIGIN_Y, 500)
+    bounds = np.stack([x0, y0 - 3.0, x0 + 4.0, y0], axis=-1)
+
+    inv = ~transform
+    ref = np.array([[*(np.minimum((inv * (b[0], b[1]))[0], (inv * (b[2], b[3]))[0]) - 0.5,),
+                     *(np.minimum((inv * (b[0], b[1]))[1], (inv * (b[2], b[3]))[1]) - 0.5,),
+                     *(np.maximum((inv * (b[0], b[1]))[0], (inv * (b[2], b[3]))[0]) - 0.5,),
+                     *(np.maximum((inv * (b[0], b[1]))[1], (inv * (b[2], b[3]))[1]) - 0.5,)]
+                    for b in bounds])
+    np.testing.assert_allclose(R._pixel_bboxes(bounds, transform), ref, atol=1e-9)
+
+
+def test_prior_mask_src_is_not_relabelled_as_yolo(scene):
+    """Since G2-03 the sliced path also writes mask_src, so a fused catalog can already hold SAM2
+    geometry. A row this pass does not replace must keep its real provenance, not be flattened to
+    "yolo"."""
+    gdf = _boxes_gdf(scene, [(60, 60, 80, 80), (300, 300, 320, 320)])
+    gdf["mask_src"] = ["sam2", "yolo"]                      # first came from the in-slice path
+    out = R.remask_windows(scene, gdf, FakeSAM(blowup_all=True), progress=False)
+
+    assert (out.remask_note == "blowup").all(), "fixture should fail the guard for every row"
+    assert list(out.mask_src) == ["sam2", "yolo"], "prior provenance was overwritten"
+
+
+def test_mask_src_defaults_to_yolo_when_the_catalog_has_no_column(scene):
+    gdf = _boxes_gdf(scene, [(60, 60, 80, 80)])
+    out = R.remask_windows(scene, gdf, FakeSAM(blowup_all=True), progress=False)
+    assert list(out.mask_src) == ["yolo"]
+
+
+def test_successful_remask_still_claims_sam2(scene):
+    gdf = _boxes_gdf(scene, [(60, 60, 80, 80)])
+    gdf["mask_src"] = ["yolo"]
+    out = R.remask_windows(scene, gdf, FakeSAM(inset=1), progress=False)
+    assert list(out.mask_src) == ["sam2"] and list(out.remask_note) == [""]
+
+
+def test_degenerate_prompt_box_is_named_not_mislabelled_as_blowup(scene):
+    """A zero-extent box used to be compared against an epsilon area, so any returned mask read as
+    a blow-up and the real cause never reached the notes."""
+    gdf = _boxes_gdf(scene, [(100.0, 100.0, 100.0, 100.0)])
+    out = R.remask_windows(scene, gdf, FakeSAM(inset=0), progress=False)
+    assert list(out.remask_note) == ["degenerate_box"]
+    assert list(out.mask_src) == ["yolo"]
+
+
+def test_oversize_boulder_does_not_rescale_its_neighbours_window(scene):
+    """SAM's encoder resizes its input, so window size IS the effective resolution. One outsized
+    fused polygon used to grow its cell without limit, silently re-masking its neighbours at a
+    different scale than the validated 256."""
+    small = (20, 20, 34, 34)
+    huge = (5, 5, 500, 500)                                  # spans most of the raster
+    gdf = _boxes_gdf(scene, [small, huge])
+
+    sam = FakeSAM(inset=1)
+    out = R.remask_windows(scene, gdf, sam, window_size=64, pad=4, max_window_growth=2.0,
+                           progress=False)
+    assert out.remask_note.iloc[1] == "oversize_window"
+    assert out.mask_src.iloc[1] == "yolo"
+    assert out.geometry.iloc[1].equals(gdf.geometry.iloc[1]), "the huge row's geometry changed"
+    # ...and the small neighbour was still re-masked, at a window no bigger than the cap
+    assert out.mask_src.iloc[0] == "sam2"
+    assert max(shape[0] for shape, _ in sam.calls) <= 2 * 64
+    assert out.attrs["n_oversize"] == 1
+
+
+def test_growth_cap_can_be_disabled(scene):
+    gdf = _boxes_gdf(scene, [(20, 20, 34, 34), (5, 5, 500, 500)])
+    sam = FakeSAM(inset=1)
+    out = R.remask_windows(scene, gdf, sam, window_size=64, pad=4, max_window_growth=None,
+                           progress=False)
+    assert "oversize_window" not in set(out.remask_note)
+    assert max(shape[0] for shape, _ in sam.calls) > 2 * 64   # the old unbounded behaviour
