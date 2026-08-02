@@ -159,10 +159,17 @@ def write_vector(gdf, out_path, *, validate=True):
 
     Readback reads geometry only (``columns=[]``), which keeps validation cheap next to a
     multi-hour inference run even at ~1e6 features.
+
+    The staging directory is named ``.wv-<random>`` rather than after the layer. Naming it after
+    the layer put the stem in the path *twice*, and this project's names are long — a fused
+    multiscale catalog is already 78 characters before the tile stem — so an output directory a few
+    levels deep pushed the staged path past Windows' 260-character limit and every write failed
+    with ``sqlite3_open ... unable to open database file``. The transactional write must not be the
+    thing that makes a path too long to write.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{out_path.stem}-", dir=out_path.parent))
+    staging = Path(tempfile.mkdtemp(prefix=".wv-", dir=out_path.parent))
     tmp_path = staging / out_path.name
     try:
         gdf.to_file(tmp_path)

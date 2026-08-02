@@ -48,6 +48,11 @@ existing.
 | `scripts/benchmark_driver.py` | repeated, hashed inference benchmark; `--summarise` rebuilds the table from raw JSON |
 | `scripts/run_multiscale_arms.py` | full-scene multiscale, one subprocess per arm, ledger-backed resume |
 | `scripts/review/measure_contract_impact.py` | measures the blast radius of X-01/X-03/G1-06 |
+| `scripts/review/measure_batch_neutrality.py` | batch-1 vs batch-8 geometry, and `compare_catalogs`, the template for every old/new catalog diff |
+| `scripts/review/measure_operating_point.py` | the conf 0.10 vs 0.25 decision, through the full production path against human labels |
+| `scripts/review/profile_production_path.py` | per-stage breakdown of `predict_production`, every stage wrapped in place |
+| `scripts/review/probe_gpu_mask_downscale.py` | evidence that the device-side mask downscale is bit-identical |
+| `scripts/review/audit_headline_numbers.py` | re-derives headline numbers from saved tables and fails on disagreement |
 | `scripts/build_obb_labels.py` | Solution H OBB labels with an audited edge policy |
 
 **Gitignored** (`data/`) — inputs and outputs only: rasters, weights, catalogs, benchmark records,

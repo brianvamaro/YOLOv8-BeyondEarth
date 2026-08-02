@@ -202,6 +202,37 @@ def edge_priority(score, is_within_slice):
     return np.where(within, 0.5 + 0.5 * score, 0.5 * score)
 
 
+def _downscale_masks_on_device(masks, slice_size, downscale_pred):
+    """Do the ``INTER_AREA`` downscale on the GPU, before the masks are moved to the host.
+
+    Ultralytics returns ``masks.data`` at ``imgsz`` (1024), not at ``slice_size`` — G3-10's
+    discovery — so the production path used to move a **4 MiB float32 mask per detection** across
+    PCIe and then shrink it on the CPU. Profiling the production entry point put those two stages
+    at a third of the whole run (slice 256: ``cv2.resize`` 19.4% + device-to-host 14.2%, 18.1 GiB
+    moved for a single 2048 px crop; slice 512: 15.0% + 19.4%). Pooling first makes the transfer
+    16x (slice 256) or 4x (slice 512) smaller and removes the CPU resize entirely.
+
+    **This is bit-identical, not merely close.** The masks are already thresholded to exactly
+    {0.0, 1.0}, and for an exact integer ratio ``INTER_AREA`` is a plain box mean, so every output
+    value is ``n / k**2`` with ``k`` a power of two — a dyadic rational that float32 holds exactly
+    under either implementation. Verified on 4,611 real detections across both arms: zero value
+    differences and every traced polygon equal
+    (``scripts/review/probe_gpu_mask_downscale.py``, ``tests/test_gpu_mask_downscale.py``).
+
+    Anything outside that guarantee falls through untouched and is downscaled on the CPU exactly
+    as before: a non-integer ratio, a mask already at or below ``slice_size``, a non-square mask,
+    or ``downscale_pred=False`` (which keeps masks in the model frame on purpose, see G3-10).
+    """
+    if not downscale_pred or masks.ndim != 3:
+        return masks
+    height, width = masks.shape[-2], masks.shape[-1]
+    if height != width or height <= slice_size or height % slice_size:
+        return masks
+    factor = height // slice_size
+    return torch.nn.functional.avg_pool2d(masks.unsqueeze(1), kernel_size=factor,
+                                          stride=factor).squeeze(1)
+
+
 def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, slice_size,
                   min_area_threshold, downscale_pred, contour_method="skimage", executor=None,
                   remask_fn=None, image=None, coord_scale=1.0, stats=None, remask_tag=None):
@@ -264,7 +295,9 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         # ``bool_mask[bool_mask>=0.5]=1; [<0.5]=0``) before moving to CPU. Kept as float32 {0.,1.}
         # so the later INTER_AREA downscale yields the same fractional mask the contour extractor
         # sees -> geometry-neutral, just without two full-array writes per detection.
-        out = (prediction_result.masks.data[conf_mask] >= 0.5).to(torch.float32).cpu().detach().numpy()
+        hard = (prediction_result.masks.data[conf_mask] >= 0.5).to(torch.float32)
+        hard = _downscale_masks_on_device(hard, slice_size, downscale_pred)
+        out = hard.cpu().detach().numpy()
         if len(out) != len(boxes_np):
             raise ValueError(f"model returned {len(out)} masks for {len(boxes_np)} boxes "
                              "— box/mask cardinality must match")
@@ -326,10 +359,14 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
         # Supported pixels at the level the tracer uses; min_area_threshold=None (the documented
         # default) means no area gate. Counting `== 1` instead — as this did before G1-06 — is
         # equivalent for a hard mask but discards downscaled boulders that have ample support at
-        # 0.5 yet few *fully covered* pixels. That only arises when the prototype mask is LARGER
-        # than slice_size; every current production config upscales instead (prototype 256 from
-        # imgsz 1024 -> slice 256 or 512), and INTER_AREA upscaling emits pure {0, 1}. So this
-        # changes nothing today and everything if inference_size is ever raised past 4x slice_size.
+        # 0.5 yet few *fully covered* pixels. That arises whenever the returned mask is LARGER than
+        # slice_size, which is every production config: ultralytics returns `masks.data` at `imgsz`
+        # (1024), not at the prototype size, so `downscale_pred=True` is a genuine 4x (slice 256)
+        # or 2x (slice 512) downscale and 100% of production masks are fractional. Measured on the
+        # NAC dev crop: the gate change rescues +0.58% of detections at the production 6 px
+        # threshold, all tiny (median 3.19 native px). An earlier version of this comment claimed
+        # the prototype was upscaled and the change was inert — that was wrong; see the correction
+        # in `docs/code_review_backlog.md`.
         area = mask_support_area(bool_mask)
         if area <= (min_area_threshold if min_area_threshold is not None else 0):
             return _drop("below_area_gate")
@@ -896,6 +933,35 @@ def _check_in_memory_budget(in_raster, scales, max_px, allow):
             "if you have the RAM and mean it.")
 
 
+#: Per-arm inference parameters the multiscale wrapper owns itself — the ladder decides the slicing
+#: and the wrapper decides what gets written, so these may not be inherited from the single-scale
+#: preset even though it defines them.
+_WRAPPER_OWNED_ARM_KEYS = ("slice_size", "sr_factor", "save_prenms", "save_bbox", "output_format",
+                           "postprocess")
+
+
+def _production_arm_kwargs(preset):
+    """Per-arm inference configuration for a named multiscale preset.
+
+    ``GOAL3_PRODUCTION`` documents that "the per-scale arms inherit everything in
+    ``GOAL1_PRODUCTION`` except the slicing keys, which the ladder owns", and
+    ``get_multiscale_prediction`` documents that a no-argument call runs the production
+    configuration. Neither was true: only the *fusion* keys came from the preset and the per-arm
+    call fell through to ``get_sliced_prediction``'s generic defaults — ``downscale_pred=False``,
+    no area gate, NMS 0.5 — so a no-argument production call fused arms that were not the
+    production arms. G3-01 fixed this one level down and the wrapper was left behind.
+
+    It is also why the gap surfaced as a performance mystery rather than a numerical one:
+    ``downscale_pred=False`` keeps every mask at ``imgsz`` (1024) through ``_mask_bounds`` and the
+    tracer instead of ``slice_size``, which is 16x the array per detection at slice 256.
+    """
+    if preset is None:
+        return {}
+    single = presets.resolve("goal1_production")
+    return {k: v for k, v in single.items()
+            if not k.startswith("_") and k not in _WRAPPER_OWNED_ARM_KEYS}
+
+
 def get_multiscale_prediction(in_raster,
                               detection_model=None,
                               scales=_UNSET,
@@ -992,13 +1058,15 @@ def get_multiscale_prediction(in_raster,
     _check_in_memory_budget(in_raster, scales, max_in_memory_px, allow_in_memory)
 
     per_scale = {}
+    arm_kwargs = {**_production_arm_kwargs(preset), **kwargs}
+    resolved_config["per_scale_kwargs"] = dict(arm_kwargs)
     for key in scales:
         slice_size, sr_factor = (key if isinstance(key, (tuple, list)) else (key, 1))
         _, gdf_nms = get_sliced_prediction(
             in_raster, detection_model, slice_size=int(slice_size), sr_factor=int(sr_factor),
             output_dir=output_dir, output_format=output_format,
             save_prenms=False, save_bbox=False, save_nms=False, postprocess=True,
-            on_conflict=on_conflict, **kwargs)
+            on_conflict=on_conflict, **arm_kwargs)
         per_scale[key] = gdf_nms
 
     thr = DEFAULT_CLUSTER_THR if fuse_cfg["cluster_thr"] is None else fuse_cfg["cluster_thr"]

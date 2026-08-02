@@ -7,6 +7,7 @@ import pytest
 import shapely
 
 from YOLOv8BeyondEarth import predict as P
+from YOLOv8BeyondEarth import presets
 
 
 def test_sr_factor_validation():
@@ -100,6 +101,75 @@ def test_no_argument_call_is_the_production_preset(tmp_path, monkeypatch):
     assert record["config"]["fusion"]["engulf_thr"] == 0.7
     assert record["config"]["fusion"]["cross_arm_only"] is True
     assert record["same_arm_suppressions"] == 0               # G3-02 production invariant
+
+
+def test_no_argument_call_runs_production_arms_not_generic_defaults(tmp_path, monkeypatch):
+    """The other half of G3-01: the *arms* must be production too, not just the fusion rule.
+
+    ``GOAL3_PRODUCTION`` says "the per-scale arms inherit everything in ``GOAL1_PRODUCTION``
+    except the slicing keys", but the wrapper passed only the caller's ``**kwargs`` through, so a
+    no-argument production call ran every arm at ``get_sliced_prediction``'s generic defaults —
+    ``downscale_pred=False``, no area gate, NMS 0.5 — and fused arms that were not the production
+    arms. Found while preparing the re-run, as a 50x slowdown: ``downscale_pred=False`` keeps
+    masks at ``imgsz`` through the tracer.
+    """
+    seen = []
+
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        seen.append(kwargs)
+        g = _fake_scale_outputs(slice_size, sr_factor)
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+    P.get_multiscale_prediction(tmp_path / "scene.tif", None, output_dir=tmp_path)
+
+    assert len(seen) == 3
+    for kwargs in seen:
+        for key in ("confidence_threshold", "inference_size", "min_area_threshold",
+                    "downscale_pred", "postprocess_match_threshold", "contour_method",
+                    "batch_size", "overlap_height_ratio", "overlap_width_ratio"):
+            assert kwargs[key] == presets.GOAL1_PRODUCTION[key], key
+    # the ladder owns slicing and the wrapper owns what is written; neither may be inherited
+    for key in ("slice_size", "sr_factor", "save_prenms", "save_bbox", "output_format",
+                "postprocess"):
+        assert key not in seen[0], key
+
+
+def test_explicit_arm_kwargs_still_win_over_the_preset(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        seen.append(kwargs)
+        g = _fake_scale_outputs(slice_size, sr_factor)
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+    P.get_multiscale_prediction(tmp_path / "scene.tif", None, output_dir=tmp_path,
+                                confidence_threshold=0.25, min_area_threshold=99)
+    assert all(k["confidence_threshold"] == 0.25 and k["min_area_threshold"] == 99 for k in seen)
+    assert all(k["downscale_pred"] is True for k in seen)      # untouched keys still inherited
+
+
+def test_generic_preset_none_inherits_nothing(tmp_path, monkeypatch):
+    """``preset=None`` is the documented escape hatch for a generic run: it must stay generic."""
+    seen = []
+
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        seen.append(kwargs)
+        g = _fake_scale_outputs(slice_size, sr_factor)
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+    P.get_multiscale_prediction(tmp_path / "scene.tif", None, output_dir=tmp_path, preset=None,
+                                scales=(512, 256), rule="scale_aware")
+    inherited = set(presets.GOAL1_PRODUCTION) - set(P._WRAPPER_OWNED_ARM_KEYS)
+    assert seen and all(not (inherited & set(k)) for k in seen)
 
 
 def test_empty_layer_writers_skip(tmp_path):

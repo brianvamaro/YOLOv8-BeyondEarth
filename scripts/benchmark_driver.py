@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,10 +40,40 @@ from YOLOv8BeyondEarth import presets                      # noqa: E402
 from YOLOv8BeyondEarth.runstate import file_digest         # noqa: E402
 
 
+def power_state():
+    """AC or battery, and the GPU's current clock and power draw.
+
+    Not cosmetic on this machine. A run left on battery parks the GPU: measured 180 MHz / 8 W with
+    the process apparently alive and no output for 80 minutes, and 660 MHz / 14 W while nominally
+    at 100% utilisation — 40x slower than the same work on AC. G1-05 already said the power/standby
+    state belongs in the record; without it a battery-throttled timing is indistinguishable from a
+    slow code path, which is exactly the confusion it caused while preparing the re-run.
+    """
+    state = {}
+    try:
+        import psutil
+        battery = psutil.sensors_battery()
+        if battery is not None:
+            state["on_ac_power"] = bool(battery.power_plugged)
+            state["battery_percent"] = round(battery.percent, 1)
+        else:
+            state["on_ac_power"] = True                      # desktop: no battery to be on
+    except Exception:
+        pass
+    try:
+        query = "clocks.sm,power.draw,power.limit,utilization.gpu"
+        out = subprocess.run(["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=10, check=True).stdout
+        state["nvidia_smi"] = out.strip().splitlines()[0]
+    except Exception:
+        pass
+    return state
+
+
 def hardware():
     """What the timings are timings *of*. Absent from the original tables."""
     info = {"platform": platform.platform(), "processor": platform.processor(),
-            "python": platform.python_version()}
+            "python": platform.python_version(), "power": power_state()}
     try:
         import psutil
         info["cpu_count_physical"] = psutil.cpu_count(logical=False)
@@ -73,8 +104,13 @@ def peak_gpu_gb():
     return None
 
 
-def run_once(raster, weights, out_dir, preset, overrides, rep, device="cuda:0"):
-    """One repetition. Returns the record; the caller persists it."""
+def run_once(raster, weights, out_dir, preset, overrides, rep, device="cuda:0", n_workers=None):
+    """One repetition. Returns the record; the caller persists it.
+
+    ``n_workers`` is not a preset key — it changes how fast the result is produced, never what the
+    result is — but it does change the timing, so it is recorded and kept out of ``config_hash``
+    and reported as its own column.
+    """
     from sahi import AutoDetectionModel
     from YOLOv8BeyondEarth.predict import predict_production
 
@@ -95,7 +131,7 @@ def run_once(raster, weights, out_dir, preset, overrides, rep, device="cuda:0"):
 
     t0 = time.perf_counter()
     gdf, gdf_nms = predict_production(raster, model, out_dir, preset=preset,
-                                      on_conflict="overwrite", **overrides)
+                                      on_conflict="overwrite", n_workers=n_workers, **overrides)
     total_s = time.perf_counter() - t0
 
     n_kept = int(len(gdf_nms)) if gdf_nms is not None else int(len(gdf))
@@ -103,6 +139,7 @@ def run_once(raster, weights, out_dir, preset, overrides, rep, device="cuda:0"):
         "written_utc": datetime.now(timezone.utc).isoformat(),
         "repetition": rep,
         "preset": preset,
+        "n_workers": n_workers,
         "config": {k: v for k, v in config.items() if not k.startswith("_")},
         "config_hash": presets.config_hash(config),
         "inputs": {"raster": presets.file_identity(raster),
@@ -133,6 +170,8 @@ def summarise(record_dir):
                      "code_sha": (r["code"].get("git_sha") or "")[:8],
                      "dirty": r["code"].get("git_dirty"),
                      "gpu": r["hardware"].get("gpu", "cpu"),
+                     "on_ac": r["hardware"].get("power", {}).get("on_ac_power"),
+                     "n_workers": r.get("n_workers"),
                      "repetition": r["repetition"],
                      "seconds": r["timings_s"]["inference_total"],
                      "n_detections": r["outputs"]["n_detections"],
@@ -140,7 +179,10 @@ def summarise(record_dir):
     if not rows:
         raise FileNotFoundError(f"no bench-*.json records in {record_dir}")
     df = pd.DataFrame(rows)
-    grouped = df.groupby(["config_hash", "preset", "raster", "code_sha", "gpu"], as_index=False)
+    df["n_workers"] = df["n_workers"].fillna(-1).astype(int)     # -1 == the auto default
+    # a battery-throttled repetition is not the same measurement as an AC one; never pool them
+    grouped = df.groupby(["config_hash", "preset", "raster", "code_sha", "gpu", "on_ac",
+                          "n_workers"], as_index=False, dropna=False)
     out = grouped.agg(n_reps=("repetition", "count"),
                       median_s=("seconds", "median"),
                       min_s=("seconds", "min"), max_s=("seconds", "max"),
@@ -159,6 +201,8 @@ def main():
     ap.add_argument("--preset", default="goal1_production")
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--n-workers", type=int, default=None,
+                    help="mask->polygon thread pool size; omit for the production default")
     ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE",
                     help="preset overrides, e.g. --set slice_size=256 contour_method=cv2")
     ap.add_argument("--summarise", metavar="DIR", default=None)
@@ -185,8 +229,9 @@ def main():
     run_dir = out_dir / "results"
     for rep in range(args.repeats):
         record = run_once(args.raster, args.weights, run_dir, args.preset, overrides, rep,
-                          device=args.device)
-        stamp = f"{record['config_hash']}-{Path(args.raster).stem}-rep{rep}"
+                          device=args.device, n_workers=args.n_workers)
+        stamp = (f"{record['config_hash']}-{Path(args.raster).stem}"
+                 f"-w{args.n_workers if args.n_workers is not None else 'auto'}-rep{rep}")
         (out_dir / f"bench-{stamp}.json").write_text(json.dumps(record, indent=2, default=str))
         print(f"rep {rep}: {record['timings_s']['inference_total']:.1f} s, "
               f"{record['outputs']['n_after_nms']} boulders")

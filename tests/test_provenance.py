@@ -7,8 +7,11 @@ concurrent run through a shared temporary path.
 """
 import json
 import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import geopandas as gpd
 import numpy as np
@@ -18,6 +21,7 @@ import shapely
 import torch
 from rasterio.transform import from_origin
 
+from YOLOv8BeyondEarth import polygon
 from YOLOv8BeyondEarth import predict as P
 from YOLOv8BeyondEarth import presets
 from YOLOv8BeyondEarth.polygon import VectorWriteError, outlines_to_shp, write_vector
@@ -73,6 +77,35 @@ def test_write_vector_validates_and_promotes(tmp_path, gdf):
     write_vector(gdf, out)
     assert out.exists() and len(gpd.read_file(out)) == 2
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")], "staging left behind"
+
+
+def test_staging_does_not_lengthen_the_path_by_the_layer_name(tmp_path, gdf):
+    """Staging must add a bounded prefix, not a second copy of the (long) layer name.
+
+    It used to be ``mkdtemp(prefix=f".{out_path.stem}-")``, which put the stem in the path twice.
+    A fused multiscale catalog name is 78 characters before the tile stem, so an output directory
+    a few levels deep pushed the staged path past Windows' 260-character MAX_PATH and *every*
+    write failed with a bare ``sqlite3_open ... unable to open database file``. Caught while
+    preparing the re-run, on a real run that produced zero catalogs.
+    """
+    name = ("M127090695RE_00821_image-predictions-fused-bands-engulf70-512-256-256sr2-mask.gpkg")
+    deep = tmp_path / "data" / "review" / "operating_point_validation" / "preds" / "conf010"
+    deep.mkdir(parents=True)
+    staged = []
+
+    real_mkdtemp = tempfile.mkdtemp
+
+    def record(*a, **k):
+        path = real_mkdtemp(*a, **k)
+        staged.append(Path(path))
+        return path
+
+    with mock.patch.object(polygon.tempfile, "mkdtemp", record):
+        out = write_vector(gdf, deep / name)
+    assert out.exists()
+    # the staged file may exceed the destination only by the short staging directory component
+    overhead = len(str(staged[0] / name)) - len(str(deep / name))
+    assert overhead <= 24, f"staging added {overhead} characters to the path"
 
 
 def test_failed_write_leaves_no_artifact(tmp_path, gdf, monkeypatch):
