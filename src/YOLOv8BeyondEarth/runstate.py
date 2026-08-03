@@ -69,12 +69,41 @@ class StageLedger:
         entries = self.entries(name)
         return entries[-1] if entries else None
 
+    def dependency_value(self, name, key):
+        """The value a *downstream* stage should record for its dependency on ``name``.
+
+        A bare ``stage_key`` is not enough. It hashes the *configuration* — code SHA, inputs,
+        parameters — so re-executing the same stage with the same config yields the same key, and a
+        downstream stage keyed on it alone cannot tell that its input was regenerated. That is not
+        academic: a smoke run of ``scripts/run_multiscale_arms.py`` deleted one arm's layer, the arm
+        correctly re-ran, and the fuse was skipped as "up to date" — leaving a fused catalog
+        descending from an arm layer that no longer existed, exactly the mixture G3-08 promised to
+        prevent (found 2026-08-03).
+
+        So the dependency value is the stage key **plus the artifact digests its own ledger entry
+        recorded**. Those digests are already on disk in the ledger, so this costs no file reads.
+        Any re-execution that rewrites an artifact changes the value and invalidates downstream;
+        a stage that was skipped keeps its value and downstream stays valid.
+
+        Note it is deliberately conservative. GeoPackage writes are *not* byte-deterministic (the
+        same GeoDataFrame written twice differs, since the format stamps its own metadata), so an
+        arm re-run invalidates the fuse even when the geometry is identical. Re-fusing costs ~112 s
+        against arms that cost hours, and the failure it prevents is silent, so erring this way is
+        the right direction.
+        """
+        rec = self.latest(name)
+        if rec is None:
+            return key
+        digests = sorted(d for d in (rec.get("artifacts") or {}).values() if d)
+        return "+".join([key] + [d[:16] for d in digests])
+
     def status(self, name, key, depends_on=()):
         """Why this stage does or does not need to run.
 
-        Returns ``(state, detail)``. ``depends_on`` are upstream stage keys; if any has changed
-        since this stage last ran, the stage is ``stale`` — the dependency-aware invalidation the
-        review asked for, so re-running one arm re-fuses rather than silently reusing the old fuse.
+        Returns ``(state, detail)``. ``depends_on`` maps upstream stage names to the values
+        :meth:`dependency_value` produces for them; if any has changed since this stage last ran,
+        the stage is ``stale`` — the dependency-aware invalidation the review asked for, so
+        re-running one arm re-fuses rather than silently reusing the old fuse.
         """
         rec = self.latest(name)
         if rec is None:

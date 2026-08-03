@@ -96,9 +96,13 @@ def orchestrate(args):
         with ledger.stage(f"arm:{arm}", key, artifacts=[layer], command=cmd):
             subprocess.run(cmd, check=True)
 
-    fuse_key = stage_key(arms=sorted(arm_keys.values()), preset="goal3_production")
+    # Depend on each arm's key *and* the artifact digest its ledger entry recorded, not on the key
+    # alone: the key is a hash of the configuration, so an arm re-executed with unchanged config
+    # keeps it and the fuse would skip while its input had been regenerated underneath it.
+    arm_deps = {arm: ledger.dependency_value(f"arm:{arm}", key) for arm, key in arm_keys.items()}
+    fuse_key = stage_key(arms=sorted(arm_deps.values()), preset="goal3_production")
     fused_path = out_dir / f"{Path(args.raster).stem}-predictions-fused-production-mask.gpkg"
-    state, detail = ledger.status("fuse", fuse_key, depends_on=arm_keys)
+    state, detail = ledger.status("fuse", fuse_key, depends_on=arm_deps)
     if state == COMPLETE:
         print(f"[skip] fuse: {detail}")
         return
@@ -109,7 +113,7 @@ def orchestrate(args):
     from YOLOv8BeyondEarth.fusion import fuse_predictions
     from YOLOv8BeyondEarth.polygon import outlines_to_shp
 
-    with ledger.stage("fuse", fuse_key, artifacts=[fused_path], depends_on=arm_keys):
+    with ledger.stage("fuse", fuse_key, artifacts=[fused_path], depends_on=arm_deps):
         per_scale = {parse_arm(a): gpd.read_file(p) for a, p in arm_layers.items()}
         cfg = presets.GOAL3_PRODUCTION
         fused, audit = fuse_predictions(

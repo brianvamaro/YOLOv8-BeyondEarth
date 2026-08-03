@@ -115,6 +115,44 @@ def test_upstream_change_invalidates_the_downstream_stage(ledger, tmp_path):
     assert state == STALE and "upstream" in detail
 
 
+def test_reexecuting_an_arm_with_unchanged_config_still_invalidates_the_fuse(ledger, tmp_path):
+    """The case the key-only dependency missed, and the one a resumable campaign actually hits.
+
+    ``stage_key`` hashes the *configuration*, so an arm re-run with the same code and inputs keeps
+    its key. Keying the fuse on that alone let it skip while its input had been regenerated
+    underneath it. Found for real on 2026-08-03: a smoke run of ``run_multiscale_arms.py`` deleted
+    one arm's layer, the arm correctly re-ran, and the fuse reported "up to date" — leaving a fused
+    catalog descending from an arm layer that no longer existed on disk.
+    """
+    arm = _artifact(tmp_path, "arm.gpkg", body=b"first")
+    fused = _artifact(tmp_path, "fused.gpkg")
+    with ledger.stage("arm:256", "armkey", artifacts=[arm]):
+        pass
+    dep = ledger.dependency_value("arm:256", "armkey")
+    with ledger.stage("fuse", "fusekey", artifacts=[fused], depends_on={"256": dep}):
+        pass
+    assert ledger.is_complete("fuse", "fusekey", depends_on={"256": dep})
+
+    # the arm re-runs with the SAME key and writes different bytes (gpkg is not byte-deterministic)
+    arm.write_bytes(b"second")
+    with ledger.stage("arm:256", "armkey", artifacts=[arm]):
+        pass
+    dep2 = ledger.dependency_value("arm:256", "armkey")
+    assert dep2 != dep, "the dependency value must change when the arm is re-executed"
+    state, detail = ledger.status("fuse", "fusekey", depends_on={"256": dep2})
+    assert state == STALE and "upstream" in detail
+
+
+def test_dependency_value_is_stable_when_the_arm_is_skipped(ledger, tmp_path):
+    """The other half: an untouched arm must not make the fuse re-run every time."""
+    arm = _artifact(tmp_path, "arm.gpkg", body=b"same")
+    with ledger.stage("arm:256", "armkey", artifacts=[arm]):
+        pass
+    first = ledger.dependency_value("arm:256", "armkey")
+    assert ledger.dependency_value("arm:256", "armkey") == first
+    assert first.startswith("armkey") and len(first) > len("armkey")
+
+
 def test_history_is_appended_never_overwritten(ledger, tmp_path):
     art = _artifact(tmp_path)
     for i in range(3):
