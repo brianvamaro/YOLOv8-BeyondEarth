@@ -149,7 +149,10 @@ def run_once(raster, weights, out_dir, preset, overrides, rep, device="cuda:0", 
         "timings_s": {"model_load": round(load_s, 3), "inference_total": round(total_s, 3)},
         "peak_gpu_gb": peak_gpu_gb(),
         "outputs": {"n_detections": int(len(gdf)), "n_after_nms": n_kept,
-                    "discarded": dict(gdf.attrs.get("discarded", {}))},
+                    "discarded": dict(gdf.attrs.get("discarded", {})),
+                    # X-06: a benchmark run whose slices hit max_det measured a truncated workload,
+                    # so the timing is not comparable with one that did not.
+                    "truncation": dict(gdf.attrs.get("truncation", {}))},
         "validated": bool(len(gdf) >= 0),
     }
 
