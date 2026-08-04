@@ -46,6 +46,26 @@ def arm_layer_path(out_dir, raster, slice_size, sr_factor, conf, imgsz, overlap,
     return Path(out_dir) / f"{stem}-downscaled-mask-nms{ext}"
 
 
+def effective_max_det(args):
+    """The per-slice detection cap this run should use (review item X-06).
+
+    ``presets.GOAL1_PRODUCTION["max_det"] = 600`` is sized for the **256 production arm** on the
+    8 GiB laptop GPU: it clears that arm's measured worst slice (370 at conf 0.10) with headroom, and
+    costs almost nothing because ``max_det`` is a ceiling rather than an allocation.
+
+    It deliberately does **not** clear the **512 arm**, which returns up to **1013** detections on the
+    densest HiRISE slices. That arm cannot be run uncapped on this card at all — 10.5 GiB peak at
+    *batch 1*, and Windows' WDDM driver spills into host memory instead of raising, so the failure
+    would be a silent throughput collapse. Per the maintainer's 2026-08-04 decision the 512 arm is
+    **deferred to Sherlock**, where the VRAM wall does not exist and no geometry has to change; this
+    flag is how that run raises the cap without editing the preset the laptop depends on.
+
+    ``--max-det`` therefore overrides, and whatever it resolves to goes into the arm's stage key, so
+    a Sherlock arm and a laptop arm can never satisfy each other's ledger entry.
+    """
+    return int(args.max_det) if args.max_det is not None else presets.GOAL1_PRODUCTION["max_det"]
+
+
 def run_one_arm(args):
     """The child process: one arm, one layer, then exit so the memory is actually returned."""
     from sahi import AutoDetectionModel
@@ -57,7 +77,8 @@ def run_one_arm(args):
         image_size=args.inference_size, confidence_threshold=args.conf)
     cfg = {k: v for k, v in presets.GOAL1_PRODUCTION.items()
            if k not in ("slice_size", "sr_factor", "confidence_threshold", "inference_size",
-                        "save_bbox", "save_prenms", "output_format")}
+                        "save_bbox", "save_prenms", "output_format", "max_det")}
+    cfg["max_det"] = effective_max_det(args)
     gdf, gdf_nms = get_sliced_prediction(
         args.raster, model, confidence_threshold=args.conf, output_dir=args.out_dir,
         slice_size=slice_size, sr_factor=sr_factor, inference_size=args.inference_size,
@@ -86,7 +107,7 @@ def orchestrate(args):
                         slice_size=slice_size, sr_factor=sr_factor, conf=args.conf,
                         imgsz=args.inference_size, preset="goal1_production",
                         preset_version=presets.PRESET_VERSION,
-                        max_det=presets.GOAL1_PRODUCTION["max_det"])
+                        max_det=effective_max_det(args))
         layer = arm_layer_path(out_dir, args.raster, slice_size, sr_factor, args.conf,
                                args.inference_size, presets.GOAL1_PRODUCTION["overlap_height_ratio"])
         arm_keys[arm], arm_layers[arm] = key, layer
@@ -100,7 +121,8 @@ def orchestrate(args):
                "--raster", str(args.raster), "--weights", str(args.weights),
                "--out-dir", str(out_dir), "--conf", str(args.conf),
                "--inference-size", str(args.inference_size), "--device", args.device,
-               "--on-conflict", "overwrite"]
+               "--max-det", str(effective_max_det(args)),
+               "--on-max-det", args.on_max_det, "--on-conflict", "overwrite"]
         with ledger.stage(f"arm:{arm}", key, artifacts=[layer], command=cmd):
             subprocess.run(cmd, check=True)
 
@@ -154,6 +176,11 @@ def main():
     ap.add_argument("--on-max-det", default="error", choices=("error", "warn"),
                     help="'error' fails in the first minutes of an arm rather than writing a "
                          "silently truncated catalog (review item X-06)")
+    ap.add_argument("--max-det", type=int, default=None,
+                    help="per-slice detection cap; defaults to GOAL1_PRODUCTION's 600, which is "
+                         "sized for the 256 arm on an 8 GiB card. The 512 arm needs ~1100 and is "
+                         "deferred to a larger GPU — raise it there with this flag, which also "
+                         "enters the stage key so the two runs cannot satisfy each other's ledger.")
     args = ap.parse_args()
     run_one_arm(args) if args.arm else orchestrate(args)
 
