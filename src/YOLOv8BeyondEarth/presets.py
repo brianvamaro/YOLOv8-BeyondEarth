@@ -29,7 +29,10 @@ import numpy as np
 
 #: Bumped when a preset's *values* change, so two results from the same preset name are only
 #: comparable if they also share this number.
-PRESET_VERSION = 1
+#:   1  original.
+#:   2  (2026-08-04, review item X-06): ``max_det`` added to :data:`GOAL1_PRODUCTION`. It was
+#:      previously ultralytics' silent 300, which was **measured truncating real slices**.
+PRESET_VERSION = 2
 
 #: Files larger than this are fingerprinted by (size, mtime) rather than hashed in full.
 MAX_HASH_BYTES = 4 * 1024 ** 3
@@ -49,6 +52,21 @@ GOAL1_PRODUCTION = {
     "postprocess_match_threshold": 0.2,
     "postprocess_class_agnostic": False,
     "batch_size": 8,
+    # Detections ultralytics returns per slice (review item X-06). Ultralytics' silent 300 was
+    # measured *engaging on real terrain* (`scripts/review/probe_max_det.py`, HiRISE, 2026-08-04):
+    # on the 16 densest slices of the production 256 arm the model returns a max of 370 / mean 317
+    # at conf 0.10, so 300 truncated 11 of those 16. 600 clears that with 62% headroom.
+    #
+    # Raising it is close to free in memory: `max_det` is a ceiling on N, not an allocation, so it
+    # costs nothing until the detections actually exist. Measured on the 256 arm at batch 8, going
+    # from 300 to uncapped moved peak allocation only 7406 -> 7754 MiB.
+    #
+    # It does NOT clear the **512** arm, which returns up to 1013 per slice at conf 0.10 — and that
+    # arm cannot be run uncapped on an 8 GiB card at all (10.5 GiB peak at *batch 1* on its densest
+    # slices, spilling into WDDM shared host memory rather than raising). That is an open decision,
+    # not an oversight; `on_max_det="error"` makes a 512-arm run fail loudly instead of silently
+    # truncating. See `docs/code_review_backlog.md` X-06.
+    "max_det": 600,
     "contour_method": "skimage",
     "save_bbox": False,
     "save_prenms": False,

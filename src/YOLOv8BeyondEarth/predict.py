@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -36,7 +37,30 @@ from shptools_BOULDERING import shp
 #      slice-truncated detections had their confidence overwritten with the literal 0.10.
 #   2  (2026-07-30, review item X-01/X-02): the requested threshold is passed to the model, and
 #      `score` is the detector's real confidence; truncation priority moved to `nms_prio`.
-INFERENCE_CONTRACT_VERSION = 2
+#   3  (2026-08-04, review item X-06): `max_det` is passed explicitly and recorded. Before this,
+#      ultralytics' own 300 applied to every slice, silently deleting the faintest detections in
+#      the densest ones — measured engaging on real HiRISE terrain, see `ULTRALYTICS_DEFAULT_MAX_DET`.
+INFERENCE_CONTRACT_VERSION = 3
+
+#: Ultralytics' ``cfg/default.yaml`` value, which applied to every slice while this pipeline never
+#: passed ``max_det`` (review item X-06). It is applied *after* NMS and keeps the top N **by
+#: confidence**, so what it discards is the faintest detections in the densest slices — the
+#: SFD-critical population, exactly where completeness matters most.
+#:
+#: **Measured engaging, not merely suspected** (``scripts/review/probe_max_det.py``, 2026-08-04): on
+#: the densest HiRISE 512-arm terrain the model returns a mean of ~606 and a max of 673 detections
+#: per slice at conf 0.10, so a cap of 300 was throwing away roughly half of what was found, on
+#: every one of those slices. Kept as this module's *function* default so an un-parameterised call
+#: reproduces historical behaviour exactly; the production value lives in
+#: :data:`presets.GOAL1_PRODUCTION`.
+ULTRALYTICS_DEFAULT_MAX_DET = 300
+
+#: Fraction of ``max_det`` above which a slice is recorded as *near* the cap. A slice at the cap
+#: proves truncation; a slice just below it means the headroom is thin — and it is also where a
+#: slice that truncated and then lost a detection or two to ultralytics' empty-mask filter
+#: (``masks.amax() > 0`` in ``SegmentationPredictor.construct_result``) shows up instead of at the
+#: cap exactly. That filter is why the at-cap count is a *lower* bound on binding slices.
+_NEAR_MAX_DET_FRACTION = 0.9
 
 # Column order of the per-slice detection frame. `score` is the detector's real confidence;
 # `nms_prio` is the suppression ordering key (see `edge_priority`); `mask_src` names which
@@ -55,12 +79,17 @@ logger = logging.getLogger(__name__)
 _DISCARD_WARN_FRACTION = 0.01
 
 
-def _report_discards(gdf, discarded, n_kept):
+def _report_discards(gdf, discarded, n_kept, truncation=None):
     """Attach the per-reason discard tally to the result and warn if failures look systematic.
 
     Detections vanishing one at a time inside a broad ``except Exception`` is how a broken
     re-masker or tracer reads as "a quiet scene" (review item X-05). Intentional drops (the area
     gate, interior slice truncation, exact duplicates) are recorded but never warned about.
+
+    ``truncation`` is the separate, **slice-level** channel X-06 added: whole groups of detections
+    the model never returned, so they cannot appear in a per-detection tally at all. It is kept in
+    its own ``attrs`` key precisely because its values count *slices*, not detections — summing it
+    into the discard denominator above would make the "unexpected fraction" arithmetic meaningless.
     """
     tally = {k: v for k, v in discarded.items() if v}
     gdf.attrs["discarded"] = tally
@@ -77,12 +106,107 @@ def _report_discards(gdf, discarded, n_kept):
     if tally:
         logger.info("discarded detections by reason: %s", tally)
 
+    trunc = {k: v for k, v in (truncation or {}).items() if v}
+    gdf.attrs["truncation"] = trunc
+    if trunc.get("slices_at_max_det"):
+        warnings.warn(
+            f"{trunc['slices_at_max_det']} slices returned the full max_det, so the model's "
+            "output was cut off in each of them and the faintest detections are missing from this "
+            "catalog. Raise max_det (see presets.GOAL1_PRODUCTION) and re-run; this count is a "
+            "lower bound.", RuntimeWarning, stacklevel=3)
+    if trunc.get("nms_time_limit_batches"):
+        warnings.warn(
+            f"ultralytics' NMS time limit fired on {trunc['nms_time_limit_batches']} batches, "
+            f"abandoning up to {trunc.get('slices_zeroed_after_nms_time_limit', 0)} slices that "
+            "therefore returned zero detections.", RuntimeWarning, stacklevel=3)
+    if trunc:
+        logger.info("slice-level truncation events: %s", trunc)
+
+
+@contextlib.contextmanager
+def _watch_nms_time_limit():
+    """Count ultralytics' ``NMS time limit ... exceeded`` warnings (review item X-06).
+
+    ``ultralytics/utils/nms.py`` sets ``time_limit = 2.0 + 0.05 * batch_size`` (**2.4 s** at the
+    production ``batch_size=8``) and ``break``s out of its per-image loop once a batch exceeds it.
+    The images it has not reached keep their pre-allocated zero tensors, so **every remaining slice
+    in that batch returns zero detections** — a whole-slice dropout, not a thinning. It does emit
+    ``LOGGER.warning``, but across ~46,000 slices under a tqdm bar that scrolls past unread and
+    nothing structured records it, so a run cannot tell you afterwards whether it happened.
+
+    Yields a callable returning the cumulative count. Ultralytics being unimportable (the test
+    suite drives fake models) degrades to a constant zero rather than failing.
+    """
+    counter = {"n": 0}
+    try:
+        from ultralytics.utils import LOGGER as ultralytics_logger
+    except Exception:                        # no ultralytics (fake-model tests): nothing to watch
+        yield lambda: 0
+        return
+
+    class _Count(logging.Handler):
+        def emit(self, record):
+            try:
+                if "NMS time limit" in record.getMessage():
+                    counter["n"] += 1
+            except Exception:                # a logging handler must never break the run
+                pass
+
+    handler = _Count(level=logging.WARNING)
+    ultralytics_logger.addHandler(handler)
+    try:
+        yield lambda: counter["n"]
+    finally:
+        ultralytics_logger.removeHandler(handler)
+
+
+def _note_slice_truncation(results, max_det, truncation, on_max_det, first_slice, new_timeouts):
+    """Record — and by default fail fast on — the two ways a slice silently loses detections.
+
+    Called once per batch, immediately after the model returns, so a scene run learns in its first
+    minutes that the cap is too low instead of after hours of compute (the G1-07 lesson: a check
+    that only runs at write time burns the whole budget first).
+
+    ``slices_at_max_det`` is a **lower** bound. Ultralytics applies ``max_det`` inside NMS and then
+    ``SegmentationPredictor.construct_result`` drops detections whose upsampled mask is empty, so a
+    slice that truncated at N can come back with fewer than N rows. ``slices_near_max_det`` is where
+    those land, which is why both are recorded.
+    """
+    counts = [int(r.boxes.data.shape[0]) for r in results]
+    near = max(1, int(round(_NEAR_MAX_DET_FRACTION * max_det)))
+    at_cap = sum(1 for c in counts if c >= max_det)
+    if at_cap:
+        truncation["slices_at_max_det"] = truncation.get("slices_at_max_det", 0) + at_cap
+    n_near = sum(1 for c in counts if near <= c < max_det)
+    if n_near:
+        truncation["slices_near_max_det"] = truncation.get("slices_near_max_det", 0) + n_near
+    if new_timeouts:
+        truncation["nms_time_limit_batches"] = (
+            truncation.get("nms_time_limit_batches", 0) + new_timeouts)
+        # Upper bound: a slice in a timed-out batch that returns nothing may also just be empty
+        # ground. We cannot tell the two apart from outside ultralytics, so record the bound.
+        truncation["slices_zeroed_after_nms_time_limit"] = (
+            truncation.get("slices_zeroed_after_nms_time_limit", 0)
+            + sum(1 for c in counts if c == 0))
+
+    if at_cap and on_max_det == "error":
+        worst = max(counts)
+        raise RuntimeError(
+            f"{at_cap} of {len(counts)} slices in the batch starting at slice {first_slice} "
+            f"returned max_det={max_det} detections, so the model's output was truncated in each "
+            f"of them (worst {worst}). Ultralytics applies the cap after NMS and keeps the top N by "
+            "confidence, so what is missing is the faintest detections in the densest slices. "
+            "Raise max_det — but check VRAM first: masks are materialised at imgsz, so peak memory "
+            "scales with max_det x batch_size (see scripts/review/probe_max_det.py). Pass "
+            "on_max_det='warn' to accept the truncation and record it instead of failing.")
+
 
 def _validate_prediction_args(*, in_raster, detection_model, confidence_threshold, output_dir,
                               slice_size, inference_size, overlap_height_ratio,
                               overlap_width_ratio, min_area_threshold,
                               postprocess_match_threshold, batch_size, contour_method,
-                              output_format, n_workers, remask_fn, sr_factor):
+                              output_format, n_workers, remask_fn, sr_factor, max_det,
+                              on_max_det):
     """Reject every invalid argument up front, before any raster is read (review item X-05).
 
     These used to surface — if at all — as an ``AttributeError`` deep inside the batch loop, a
@@ -102,6 +226,10 @@ def _validate_prediction_args(*, in_raster, detection_model, confidence_threshol
         raise ValueError(f"inference_size must be positive, got {inference_size}")
     if int(batch_size) <= 0:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    if int(max_det) < 1:
+        raise ValueError(f"max_det must be >= 1, got {max_det}")
+    if on_max_det not in ("error", "warn"):
+        raise ValueError(f"on_max_det must be 'error' or 'warn', got {on_max_det!r}")
     if not 0.0 <= float(confidence_threshold) <= 1.0:
         raise ValueError(f"confidence_threshold must be in [0, 1], got {confidence_threshold}")
     for name, value in (("overlap_height_ratio", overlap_height_ratio),
@@ -447,7 +575,7 @@ def _result_to_df(prediction_result, detection_model, has_mask, shift_amount, sl
 
 
 def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_threshold,
-           downscale_pred, contour_method="skimage"):
+           downscale_pred, contour_method="skimage", max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """
     Single-image (single-slice) prediction. Kept for backward compatibility; the batched
     pipeline in ``get_sliced_prediction`` calls ``_result_to_df`` directly.
@@ -486,6 +614,7 @@ def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_
 
     prediction_results = detection_model.model(_to_bgr(image), imgsz=detection_model.image_size,
                                                conf=detection_model.confidence_threshold,
+                                               max_det=max_det,
                                                verbose=False, device=detection_model.device)
     return _result_to_df(prediction_results[0], detection_model, has_mask, shift_amount, slice_size,
                          min_area_threshold, downscale_pred, contour_method)
@@ -507,6 +636,8 @@ def get_sliced_prediction(in_raster,
                           postprocess_match_threshold: float = 0.5,
                           postprocess_class_agnostic: bool = False,
                           batch_size: int = 8,
+                          max_det: int = ULTRALYTICS_DEFAULT_MAX_DET,
+                          on_max_det: str = "error",
                           contour_method: str = "skimage",
                           save_bbox: bool = True,
                           save_prenms: bool = True,
@@ -556,6 +687,24 @@ def get_sliced_prediction(in_raster,
             resizing polygons back up to ``slice_size``. Defaults to ``False``.
         batch_size: int
             Number of slices per batched GPU inference call. Defaults to ``8``.
+        max_det: int
+            Maximum detections ultralytics returns **per slice**. Defaults to
+            :data:`ULTRALYTICS_DEFAULT_MAX_DET` (300), which is the value ultralytics silently
+            applied before contract version 3 — so the default is unchanged behaviour, and the
+            production value lives in :data:`presets.GOAL1_PRODUCTION` (review item X-06).
+
+            The cap is applied *after* NMS and keeps the top N **by confidence**, so it discards the
+            faintest detections in the densest slices. Raising it costs VRAM rather than NMS time:
+            ``ops.process_mask`` materialises masks at ``inference_size``, so peak memory scales
+            with ``max_det x batch_size`` (~1 MiB per detection retained at imgsz 1024, ~5 MiB
+            transient). ``max_nms`` bounds NMS's input at 30,000 independently, so the time side is
+            free. Size it with ``scripts/review/probe_max_det.py``.
+        on_max_det: str
+            What to do when a slice comes back holding exactly ``max_det`` detections, i.e. when the
+            model's output was cut off. ``"error"`` (default) raises on the first such batch, so a
+            multi-hour scene arm fails in its first minutes rather than writing a quietly truncated
+            catalog; ``"warn"`` records the count and continues. Either way the count reaches
+            ``attrs["truncation"]`` and the manifest.
         contour_method: str
             Mask->polygon extractor: ``"skimage"`` (default, bit-identical) or ``"cv2"`` (faster).
         overlap_height_ratio: float
@@ -633,6 +782,13 @@ def get_sliced_prediction(in_raster,
         the pipeline did not keep, and ``gdf.attrs["resolved_config"]`` the parameters that
         produced the result (review items X-05 and G1-01).
 
+        ``gdf.attrs["truncation"]`` holds the **slice-level** losses — detections the model never
+        returned at all, so they cannot appear in the per-detection tally (review item X-06):
+        ``slices_at_max_det`` (a lower bound, see :func:`_note_slice_truncation`),
+        ``slices_near_max_det``, ``nms_time_limit_batches`` and
+        ``slices_zeroed_after_nms_time_limit`` (an upper bound). An empty dict means the run lost
+        nothing this way, which is the acceptance condition for X-06.
+
     Raises:
         ValueError / FileNotFoundError for any invalid argument, before any work is done.
     """
@@ -643,7 +799,7 @@ def get_sliced_prediction(in_raster,
         overlap_width_ratio=overlap_width_ratio, min_area_threshold=min_area_threshold,
         postprocess_match_threshold=postprocess_match_threshold, batch_size=batch_size,
         contour_method=contour_method, output_format=output_format, n_workers=n_workers,
-        remask_fn=remask_fn, sr_factor=sr_factor)
+        remask_fn=remask_fn, sr_factor=sr_factor, max_det=max_det, on_max_det=on_max_det)
 
     if not has_mask and remask_fn is None:
         raise NotImplementedError(
@@ -655,6 +811,7 @@ def get_sliced_prediction(in_raster,
     sr_factor = int(sr_factor)
     native_slice = slice_size // sr_factor   # window on the native grid; == slice_size when sr=1
     discarded = {}                           # detection -> reason it was not kept (X-05)
+    truncation = {}                          # slice-level losses the model never returned (X-06)
     started = time.perf_counter()
 
     in_raster = Path(in_raster)
@@ -674,7 +831,7 @@ def get_sliced_prediction(in_raster,
         "postprocess_match_threshold": float(postprocess_match_threshold),
         "postprocess_class_agnostic": bool(postprocess_class_agnostic),
         "contour_method": contour_method, "output_format": output_format,
-        "batch_size": int(batch_size), "mask_tag": mask_tag,
+        "batch_size": int(batch_size), "max_det": int(max_det), "mask_tag": mask_tag,
         "remask_fn": getattr(remask_fn, "__name__", None) if remask_fn else None,
         "model_path": str(getattr(detection_model, "model_path", None)),
     }
@@ -730,32 +887,42 @@ def get_sliced_prediction(in_raster,
     try:
         # perform sliced prediction in batches (batched GPU inference instead of one slice at a
         # time). Per-slice geometry is unchanged; only the model call is grouped.
-        for start in tqdm(range(0, num_slices, batch_size), total=(num_slices + batch_size - 1) // batch_size):
-            batch_images = list(slice_images[start:start + batch_size])
-            if sr_factor > 1:
-                # Streamed SR: upscale each native slice to slice_size (SR px) just before
-                # inference — same Lanczos kernel as the whole-crop SR rasters it must be
-                # equivalent to (prep_de_crops.py). shift_amounts stay on the native grid;
-                # coord_scale below maps polygons back onto it.
-                batch_images = [cv2.resize(img, (slice_size, slice_size),
-                                           interpolation=cv2.INTER_LANCZOS4)
-                                for img in batch_images]
-            prediction_results = detection_model.model([_to_bgr(img) for img in batch_images],
-                                                       imgsz=detection_model.image_size,
-                                                       conf=detection_model.confidence_threshold,
-                                                       verbose=False, device=detection_model.device)
-            if len(prediction_results) != len(batch_images):
-                raise ValueError(f"model returned {len(prediction_results)} results for "
-                                 f"{len(batch_images)} slices — results would be paired with the "
-                                 "wrong shift_amounts")
-            for j, prediction_result in enumerate(prediction_results):
-                df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
-                                   slice_size, min_area_threshold, downscale_pred, contour_method,
-                                   executor=executor, remask_fn=remask_fn, image=batch_images[j],
-                                   coord_scale=1.0 / sr_factor, stats=discarded,
-                                   remask_tag=mask_tag)
-                if df.shape[0] > 0:
-                    frames.append(df)
+        with _watch_nms_time_limit() as nms_timeouts:
+            seen_timeouts = 0
+            for start in tqdm(range(0, num_slices, batch_size), total=(num_slices + batch_size - 1) // batch_size):
+                batch_images = list(slice_images[start:start + batch_size])
+                if sr_factor > 1:
+                    # Streamed SR: upscale each native slice to slice_size (SR px) just before
+                    # inference — same Lanczos kernel as the whole-crop SR rasters it must be
+                    # equivalent to (prep_de_crops.py). shift_amounts stay on the native grid;
+                    # coord_scale below maps polygons back onto it.
+                    batch_images = [cv2.resize(img, (slice_size, slice_size),
+                                               interpolation=cv2.INTER_LANCZOS4)
+                                    for img in batch_images]
+                prediction_results = detection_model.model([_to_bgr(img) for img in batch_images],
+                                                           imgsz=detection_model.image_size,
+                                                           conf=detection_model.confidence_threshold,
+                                                           max_det=max_det,
+                                                           verbose=False, device=detection_model.device)
+                if len(prediction_results) != len(batch_images):
+                    raise ValueError(f"model returned {len(prediction_results)} results for "
+                                     f"{len(batch_images)} slices — results would be paired with the "
+                                     "wrong shift_amounts")
+                # Before any per-detection work: did the model's own output get cut off? Checked
+                # here so a scene arm fails in its first minutes rather than after hours (X-06).
+                total_timeouts = nms_timeouts()
+                _note_slice_truncation(prediction_results, max_det, truncation, on_max_det,
+                                       first_slice=start,
+                                       new_timeouts=total_timeouts - seen_timeouts)
+                seen_timeouts = total_timeouts
+                for j, prediction_result in enumerate(prediction_results):
+                    df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
+                                       slice_size, min_area_threshold, downscale_pred, contour_method,
+                                       executor=executor, remask_fn=remask_fn, image=batch_images[j],
+                                       coord_scale=1.0 / sr_factor, stats=discarded,
+                                       remask_tag=mask_tag)
+                    if df.shape[0] > 0:
+                        frames.append(df)
     finally:
         if executor is not None:
             executor.shutdown()
@@ -806,7 +973,7 @@ def get_sliced_prediction(in_raster,
     gdf = gdf.drop_duplicates(subset="geometry", ignore_index=True)
     discarded["duplicate_geometry"] = int(n_before_dedup - len(gdf))
     gdf["id"] = gdf.index
-    _report_discards(gdf, discarded, n_kept=len(gdf))
+    _report_discards(gdf, discarded, n_kept=len(gdf), truncation=truncation)
 
     # output paths and the conflict check were resolved before inference ran
     gdf.attrs["resolved_config"] = resolved_config
@@ -832,6 +999,7 @@ def get_sliced_prediction(in_raster,
                      "n_after_nms": None if gdf_nms is None else int(len(gdf_nms))},
             crs=str(gdf.crs) if len(gdf) else None,
             discarded=gdf.attrs.get("discarded", {}),
+            truncation=gdf.attrs.get("truncation", {}),
             wall_seconds=round(time.perf_counter() - started, 3),
             n_slices=int(num_slices))
         return gdf, gdf_nms
@@ -873,7 +1041,7 @@ def get_sliced_prediction(in_raster,
 
 def predict_production(in_raster, detection_model, output_dir, preset="goal1_production",
                        on_conflict="error", remask_fn=None, mask_tag=None, n_workers=None,
-                       **overrides):
+                       on_max_det="error", **overrides):
     """Run single-scale sliced inference in a **named, versioned** configuration (G1-01).
 
     ``get_sliced_prediction``'s own defaults are the historical generic ones and reproduce no
@@ -883,9 +1051,10 @@ def predict_production(in_raster, detection_model, output_dir, preset="goal1_pro
     the output.
 
     ``**overrides`` are *preset* parameters, so a typo raises. Arguments that are not part of the
-    scientific configuration — ``on_conflict``, ``remask_fn``, ``mask_tag``, ``n_workers`` — are
-    named explicitly and pass straight through, since they change nothing about what the result
-    means.
+    scientific configuration — ``on_conflict``, ``remask_fn``, ``mask_tag``, ``n_workers``,
+    ``on_max_det`` — are named explicitly and pass straight through, since they change nothing about
+    what the result means. (``max_det`` itself *is* result-defining, so it lives in the preset;
+    ``on_max_det`` only decides whether a truncated run fails or merely records it.)
 
         gdf, gdf_nms = predict_production(raster, model, out_dir)
         gdf, gdf_nms = predict_production(raster, model, out_dir, slice_size=256)
@@ -894,7 +1063,7 @@ def predict_production(in_raster, detection_model, output_dir, preset="goal1_pro
     call = {k: v for k, v in config.items() if not k.startswith("_")}
     return get_sliced_prediction(in_raster, detection_model, output_dir=output_dir,
                                  on_conflict=on_conflict, remask_fn=remask_fn, mask_tag=mask_tag,
-                                 n_workers=n_workers, **call)
+                                 n_workers=n_workers, on_max_det=on_max_det, **call)
 
 
 _UNSET = object()   # lets an explicit `engulf_thr=None` mean "off" rather than "use the preset"

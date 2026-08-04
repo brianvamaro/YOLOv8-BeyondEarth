@@ -72,6 +72,9 @@ def _result(rects, mask_size=SLICE):
     (dict(contour_method="marching"), ValueError, "contour_method"),
     (dict(output_format="geojson"), ValueError, "output_format"),
     (dict(remask_fn="not-callable"), TypeError, "remask_fn"),
+    (dict(max_det=0), ValueError, "max_det"),
+    (dict(max_det=-1), ValueError, "max_det"),
+    (dict(on_max_det="ignore"), ValueError, "on_max_det"),
 ])
 def test_invalid_arguments_are_rejected_up_front(raster, model, tmp_path, kwargs, exc, match):
     base = dict(in_raster=raster, detection_model=model, output_dir=tmp_path, slice_size=SLICE)
@@ -94,7 +97,7 @@ def _valid_args(**over):
         output_dir=".", slice_size=256, inference_size=1024, overlap_height_ratio=0.2,
         overlap_width_ratio=0.2, min_area_threshold=None, postprocess_match_threshold=0.5,
         batch_size=8, contour_method="skimage", output_format="gpkg", n_workers=None,
-        remask_fn=None, sr_factor=1)
+        remask_fn=None, sr_factor=1, max_det=300, on_max_det="error")
     args.update(over)
     return args
 

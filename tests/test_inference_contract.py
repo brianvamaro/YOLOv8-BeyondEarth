@@ -29,7 +29,7 @@ SLICE = 64
 # --- stand-ins -----------------------------------------------------------------------------------
 
 class FakeUltralytics:
-    """Records every call and applies ``conf`` the way ultralytics does.
+    """Records every call and applies ``conf`` and ``max_det`` the way ultralytics does.
 
     ``per_slice`` is a list (one entry per slice, in slice order) of ``[(x0, y0, x1, y1, score)]``
     mask rectangles in *slice* pixel coordinates.
@@ -39,15 +39,18 @@ class FakeUltralytics:
         self.per_slice = per_slice
         self.calls = []
 
-    def __call__(self, images, imgsz=None, conf=None, verbose=None, device=None):
+    def __call__(self, images, imgsz=None, conf=None, verbose=None, device=None, max_det=None):
         batch = images if isinstance(images, list) else [images]
-        self.calls.append({"conf": conf, "imgsz": imgsz, "device": device,
+        self.calls.append({"conf": conf, "imgsz": imgsz, "device": device, "max_det": max_det,
                            "n_images": len(batch), "images": batch})
         results = []
         for _ in batch:
             rects = self.per_slice[len(results) + sum(c["n_images"] for c in self.calls[:-1])]
             # ultralytics drops anything below conf before we ever see it
             rects = [r for r in rects if conf is None or r[4] >= conf]
+            # ...and then caps at max_det, keeping the highest-confidence N (review item X-06)
+            if max_det is not None and len(rects) > max_det:
+                rects = sorted(rects, key=lambda r: -r[4])[:max_det]
             boxes = np.zeros((len(rects), 6), dtype=np.float32)
             masks = np.zeros((len(rects), SLICE, SLICE), dtype=np.float32)
             for i, (x0, y0, x1, y1, score) in enumerate(rects):
@@ -218,7 +221,123 @@ def test_nms_prio_survives_the_file_round_trip(raster_128, monkeypatch, tmp_path
 
 
 def test_contract_version_is_recorded():
-    assert INFERENCE_CONTRACT_VERSION >= 2
+    assert INFERENCE_CONTRACT_VERSION >= 3
+
+
+# --- X-06: max_det is passed, recorded, and never binds silently ----------------------------------
+
+def _dense_slice(n, score_of=lambda i: 0.20 + 0.5 * i / 100.0):
+    """One slice holding ``n`` small, well-separated, interior detections."""
+    rects = []
+    for i in range(n):
+        x0 = 4 + 3 * (i % 18)
+        y0 = 4 + 3 * (i // 18)
+        rects.append((x0, y0, x0 + 1, y0 + 1, score_of(i)))
+    return rects
+
+
+def test_max_det_reaches_the_model_and_the_manifest(raster_128, monkeypatch, tmp_path):
+    """It was never passed at all, so ultralytics' own 300 applied to every slice and nothing on
+    disk recorded which cap produced a catalog (review item X-06)."""
+    import json
+    per_slice = [[(20, 20, 30, 30, 0.42)]]
+    fake, gdf, _ = _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch, max_det=777)
+    assert fake.calls[0]["max_det"] == 777
+    assert gdf.attrs["resolved_config"]["max_det"] == 777
+
+    manifest = next(iter(tmp_path.glob("*-mask-nms-manifest.json")))
+    record = json.loads(manifest.read_text())
+    assert record["config"]["max_det"] == 777, "max_det must be recoverable from disk"
+
+
+def test_default_max_det_matches_what_ultralytics_silently_applied():
+    """The function default has to stay 300: it is what every pre-contract-3 run really used, so an
+    un-parameterised call must not quietly change its results. The *production* value lives in the
+    preset instead."""
+    from YOLOv8BeyondEarth import presets
+    assert P.ULTRALYTICS_DEFAULT_MAX_DET == 300
+    assert presets.GOAL1_PRODUCTION["max_det"] > 300, "the production cap must be sized from evidence"
+
+
+def test_a_slice_at_the_cap_fails_the_run_by_default(raster_128, monkeypatch):
+    """Fail fast, in the batch that binds — not after a scene's worth of compute, and never
+    silently. The acceptance condition for X-06 is that a truncated slice can no longer be
+    mistaken for a sparse one."""
+    per_slice = [_dense_slice(40)]
+    with pytest.raises(RuntimeError, match="returned max_det"):
+        _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch, max_det=40)
+
+
+def test_binding_is_recorded_rather_than_silent_when_accepted(raster_128, monkeypatch):
+    """``on_max_det="warn"`` is the escape hatch for a run that has decided to accept truncation.
+    It must still land in the structured channel, because a LOGGER line under tqdm across ~46,000
+    slices is exactly the silence this item exists to remove."""
+    per_slice = [_dense_slice(40)]
+    with pytest.warns(RuntimeWarning, match="returned the full max_det"):
+        _, gdf, _ = _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch,
+                         max_det=40, on_max_det="warn")
+    assert gdf.attrs["truncation"]["slices_at_max_det"] == 1
+    assert len(gdf) == 40
+
+
+def test_a_clean_run_records_no_truncation(raster_128, monkeypatch):
+    """The acceptance condition, stated positively: an empty ``truncation`` dict means the run lost
+    nothing this way. It must not be merely absent."""
+    per_slice = [_dense_slice(10)]
+    _, gdf, _ = _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch, max_det=300)
+    assert gdf.attrs["truncation"] == {}
+
+
+def test_near_cap_slices_are_recorded_without_failing(raster_128, monkeypatch):
+    """A slice just under the cap is the honest warning sign: headroom is thin, and it is also where
+    a slice that truncated and then lost a detection to ultralytics' empty-mask filter shows up
+    instead of at the cap exactly (which is why the at-cap count is a lower bound)."""
+    per_slice = [_dense_slice(38)]
+    _, gdf, _ = _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch, max_det=40)
+    assert gdf.attrs["truncation"] == {"slices_near_max_det": 1}
+
+
+def test_the_cap_discards_the_faintest_detections(raster_128, monkeypatch):
+    """Why the cap matters scientifically: it is applied *after* NMS and keeps the top N by
+    confidence, so what it removes is the faintest detections in the densest slices — the
+    SFD-critical population, not a random sample."""
+    per_slice = [_dense_slice(40)]
+    _, capped, _ = _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch,
+                        max_det=20, on_max_det="warn")
+    # same output name, different config: G1-07's conflict guard would (correctly) refuse it
+    _, full, _ = _run(raster_128, per_slice, [(0, 0)], 0.10, monkeypatch, max_det=300,
+                      on_conflict="overwrite")
+    assert len(capped) == 20 and len(full) == 40
+    assert capped.score.min() > full.score.min(), "the cap did not remove the faint tail"
+
+
+def test_nms_time_limit_warning_is_captured_as_a_count():
+    """``ultralytics/utils/nms.py`` breaks out of its per-image loop past ``2.0 + 0.05*batch_size``
+    seconds, so every *remaining slice in that batch* returns zero detections. It only
+    ``LOGGER.warning``s, and nothing structured recorded that across a full scene."""
+    from YOLOv8BeyondEarth.predict import _watch_nms_time_limit
+    ultralytics_utils = pytest.importorskip("ultralytics.utils")
+
+    with _watch_nms_time_limit() as count:
+        assert count() == 0
+        ultralytics_utils.LOGGER.warning("NMS time limit 2.400s exceeded")
+        ultralytics_utils.LOGGER.warning("some unrelated ultralytics warning")
+        assert count() == 1
+    # the handler must be detached again, or a long-lived process accumulates one per call
+    ultralytics_utils.LOGGER.warning("NMS time limit 2.400s exceeded")
+    assert count() == 1
+
+
+def test_nms_timeout_records_the_slices_it_zeroed():
+    """The count that matters is how many slices came back empty inside a timed-out batch — an
+    upper bound, since a slice in such a batch may also just be empty ground."""
+    from YOLOv8BeyondEarth.predict import _note_slice_truncation
+    results = [SimpleNamespace(boxes=SimpleNamespace(data=torch.zeros((n, 6)))) for n in (5, 0, 0)]
+    truncation = {}
+    _note_slice_truncation(results, max_det=300, truncation=truncation, on_max_det="error",
+                           first_slice=0, new_timeouts=1)
+    assert truncation["nms_time_limit_batches"] == 1
+    assert truncation["slices_zeroed_after_nms_time_limit"] == 2
 
 
 # --- G2-03: Solution G must be genuinely detector-preserving --------------------------------------

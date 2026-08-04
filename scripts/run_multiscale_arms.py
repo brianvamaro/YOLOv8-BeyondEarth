@@ -62,8 +62,9 @@ def run_one_arm(args):
         args.raster, model, confidence_threshold=args.conf, output_dir=args.out_dir,
         slice_size=slice_size, sr_factor=sr_factor, inference_size=args.inference_size,
         save_bbox=False, save_prenms=False, save_nms=True, output_format="gpkg",
-        on_conflict=args.on_conflict, **cfg)
-    print(json.dumps({"arm": args.arm, "n": int(len(gdf_nms if gdf_nms is not None else gdf))}))
+        on_conflict=args.on_conflict, on_max_det=args.on_max_det, **cfg)
+    print(json.dumps({"arm": args.arm, "n": int(len(gdf_nms if gdf_nms is not None else gdf)),
+                      "truncation": dict(gdf.attrs.get("truncation", {}))}))
 
 
 def orchestrate(args):
@@ -76,9 +77,16 @@ def orchestrate(args):
     arm_keys, arm_layers = {}, {}
     for arm in args.arms:
         slice_size, sr_factor = parse_arm(arm)
+        # `preset="goal1_production"` is a *name*, so on its own it cannot notice that the preset's
+        # values changed underneath a resumed campaign. `presets.PRESET_VERSION` is bumped whenever
+        # they do (that is its documented contract), and `max_det` is spelled out because X-06 made
+        # it result-defining and a stale ledger entry would otherwise let a 300-capped arm satisfy a
+        # run configured for a higher cap.
         key = stage_key(raster=raster_id.get("sha256"), weights=weights_id.get("sha256"),
                         slice_size=slice_size, sr_factor=sr_factor, conf=args.conf,
-                        imgsz=args.inference_size, preset="goal1_production")
+                        imgsz=args.inference_size, preset="goal1_production",
+                        preset_version=presets.PRESET_VERSION,
+                        max_det=presets.GOAL1_PRODUCTION["max_det"])
         layer = arm_layer_path(out_dir, args.raster, slice_size, sr_factor, args.conf,
                                args.inference_size, presets.GOAL1_PRODUCTION["overlap_height_ratio"])
         arm_keys[arm], arm_layers[arm] = key, layer
@@ -143,6 +151,9 @@ def main():
                     default=presets.GOAL1_PRODUCTION["inference_size"])
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--on-conflict", default="error", choices=("error", "overwrite"))
+    ap.add_argument("--on-max-det", default="error", choices=("error", "warn"),
+                    help="'error' fails in the first minutes of an arm rather than writing a "
+                         "silently truncated catalog (review item X-06)")
     args = ap.parse_args()
     run_one_arm(args) if args.arm else orchestrate(args)
 
