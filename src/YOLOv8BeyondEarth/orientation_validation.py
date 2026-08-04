@@ -840,7 +840,32 @@ def largest_blob_fill(mb):
     return out
 
 
-def sam_masks_in_order(sam_model, image, boxes, sam_batch=96, device=0):
+#: Confidence passed to SAM2 on a **box-prompted** re-mask. Ultralytics' ``SAM.predict`` defaults it
+#: to 0.25 (`models/sam/model.py:106`) and applies it to the mask decoder's *predicted-IoU* head —
+#: ``idx = pred_scores > self.args.conf`` (`models/sam/predict.py:523`) — so a prompted box whose mask
+#: SAM is merely *unsure* about comes back with **no mask at all**. That is wrong here on two counts:
+#:
+#: * **It contradicts what Solution G is.** G is *detector-preserving*: YOLO decides that a boulder is
+#:   there, SAM only supplies its outline. A predicted-IoU threshold lets the mask producer silently
+#:   overrule the detector, which is the very coupling review item G2-03 removed on the other side
+#:   (a failed re-mask keeps the detection). Those boulders end up carrying a YOLO mask — tagged
+#:   honestly as ``mask_src="yolo"``, but downgraded because of SAM's *self-report*, not because
+#:   anything checked the mask.
+#: * **It is redundant with a better guard.** Both G paths already gate on mask *geometry* — the
+#:   background-grab guard (``mask area > max_box_blowup x box area``), ``largest_blob_fill``, and a
+#:   degenerate-polygon check. Those inspect the actual mask; the IoU head only reports a hunch.
+#:
+#: It also carried a latent cost spike: dropping even one mask from a chunk makes the returned count
+#: disagree with the prompt count, and the realignment path below then re-prompts that chunk **one box
+#: at a time** — 1 + ``sam_batch`` encodes (97 at the default) where 1 would have done.
+#:
+#: 0.0 disables the filter without disabling anything else: ``iou_prediction_use_sigmoid=True``
+#: (`models/sam/build.py`), so ``pred_scores`` is strictly positive and ``> 0.0`` always passes. The
+#: realignment path stays as a safety net; it simply should no longer fire for this reason.
+SAM_PROMPT_CONF = 0.0
+
+
+def sam_masks_in_order(sam_model, image, boxes, sam_batch=96, device=0, conf=SAM_PROMPT_CONF):
     """One SAM mask per box **in order** — ``(masks, n_realigned_chunks)``.
 
     ``masks`` is a list with ``None`` where a box yielded none. SAM2 usually returns one mask per
@@ -851,25 +876,39 @@ def sam_masks_in_order(sam_model, image, boxes, sam_batch=96, device=0):
 
     Module-level since 2026-07-30 so the phase-5a window re-masker shares this exact prompting +
     realignment path with the validated in-slice G path — extracted verbatim from
-    ``sam2_remasker``'s local ``_sam_masks`` (which now calls it), behaviour unchanged.
+    ``sam2_remasker``'s local ``_sam_masks`` (which now calls it).
+
+    ``conf`` is forwarded to the model; see :data:`SAM_PROMPT_CONF` for why the default is 0.0 and
+    not ultralytics' 0.25. Passing it is what makes the count mismatch — and the 97-encode
+    realignment it triggers — stop happening for a reason other than luck.
+
+    The ``boxes`` copy is not incidental. ``Predictor._prepare_prompts`` does
+    ``torch.as_tensor(bboxes, dtype=..., device=...)`` then ``bboxes *= r``, and ``as_tensor`` shares
+    memory whenever dtype *and* device already match — so a caller handing in a float32 CUDA tensor
+    (or any float32 array on a CPU-device run) would have its own boxes rescaled in place, and the
+    **second chunk** would then prompt with coordinates scaled twice. Production happens to escape
+    because a host→device transfer copies, but that is an accident of where the array lives, not an
+    invariant anyone stated (review item G2-11).
     """
+    boxes = np.array(boxes, dtype=np.float64, copy=True)
     out, realigned = [], 0
     for i in range(0, len(boxes), sam_batch):
         chunk = boxes[i:i + sam_batch]
-        r = sam_model(image, bboxes=chunk, verbose=False, device=device)[0]
+        r = sam_model(image, bboxes=chunk, verbose=False, device=device, conf=conf)[0]
         mdc = None if r.masks is None else r.masks.data.cpu().numpy()
         if mdc is not None and len(mdc) == len(chunk):
             out.extend(list(mdc))
         else:
             realigned += 1
             for b in chunk:
-                rb = sam_model(image, bboxes=b[None], verbose=False, device=device)[0]
+                rb = sam_model(image, bboxes=b[None], verbose=False, device=device, conf=conf)[0]
                 mb = None if rb.masks is None else rb.masks.data.cpu().numpy()
                 out.append(mb[0] if (mb is not None and len(mb)) else None)
     return out, realigned
 
 
-def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_cache_every=64):
+def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_cache_every=64,
+                  sam_conf=SAM_PROMPT_CONF):
     """Build a ``remask_fn`` for :func:`YOLOv8BeyondEarth.predict.get_sliced_prediction` (Solution G).
 
     Returns a callable ``remask(slice_image, boxes_xyxy) -> list`` that re-masks each YOLO box with
@@ -880,8 +919,18 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
     ``get_sliced_prediction(..., remask_fn=sam2_remasker(sam), mask_tag="sam2")`` reproduces the
     validated re-masking through the production slicing/edge/NMS/georef path. Box prompts are chunked
     (``sam_batch``) to fit VRAM; the CUDA cache is dropped every ``empty_cache_every`` slices (the
-    per-slice ``empty_cache`` sync is a measurable cost at the light sam256 footprint). ~6.5
-    ms/boulder (2026-07-06 benchmark) -> ~9 h/scene ungated.
+    per-slice ``empty_cache`` sync is a measurable cost at the light sam256 footprint).
+
+    ``sam_conf`` is the threshold SAM applies to its own predicted-IoU head; it defaults to
+    :data:`SAM_PROMPT_CONF` (0.0) rather than ultralytics' 0.25, so a prompted box is never left
+    unmasked merely because SAM was unsure. The mask-quality decision stays with the geometric
+    guards below, which look at the mask instead of at a self-report.
+
+    Cost note: the "6.5 ms/boulder -> ~9 h/scene" pair from the 2026-07-06 benchmark is **not** a
+    usable scene estimate. The 9 h scaled a dense-crop wall by *area*, and correcting it by boulder
+    count is also wrong, because G pays a **per-slice** encode as well as a per-boulder decode and the
+    6.5 ms is a blended rate from a crop 4.35x denser than a real scene. See
+    ``docs/cost_model_optimization_plan.md`` (2026-08-04 audit) for the reconstructed figures.
     """
     import torch
 
@@ -891,7 +940,8 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
         boxes = np.asarray(boxes_xyxy, dtype=float)
         if len(boxes) == 0:
             return []
-        s, realigned = sam_masks_in_order(sam_model, image, boxes, sam_batch=sam_batch, device=device)
+        s, realigned = sam_masks_in_order(sam_model, image, boxes, sam_batch=sam_batch,
+                                          device=device, conf=sam_conf)
         state["realigned"] += realigned
         masks = []
         for k in range(len(boxes)):

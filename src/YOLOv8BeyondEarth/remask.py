@@ -35,7 +35,8 @@ from tqdm import tqdm
 
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
                                        shift_polygon, add_geometries)
-from YOLOv8BeyondEarth.orientation_validation import largest_blob_fill, sam_masks_in_order
+from YOLOv8BeyondEarth.orientation_validation import (SAM_PROMPT_CONF, largest_blob_fill,
+                                                      sam_masks_in_order)
 
 # mask_src values
 SRC_SAM = "sam2"
@@ -155,7 +156,7 @@ def equivalent_diameter_px(gdf, native_res):
 def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_batch=96,
                    max_box_blowup=1.5, device=0, empty_cache_every=64, min_dpx=None,
                    contour_method="skimage", native_res=None, progress=True,
-                   max_window_growth=2.0):
+                   max_window_growth=2.0, sam_conf=SAM_PROMPT_CONF):
     """Re-mask a fused catalog with SAM2, one box prompt per kept boulder (phase 5a).
 
     Parameters
@@ -239,7 +240,8 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
             boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, h - 1)
 
             masks, realigned_here = sam_masks_in_order(sam_model, image, boxes,
-                                                       sam_batch=sam_batch, device=device)
+                                                       sam_batch=sam_batch, device=device,
+                                                       conf=sam_conf)
             realigned += realigned_here
             n_windows += 1
             n_prompted += len(rows)
@@ -295,6 +297,6 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
     out.attrs.update(n_windows=n_windows, n_prompted=n_prompted, n_sam=n_sam,
                      realigned_chunks=realigned, window_size=window_size, pad=pad,
                      min_dpx=min_dpx, max_box_blowup=max_box_blowup,
-                     max_window_growth=max_window_growth,
+                     max_window_growth=max_window_growth, sam_conf=sam_conf,
                      n_oversize=int((note == "oversize_window").sum()))
     return out

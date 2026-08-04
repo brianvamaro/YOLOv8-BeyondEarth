@@ -50,15 +50,20 @@ class FakeSAM:
     ``blowup_boxes`` (indices into the per-call chunk) instead return a mask covering the whole
     window, which must trip the background-grab guard.
     """
-    def __init__(self, inset=1, blowup_all=False, return_none=False, short_by=0):
+    def __init__(self, inset=1, blowup_all=False, return_none=False, short_by=0, mutate=False):
         self.inset, self.blowup_all, self.return_none = inset, blowup_all, return_none
         self.short_by = short_by
+        self.mutate = mutate            # imitate ultralytics' in-place `bboxes *= r` (G2-11)
         self.calls = []
+        self.confs = []
 
-    def __call__(self, image, bboxes=None, verbose=False, device=0):
+    def __call__(self, image, bboxes=None, verbose=False, device=0, conf=None):
         h, w = image.shape[:2]
+        if self.mutate and hasattr(bboxes, "__imul__"):
+            bboxes *= 2.0               # what `_prepare_prompts` does to a shared buffer
         boxes = np.asarray(bboxes, dtype=float).reshape(-1, 4)
         self.calls.append((image.shape, len(boxes)))
+        self.confs.append(conf)
         if self.return_none:
             return [_FakeResult(None)]
         out = np.zeros((len(boxes), h, w), dtype=np.uint8)
@@ -304,6 +309,51 @@ def test_sam2_remasker_drops_guard_failures_in_slice():
 def test_sam2_remasker_empty_boxes():
     from YOLOv8BeyondEarth.orientation_validation import sam2_remasker
     assert sam2_remasker(FakeSAM())(np.zeros((64, 64, 3), np.uint8), np.zeros((0, 4))) == []
+
+
+# --- the SAM box-prompt confidence, and the in-place box mutation (G2-11) -------------------------
+
+def test_box_prompts_do_not_inherit_ultralytics_0_25_conf():
+    """Ultralytics applies `conf` to the mask decoder's *predicted-IoU* head, so at its 0.25 default a
+    prompted box SAM is merely unsure about comes back unmasked — the mask producer silently
+    overruling the detector, in a pipeline whose whole premise is that it does not. It also makes the
+    returned count disagree with the prompt count, which sends the chunk down the one-box-at-a-time
+    realignment path: 1 + sam_batch encodes instead of 1."""
+    from YOLOv8BeyondEarth.orientation_validation import (SAM_PROMPT_CONF, sam2_remasker,
+                                                          sam_masks_in_order)
+    assert SAM_PROMPT_CONF == 0.0
+
+    sam = FakeSAM()
+    sam_masks_in_order(sam, np.zeros((64, 64, 3), np.uint8), np.array([[10, 10, 30, 30]], float))
+    assert sam.confs == [0.0], "conf was not forwarded to the model"
+
+    sam2 = FakeSAM()
+    sam2_remasker(sam2)(np.zeros((64, 64, 3), np.uint8), np.array([[10, 10, 30, 30]], float))
+    assert sam2.confs == [0.0]
+
+    explicit = FakeSAM()
+    sam_masks_in_order(explicit, np.zeros((64, 64, 3), np.uint8),
+                       np.array([[10, 10, 30, 30]], float), conf=0.25)
+    assert explicit.confs == [0.25], "an explicit conf must still be honoured"
+
+
+def test_prompt_boxes_survive_ultralytics_in_place_scaling():
+    """`Predictor._prepare_prompts` does `torch.as_tensor(bboxes, ...)` then `bboxes *= r`, and
+    `as_tensor` shares memory when dtype *and* device already match. Production escapes only because a
+    host->device transfer copies — an accident of where the array lives, not a stated invariant. With
+    more boxes than `sam_batch`, an in-place rescale corrupts the *second* chunk's prompts (G2-11)."""
+    from YOLOv8BeyondEarth.orientation_validation import sam_masks_in_order
+
+    boxes = np.array([[10, 10, 30, 30], [12, 12, 32, 32], [14, 14, 34, 34]], dtype=np.float32)
+    before = boxes.copy()
+    sam = FakeSAM(mutate=True)
+    sam_masks_in_order(sam, np.zeros((64, 64, 3), np.uint8), boxes, sam_batch=2)
+
+    np.testing.assert_array_equal(boxes, before)      # caller's array untouched
+    assert len(sam.calls) == 2                        # 3 boxes at sam_batch=2 -> two chunks
+    # Second chunk must see original-scale coordinates, not doubled ones. The fake doubles whatever
+    # buffer it is handed, so a shared buffer would have the third box arrive at 4x.
+    assert sam.calls[1][1] == 1
 
 
 def test_largest_blob_fill_keeps_biggest_component_and_fills():
