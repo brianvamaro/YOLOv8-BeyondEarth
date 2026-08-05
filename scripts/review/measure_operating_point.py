@@ -52,6 +52,7 @@ from YOLOv8BeyondEarth.ap_eval import (catalog_ap, equivalent_diameter,    # noq
                                        load_yolo_seg_labels, paired_ap_ci)
 from YOLOv8BeyondEarth.benchmark import DEFAULT_SIZE_BANDS, _band_label    # noqa: E402
 from YOLOv8BeyondEarth.matching import unique_centroid_match               # noqa: E402
+from YOLOv8BeyondEarth.predict import INFERENCE_CONTRACT_VERSION           # noqa: E402
 
 #: 500 px tiles on a 512 canvas with a 1 m/px identity transform, so native px == map units and the
 #: arms' slice grids stay exact. Same convention as the phase-4 AP runner it must be comparable to.
@@ -87,7 +88,84 @@ def sample_tiles(split_dir, n, seed):
     return pngs
 
 
-def run_tiles(pngs, tile_dir, pred_dir, weights, conf, device):
+def cache_identity(pngs, weights, conf, split, seed, n_tiles):
+    """Everything that defines a cached catalog, so reuse can be *verified* rather than assumed.
+
+    Review item B2: the cache was keyed on confidence alone
+    (``catalog-conf{conf:03d}.gpkg``), while ``gts`` was rebuilt from a fresh sample. Since
+    ``sample_tiles`` draws are not nested — 62 of 200 overlap at seed 0 between ``--n-tiles 200`` and
+    the argparse default 250 — running this driver's own documented command reused a 200-tile catalog
+    and scored it against 250 tiles' labels, leaving 138 truths with no predictions and 138
+    predictions counted as FPs. The nastier variant is silent: re-running to measure X-06's effect
+    returned the **pre-X-06** catalog and reported AP50 0.4992 unchanged.
+
+    The sample is identified by a digest of the actual tile stems rather than by ``(n, seed)``,
+    because the stems are what the labels are joined on and the draw is what can silently change.
+    """
+    import hashlib
+    ids = sorted(p.stem for p in pngs)
+    arm_config = {**presets.resolve("goal1_production", confidence_threshold=float(conf)),
+                  "fusion": dict(presets.GOAL3_PRODUCTION)}
+    code = presets.code_identity()
+    return {
+        "conf": round(float(conf), 4),
+        "split": split, "seed": seed, "n_tiles_requested": n_tiles,
+        "n_image_ids": len(ids),
+        "image_ids_sha256": hashlib.sha256("\n".join(ids).encode()).hexdigest(),
+        "weights": presets.file_identity(weights),
+        "preset": "goal3_production",
+        "preset_version": presets.PRESET_VERSION,
+        "inference_contract_version": INFERENCE_CONTRACT_VERSION,
+        # Catches a change to the arms themselves — this is what would have caught X-06, whose
+        # `max_det` lives here and which also bumped `preset_version` 1 -> 2.
+        "arm_config_hash": presets.config_hash(arm_config),
+        "code": {"git_sha": code.get("git_sha"), "git_dirty": code.get("git_dirty")},
+    }
+
+
+#: Identity fields whose mismatch makes a reused catalog produce a WRONG number, so reuse must fail.
+#: `code` is deliberately excluded: a docs commit would otherwise force a re-run of every tile, while
+#: a code change that actually alters geometry moves `arm_config_hash` or one of the versions. A
+#: differing SHA is reported loudly instead — and note `git_dirty` is only a boolean (review item B4),
+#: so an uncommitted edit made while the tree was already dirty is invisible here.
+_FATAL_IDENTITY_FIELDS = ("conf", "split", "n_image_ids", "image_ids_sha256", "weights",
+                          "preset", "preset_version", "inference_contract_version",
+                          "arm_config_hash")
+
+
+def check_cached_identity(cached, want, refresh):
+    """Return True to reuse ``cached``, False to recompute. Raise if reuse would be wrong."""
+    sidecar = cached.with_suffix(".identity.json")
+    if refresh:
+        print(f"[refresh] conf {want['conf']}: ignoring {cached.name}")
+        return False
+    if not sidecar.exists():
+        raise FileExistsError(
+            f"{cached.name} exists but {sidecar.name} does not, so what produced it cannot be "
+            "verified — which sample, which weights, which max_det. This is the B2 failure: an "
+            "unidentified catalog silently rescored against a freshly drawn label set. Delete it "
+            "and re-run, or pass --refresh to overwrite it.")
+    have = json.loads(sidecar.read_text())
+    differing = [k for k in _FATAL_IDENTITY_FIELDS if have.get(k) != want.get(k)]
+    if differing:
+        detail = "\n".join(f"    {k}: cached {have.get(k)!r} != this run {want.get(k)!r}"
+                           for k in differing)
+        raise FileExistsError(
+            f"{cached.name} was produced by a different configuration, so reusing it would score "
+            f"the wrong catalog (review item B2). Differing:\n{detail}\n"
+            "Delete it and re-run, or pass --refresh to overwrite it.")
+    if have.get("code", {}).get("git_sha") != want.get("code", {}).get("git_sha"):
+        warnings.warn(
+            f"{cached.name} was produced at git {have.get('code', {}).get('git_sha')!r}, this run is "
+            f"{want.get('code', {}).get('git_sha')!r}. The arm configuration and contract version "
+            "match, so it is being reused — but if the delta touched geometry, this number is "
+            "attributed to the wrong code. Pass --refresh if in doubt.", RuntimeWarning)
+    print(f"[skip] conf {want['conf']}: reusing {cached.name} (identity verified)")
+    return True
+
+
+def run_tiles(pngs, tile_dir, pred_dir, weights, conf, device, split="val", seed=0,
+              n_tiles=None, refresh=False):
     """Every tile through the fused production ladder at one confidence. Returns one catalog."""
     import geopandas as gpd
     import pandas as pd
@@ -95,8 +173,8 @@ def run_tiles(pngs, tile_dir, pred_dir, weights, conf, device):
     from YOLOv8BeyondEarth.predict import get_multiscale_prediction
 
     cached = pred_dir / f"catalog-conf{int(conf * 100):03d}.gpkg"
-    if cached.exists():
-        print(f"[skip] conf {conf}: reusing {cached.name}")
+    identity = cache_identity(pngs, weights, conf, split, seed, n_tiles)
+    if cached.exists() and check_cached_identity(cached, identity, refresh):
         return gpd.read_file(cached)
 
     model = AutoDetectionModel.from_pretrained(
@@ -131,6 +209,11 @@ def run_tiles(pngs, tile_dir, pred_dir, weights, conf, device):
         raise RuntimeError(f"every tile failed at conf {conf}; first: {failures[0] if failures else None}")
     catalog = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs="EPSG:32633")
     catalog.to_file(cached)
+    # After the catalog, so a crash mid-write cannot leave a verified-looking sidecar beside a
+    # partial layer; the absent sidecar then refuses reuse, which is the safe direction.
+    identity["n_detections"] = int(len(catalog))
+    identity["n_tile_failures"] = len(failures)
+    cached.with_suffix(".identity.json").write_text(json.dumps(identity, indent=2))
     return catalog
 
 
@@ -173,7 +256,9 @@ def mode_tiles(args):
     pngs = sample_tiles(split_dir, args.n_tiles, args.seed)
     print(f"{len(pngs)} {args.split} tiles (seed {args.seed})")
 
-    catalogs = {c: run_tiles(pngs, tile_dir, pred_dir, args.weights, c, args.device)
+    catalogs = {c: run_tiles(pngs, tile_dir, pred_dir, args.weights, c, args.device,
+                             split=args.split, seed=args.seed, n_tiles=args.n_tiles,
+                             refresh=args.refresh)
                 for c in CONFIDENCES}
 
     gts = {}
@@ -183,6 +268,18 @@ def mode_tiles(args):
                                               transform=__import__("rasterio").transform
                                               .from_origin(0, PAD, RES, RES))
                          if txt.exists() else [])
+
+    # The last line of defence for B2, independent of the identity check: `ap_eval` looks up ground
+    # truth by `image_id` and a miss falls through to "this prediction is a false positive" with no
+    # error, so a catalog holding images the label set does not describe silently deflates AP on both
+    # arms. Cheap, so it runs even when the identity matched.
+    for conf, cat in catalogs.items():
+        unknown = sorted(set(cat.image_id) - set(gts)) if len(cat) else []
+        if unknown:
+            raise RuntimeError(
+                f"conf {conf}: {len(unknown)} image_ids in the catalog are absent from the label "
+                f"set (e.g. {unknown[:5]}). Every one would be scored as pure false positives. "
+                "The catalog and the sample have diverged (review item B2).")
 
     result = {"split": args.split, "n_tiles": len(pngs), "seed": args.seed,
               "preset": "goal3_production", "res_m_per_px": RES,
@@ -197,6 +294,9 @@ def mode_tiles(args):
             "n_detections": int(len(cat)),
             "median_dpx": float(np.median(dpx)) if len(cat) else None,
             "bands": band_table(cat, gts),
+            # so the table can be attributed to a sample and a code state without the sidecars
+            "catalog_identity": json.loads(
+                (pred_dir / f"catalog-conf{int(conf * 100):03d}.identity.json").read_text()),
         }
 
     lo, hi = catalogs[0.10], catalogs[0.25]
@@ -266,9 +366,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="both", choices=("tiles", "crop", "both"))
     ap.add_argument("--split", default="validation", choices=("validation", "test"))
-    ap.add_argument("--n-tiles", type=int, default=250, help="0 for the whole split")
+    # 200, not the 250 this defaulted to: the published table was measured on 200 tiles, so the
+    # documented no-argument command has to reproduce it. `sample_tiles` draws are not nested (62 of
+    # 200 overlap at seed 0), so 250 was a different sample, not a superset of it (review item B2).
+    ap.add_argument("--n-tiles", type=int, default=200, help="0 for the whole split")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--n-boot", type=int, default=1000)
+    ap.add_argument("--refresh", action="store_true",
+                    help="recompute the per-confidence catalogs instead of reusing a cached one")
     ap.add_argument("--raster", default=str(REPO / "data" / "raster" / "crop.tif"))
     ap.add_argument("--weights",
                     default=str(REPO / "data" / "weights" / "yolov8-m-boulder-detection-tmp.pt"))

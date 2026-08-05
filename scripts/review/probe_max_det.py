@@ -148,6 +148,30 @@ def read_slices(raster, origins, native_slice, slice_size):
 
 # --- the child: exactly one (batch_size, max_det, conf) cell -------------------------------------
 
+def fraction_discarded_at_cap(counts, cap):
+    """Fraction of the model's detections that a ``max_det=cap`` discards, over ``counts`` slices.
+
+    ``counts`` must be the **uncapped** per-slice detection counts. Computed per slice and then
+    summed — ``sum(max(0, c - cap)) / sum(c)`` — which is what makes it exact for any cap.
+
+    This replaces ``max(0, 1 - cap / mean(counts))`` (review item B1), which pushed the mean through
+    the truncation nonlinearity. Truncation is ``min(c, cap)``, and ``mean(min(c, cap)) !=
+    min(mean(c), cap)`` unless *every* slice is at the cap, so the old form was right only in the
+    saturated regime and the ``max(0, ...)`` clamp then rendered any *partial* truncation as exactly
+    ``0.0``. That is how ``max_det_probe-hirise-ss256.json`` came to publish
+    ``"cap_300_engages": true`` beside ``"fraction_discarded_at_300": 0.0`` — the truth is 1.6%, from
+    3 of 16 slices at the cap. The saturated cells are unaffected, which is the tell: the 512 cells
+    with 16/16 at the cap give the same 0.604 / 0.397 both ways.
+
+    It is the fraction of detections the *model returns* — ultralytics' empty-mask filter in
+    ``SegmentationPredictor.construct_result`` runs afterwards on both sides.
+    """
+    total = sum(counts)
+    if not total:
+        return 0.0
+    return sum(max(0, c - cap) for c in counts) / total
+
+
 def run_cell(args):
     import torch
     from ultralytics import YOLO
@@ -193,6 +217,10 @@ def run_cell(args):
         "peak_frac_of_device": round(peak_reserved / total_mib, 3),
         "spills_beyond_device": bool(peak_reserved > total_mib),
         "slices_measured": len(counts),
+        # Retained per slice, not just summarised: every question this probe answers about truncation
+        # is a per-slice sum, and reducing to a mean first is exactly the error B1 records. It is 16
+        # integers.
+        "detections_per_slice": [int(c) for c in counts],
         "detections_per_slice_max": max(counts) if counts else 0,
         "detections_per_slice_mean": round(float(np.mean(counts)), 1) if counts else 0.0,
         "slices_at_cap": int(sum(1 for c in counts if c >= args.max_det)),
@@ -272,12 +300,28 @@ def orchestrate(args):
         if free:
             true_max = max(c["detections_per_slice_max"] for c in free)
             true_mean = max(c["detections_per_slice_mean"] for c in free)
-            record["true_load"][str(conf)] = {
-                "max_per_slice": true_max, "mean_per_slice": true_mean,
-                "cap_300_engages": bool(true_max > 300),
-                "fraction_discarded_at_300": round(max(0.0, 1 - 300 / true_mean), 3)
-                if true_mean else 0.0,
-            }
+            # Prefer the uncapped per-slice counts, which make this exact for *any* cap. Cells
+            # written before this fix have no such list, so fall back to the two-cell mean ratio.
+            best = max(free, key=lambda c: len(c.get("detections_per_slice") or []))
+            counts = best.get("detections_per_slice") or []
+            capped = [c for c in record["cells"] if not c.get("failed")
+                      and c["conf"] == conf and c["max_det"] == 300]
+            entry = {"max_per_slice": true_max, "mean_per_slice": true_mean,
+                     "cap_300_engages": bool(true_max > 300)}
+            if counts:
+                entry["fraction_discarded_at_300"] = round(fraction_discarded_at_cap(counts, 300), 4)
+                entry["fraction_discarded_basis"] = "exact, per-slice uncapped counts"
+            elif capped and true_mean:
+                mean_at_cap = max(c["detections_per_slice_mean"] for c in capped)
+                entry["fraction_discarded_at_300"] = round(1 - mean_at_cap / true_mean, 4)
+                entry["fraction_discarded_basis"] = (
+                    f"mean_at_cap {mean_at_cap} / mean_uncapped {true_mean}, same slices")
+            else:
+                # No cap-300 cell to compare against. Say so; do not emit 0.0, which reads as
+                # "nothing was truncated" and is what made this defect publishable.
+                entry["fraction_discarded_at_300"] = None
+                entry["fraction_discarded_basis"] = "not measured: no max_det=300 cell at this conf"
+            record["true_load"][str(conf)] = entry
 
     out = Path(args.out) if args.out else (
         REPO / "data" / "review" /
