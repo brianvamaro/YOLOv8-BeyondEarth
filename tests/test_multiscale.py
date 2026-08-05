@@ -137,6 +137,48 @@ def test_no_argument_call_runs_production_arms_not_generic_defaults(tmp_path, mo
         assert key not in seen[0], key
 
 
+def test_two_identical_wrapper_calls_do_not_trip_the_conflict_guard(tmp_path, monkeypatch):
+    """Review item A2: the config hash that was *checked* was never the hash that was *written*.
+
+    ``resolved_config["per_scale_kwargs"]`` was built from the caller's ``**kwargs`` — empty for a
+    no-argument production call — checked against the manifest, and only *then* replaced with the 11
+    inherited ``GOAL1_PRODUCTION`` keys before being written. So the first call recorded one hash and
+    the second computed a different one from byte-identical inputs, and G1-07's guard reported a
+    configuration change that had not happened. It fired for every *named* preset, i.e. the default.
+
+    It mattered because the documented remedy — ``on_conflict="overwrite"`` — returns early from
+    ``check_config_conflict``, so working around it permanently disables the guard on the fused
+    deliverable. That is what turned A1 from "cannot be answered" into "was silently answered wrong".
+
+    The single-scale equivalent is pinned by ``test_provenance.test_a_different_config_cannot_
+    silently_overwrite``; the wrapper had no such test because each test here called it once.
+    """
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        g = _fake_scale_outputs(slice_size, sr_factor)
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+
+    P.get_multiscale_prediction(tmp_path / "scene.tif", None, output_dir=tmp_path,
+                                on_conflict="error")
+    P.get_multiscale_prediction(tmp_path / "scene.tif", None, output_dir=tmp_path,
+                                on_conflict="error")      # byte-identical: must not raise
+
+    # The guard is still live, and the recorded hash is the one a re-run recomputes — i.e. the
+    # record can verify itself, which is the property that was actually broken.
+    import json
+    out = tmp_path / "scene-predictions-fused-bands-engulf70-512-256-256sr2-mask.gpkg"
+    record = json.loads((tmp_path / (out.stem + "-manifest.json")).read_text())
+    assert record["config_hash"] == presets.config_hash(record["config"])
+    assert record["config"]["per_scale_kwargs"]["downscale_pred"] is True   # the arms as run
+
+    with pytest.raises(FileExistsError, match="different configuration"):
+        P.get_multiscale_prediction(tmp_path / "scene.tif", None, output_dir=tmp_path,
+                                    on_conflict="error", confidence_threshold=0.25)
+
+
 def test_explicit_arm_kwargs_still_win_over_the_preset(tmp_path, monkeypatch):
     seen = []
 

@@ -276,6 +276,97 @@ def test_manifest_does_not_rehash_an_already_identified_input(scene, model, tmp_
     assert sum(1 for s in seen if s.endswith("scene.tif")) == 1, seen
 
 
+# --- the mask producer's identity (review item A1) ------------------------------------------------
+
+def _stub_ckpt(tmp_path, name, payload):
+    path = tmp_path / name
+    path.write_bytes(payload)
+    return path
+
+
+def _remask_hash(sam_ckpt, **kw):
+    from YOLOv8BeyondEarth.orientation_validation import sam2_remasker
+    fn = sam2_remasker(SimpleNamespace(ckpt_path=str(sam_ckpt)), **kw)
+    return presets.config_hash({"remask_fn": presets.describe_callable(fn)})
+
+
+def test_solution_g_parameterisations_do_not_share_a_config_hash(tmp_path):
+    """A1: ``_jsonable`` reduced any callable to its ``__name__``, and ``sam2_remasker`` always
+    returns an inner function called ``remask`` — so *every* Solution-G configuration hashed
+    identically and ``check_config_conflict`` saw two different mask producers as the same run.
+
+    This is not a cosmetic provenance gap. Solution G **is** the re-masking configuration — it is the
+    entire content of the Goal-2 fix (diagonal fraction 0.428 -> 0.200) — and two of its parameters
+    changed inside a single delta (``SAM_PROMPT_CONF`` 0.25 -> 0.0, and ``max_box_blowup``). Since
+    ``mask_tag`` is the only remask knob that reaches the filename, a pre-fix and a post-fix run
+    resolved to the same name *and* the same hash, and the second silently overwrote the first.
+    """
+    ckpt_b = _stub_ckpt(tmp_path, "sam2.1_b.pt", b"base checkpoint")
+    ckpt_l = _stub_ckpt(tmp_path, "sam2.1_l.pt", b"large checkpoint, different weights")
+
+    base = _remask_hash(ckpt_b)
+    assert _remask_hash(ckpt_b) == base                        # same parameterisation, same hash
+    variants = {
+        "a different SAM checkpoint": _remask_hash(ckpt_l),
+        "a different background-grab guard": _remask_hash(ckpt_b, max_box_blowup=3.0),
+        "the pre-fix ultralytics prompt confidence": _remask_hash(ckpt_b, sam_conf=0.25),
+    }
+    for why, digest in variants.items():
+        assert digest != base, why
+    assert len(set(variants.values()) | {base}) == 4, "two parameterisations collided"
+
+
+def test_throughput_knobs_are_deliberately_outside_the_config_hash(tmp_path):
+    """``sam_batch`` / ``device`` / ``empty_cache_every`` are excluded on purpose.
+
+    ``sam_masks_in_order`` guarantees the same masks in the same order whichever chunking it used
+    (the count-mismatch path re-prompts one box at a time precisely to preserve that), so these are
+    throughput knobs, not result-defining ones. Folding them in would make a resume at a different
+    batch size trip G1-07 and demand ``on_conflict="overwrite"`` — which is the escape hatch that
+    disables the guard entirely, so a false conflict here costs real provenance elsewhere.
+    """
+    ckpt = _stub_ckpt(tmp_path, "sam2.1_b.pt", b"base checkpoint")
+    assert (_remask_hash(ckpt, sam_batch=96) == _remask_hash(ckpt, sam_batch=32)
+            == _remask_hash(ckpt, empty_cache_every=8) == _remask_hash(ckpt, device="cpu"))
+
+
+def test_manifest_records_which_mask_producer_made_the_masks(scene, model, tmp_path, monkeypatch):
+    """The other half of A1: ``write_manifest``'s ``inputs`` were ``{raster, YOLO weights}`` only, so
+    nothing on disk could say which SAM produced a published Goal-2 catalog. A factory advertises its
+    resolved identity on the closure; the pipeline forwards it to both the hash and the manifest."""
+    ckpt = _stub_ckpt(tmp_path, "sam2.1_b.pt", b"base checkpoint")
+
+    def remask(image, boxes_xyxy):
+        return [np.ones((SLICE, SLICE), np.float32) for _ in range(len(boxes_xyxy))]
+    remask.config = {"factory": "stub_remasker", "checkpoint": {"name": ckpt.name}}
+    remask.inputs = {"sam_checkpoint": presets.file_identity(ckpt)}
+
+    out = tmp_path / "out"
+    _run(scene, model, out, monkeypatch, remask_fn=remask, mask_tag="sam2")
+    record = json.loads(next(out.glob("*-manifest.json")).read_text())
+
+    assert record["config"]["remask_fn"]["config"]["factory"] == "stub_remasker"
+    assert record["config"]["mask_tag"] == "sam2"
+    assert record["inputs"]["sam_checkpoint"]["sha256"], "the SAM checkpoint is not in the manifest"
+    assert record["config_hash"] == presets.config_hash(record["config"])
+
+
+def test_a_different_sam_cannot_silently_overwrite_a_remasked_catalog(scene, model, tmp_path,
+                                                                      monkeypatch):
+    """A1's failure mode end to end: same ``mask_tag``, different mask producer, same filename."""
+    def _fn(tag):
+        def remask(image, boxes_xyxy):
+            return [np.ones((SLICE, SLICE), np.float32) for _ in range(len(boxes_xyxy))]
+        remask.config = {"factory": "stub_remasker", "checkpoint": {"name": tag}}
+        return remask
+
+    out = tmp_path / "out"
+    _run(scene, model, out, monkeypatch, remask_fn=_fn("sam2.1_b.pt"), mask_tag="sam2")
+    _run(scene, model, out, monkeypatch, remask_fn=_fn("sam2.1_b.pt"), mask_tag="sam2")   # same: ok
+    with pytest.raises(FileExistsError, match="different configuration"):
+        _run(scene, model, out, monkeypatch, remask_fn=_fn("sam2.1_l.pt"), mask_tag="sam2")
+
+
 def test_no_shared_temporary_files_between_runs(scene, model, tmp_path, monkeypatch):
     """G1-04: the footprint used to be written to a fixed ~/tmp/true-footprint.shp, shared by
     every process on the machine."""

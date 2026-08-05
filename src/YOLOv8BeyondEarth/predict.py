@@ -832,7 +832,9 @@ def get_sliced_prediction(in_raster,
         "postprocess_class_agnostic": bool(postprocess_class_agnostic),
         "contour_method": contour_method, "output_format": output_format,
         "batch_size": int(batch_size), "max_det": int(max_det), "mask_tag": mask_tag,
-        "remask_fn": getattr(remask_fn, "__name__", None) if remask_fn else None,
+        # Not `__name__`: a re-masker replaces *every* mask in the catalog, so which one ran is
+        # result-defining, and `sam2_remasker`'s closure is always called `remask` (review item A1).
+        "remask_fn": presets.describe_callable(remask_fn),
         "model_path": str(getattr(detection_model, "model_path", None)),
     }
 
@@ -988,12 +990,17 @@ def get_sliced_prediction(in_raster,
 
     def _finish(gdf_nms, written):
         """Serialize the resolved config and provenance beside the primary deliverable (G1-01)."""
+        weights = getattr(detection_model, "model_path", None)
+        # Every model whose weights shaped this catalog, not just the detector's. A re-masker built
+        # by a factory advertises its own inputs (already-hashed identity dicts, so the manifest does
+        # not re-read a 300 MB checkpoint) — review item A1.
+        inputs = {"raster": raster_identity,     # already hashed for the PNG cache; don't redo it
+                  **({"weights": weights} if weights else {}),
+                  **(getattr(remask_fn, "inputs", None) or {} if remask_fn else {})}
         presets.write_manifest(
             nms_mask_shp if postprocess else out_mask_shp,
             config=resolved_config,
-            inputs={"raster": raster_identity,   # already hashed for the PNG cache; don't redo it
-                    **({"weights": getattr(detection_model, "model_path", None)}
-                       if getattr(detection_model, "model_path", None) else {})},
+            inputs=inputs,
             outputs={"files": [p.name for p in written],
                      "n_detections": int(len(gdf)),
                      "n_after_nms": None if gdf_nms is None else int(len(gdf_nms))},
@@ -1050,11 +1057,16 @@ def predict_production(in_raster, detection_model, output_dir, preset="goal1_pro
     fall back to the preset value — and records the resolved configuration in the manifest beside
     the output.
 
-    ``**overrides`` are *preset* parameters, so a typo raises. Arguments that are not part of the
-    scientific configuration — ``on_conflict``, ``remask_fn``, ``mask_tag``, ``n_workers``,
-    ``on_max_det`` — are named explicitly and pass straight through, since they change nothing about
-    what the result means. (``max_det`` itself *is* result-defining, so it lives in the preset;
-    ``on_max_det`` only decides whether a truncated run fails or merely records it.)
+    ``**overrides`` are *preset* parameters, so a typo raises. Arguments that a preset does not own
+    — ``on_conflict``, ``remask_fn``, ``mask_tag``, ``n_workers``, ``on_max_det`` — are named
+    explicitly and pass straight through. Of those, only ``on_conflict``, ``n_workers`` and
+    ``on_max_det`` are genuinely outside the scientific configuration. ``remask_fn`` and ``mask_tag``
+    are **not**: a re-masker replaces every mask in the catalog and is the whole content of Solution G
+    (diagonal fraction 0.428 -> 0.200). They are recorded in the manifest and folded into the config
+    hash by way of ``presets.describe_callable`` — see review item A1, which is what an earlier
+    version of this docstring got wrong by asserting they "change nothing about what the result
+    means". (``max_det`` is result-defining too, so it lives in the preset; ``on_max_det`` only
+    decides whether a truncated run fails or merely records it.)
 
         gdf, gdf_nms = predict_production(raster, model, out_dir)
         gdf, gdf_nms = predict_production(raster, model, out_dir, slice_size=256)
@@ -1218,8 +1230,17 @@ def get_multiscale_prediction(in_raster,
                 f"{fuse_cfg['rule']}-engulf{int(round(fuse_cfg['engulf_thr'] * 100)):02d}")
     scales_str = "-".join(str(s) if isinstance(s, int) else f"{s[0]}sr{s[1]}" for s in scales)
     out_mask = output_dir / (in_raster.stem + f"-predictions-fused-{rule_str}-{scales_str}-mask" + ext)
+    # Resolve the arm configuration BEFORE hashing it. This used to record the caller's bare
+    # `**kwargs`, check that against the manifest, and only then replace it with the inherited
+    # `GOAL1_PRODUCTION` keys that were actually written — so the hash that was checked was never the
+    # hash that was written, and a second byte-identical call raised `FileExistsError` claiming a
+    # configuration change that had not happened (review item A2). It fired for every *named* preset,
+    # i.e. the default, and the documented workaround — `on_conflict="overwrite"` — switches G1-07 off
+    # on the fused deliverable, which is exactly what made A1 dangerous. Nothing may mutate
+    # `resolved_config` after the check below.
+    arm_kwargs = {**_production_arm_kwargs(preset), **kwargs}
     resolved_config = {"preset": preset if preset is None else str(preset),
-                       "fusion": fuse_cfg, "per_scale_kwargs": dict(kwargs),
+                       "fusion": fuse_cfg, "per_scale_kwargs": dict(arm_kwargs),
                        "output_format": output_format,
                        "inference_contract_version": INFERENCE_CONTRACT_VERSION}
     presets.check_config_conflict(out_mask, resolved_config, on_conflict)
@@ -1227,8 +1248,6 @@ def get_multiscale_prediction(in_raster,
     _check_in_memory_budget(in_raster, scales, max_in_memory_px, allow_in_memory)
 
     per_scale = {}
-    arm_kwargs = {**_production_arm_kwargs(preset), **kwargs}
-    resolved_config["per_scale_kwargs"] = dict(arm_kwargs)
     for key in scales:
         slice_size, sr_factor = (key if isinstance(key, (tuple, list)) else (key, 1))
         _, gdf_nms = get_sliced_prediction(

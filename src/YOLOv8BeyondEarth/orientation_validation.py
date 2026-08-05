@@ -14,9 +14,12 @@ model/segmentation artifact?" with measurements that do NOT depend on the YOLO m
 Heavy IO deps (rasterio, pyogrio) are imported lazily so importing the orientation primitives
 stays cheap. Companion notebook: ``notebooks/Goal2_orientation_HiRISE_investigation.ipynb``.
 """
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
+from . import presets
 from .orientation import ellipse_angle180, structure_tensor_orientation, orientation_field
 from .polygon import _mask_bounds
 
@@ -956,6 +959,30 @@ def sam2_remasker(sam_model, sam_batch=96, max_box_blowup=1.5, device=0, empty_c
             torch.cuda.empty_cache()
         return masks
 
+    # Provenance (review item A1). Solution G *is* the re-masking configuration, so which SAM and
+    # which guards produced a catalog's masks has to survive onto disk — and it cannot be added
+    # retroactively once the run has written. `presets._jsonable` reads `.config` in preference to
+    # `__name__`, which is what puts these into the `config_hash` and so back under G1-07's
+    # overwrite guard; `.inputs` is merged into the manifest's `inputs` by the caller.
+    #
+    # Only the *result-defining* parameters go in `.config`. `sam_batch`, `device` and
+    # `empty_cache_every` are deliberately left out: `sam_masks_in_order` returns the same masks in
+    # the same order whatever the chunking (that is what the one-box-at-a-time realignment exists
+    # for), so folding them in would make a resume at a different batch size raise a false conflict
+    # — and the documented remedy for a false conflict is `on_conflict="overwrite"`, which switches
+    # the guard off altogether. A spurious conflict here costs real provenance elsewhere.
+    ckpt = getattr(sam_model, "ckpt_path", None) or getattr(sam_model, "model_name", None)
+    identity = presets.file_identity(ckpt) if ckpt else {"path": None, "exists": False}
+    remask.config = {
+        "factory": "sam2_remasker",
+        # Content, not location or mtime: a checkpoint that moves between machines must keep its
+        # hash, or every re-run on a second machine reads as a different configuration.
+        "checkpoint": {"name": Path(ckpt).name if ckpt else None,
+                       "bytes": identity.get("bytes"), "sha256": identity.get("sha256")},
+        "sam_conf": float(sam_conf),
+        "max_box_blowup": float(max_box_blowup),
+    }
+    remask.inputs = {"sam_checkpoint": identity}
     return remask
 
 

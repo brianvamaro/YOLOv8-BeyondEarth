@@ -133,12 +133,39 @@ def _jsonable(value):
     if isinstance(value, float):
         return value if np.isfinite(value) else str(value)
     if callable(value):
-        return f"<callable {getattr(value, '__name__', type(value).__name__)}>"
+        # A closure's *name* is not its identity (review item A1). `sam2_remasker` always returns an
+        # inner function called `remask`, so reducing to `__name__` gave every Solution-G
+        # parameterisation — every SAM checkpoint, every `sam_conf`, every `max_box_blowup` — the
+        # same `config_hash`, and `check_config_conflict` therefore saw two different mask producers
+        # as the same run. Factories whose parameters change the result advertise them on the
+        # returned callable as `.config`; prefer that over the name.
+        name = getattr(value, "__name__", type(value).__name__)
+        cfg = getattr(value, "config", None)
+        if cfg is None:
+            return f"<callable {name}>"
+        return {"callable": name, "config": _jsonable(cfg)}
     return repr(value)
 
 
+def describe_callable(fn):
+    """JSON-able provenance for a callable a result depends on, or ``None``.
+
+    Use this rather than ``getattr(fn, "__name__", None)`` anywhere a callable is part of the
+    configuration that defines a result — see :func:`_jsonable` for why the name alone is not
+    enough. Returns a plain structure, so the caller's ``resolved_config`` stays serializable and
+    does not pin the model the closure captured alive through ``gdf.attrs``.
+    """
+    return None if fn is None else _jsonable(fn)
+
+
 def config_hash(config, length=8):
-    """Stable short hash of a resolved configuration — two differing configs cannot collide."""
+    """Short digest of a resolved configuration, stable across a JSON round-trip.
+
+    Stable means a config read back out of a manifest hashes to the value it was written with, so a
+    record can verify itself. It is **not** a proof of distinctness: it is a truncated digest, and it
+    can only separate two configurations whose difference actually *reaches* :func:`_jsonable` — a
+    callable carrying no ``.config`` still reduces to its bare name (review item A1).
+    """
     payload = json.dumps(_jsonable(config), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:length]
 
