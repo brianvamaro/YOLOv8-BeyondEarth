@@ -510,3 +510,59 @@ def test_tile_edge_flag_survives_pooling():
     fused, _ = fuse_predictions({(256, 1, "A"): a, (256, 1, "B"): b})
     assert "is_at_edge" in fused.columns
     assert fused.sort_values("scale_key")["is_at_edge"].tolist() == [True, False]
+
+
+# --- the bands rule must not depend on how a caller spells its scale keys ------------------------
+# Found 2026-08-05 by code review. `pool_predictions` stored `str(key)` and band matching compared
+# against `str(band_key)`, so `rule="bands"` silently matched nothing whenever the caller keyed its
+# arms differently from the bands dict. The two production callers do exactly that:
+# `get_multiscale_prediction` iterates `scales=(512, 256, (256, 2))` and keys the 256 arm as the int
+# `256`; `scripts/run_multiscale_arms.py` keys it via `parse_arm()` as `(256, 1)`. So the production
+# rule `256pref_engulf` was ACTIVE on crops and INERT on every full scene — and no test saw it,
+# because the in-memory wrapper refuses scene-scale rasters (G3-09) and only the wrapper was tested.
+
+def _three_arm_ladder(key_512, key_256, key_sr):
+    """The production ladder, with the caller's choice of key spelling."""
+    return {key_512: make_gdf([(0, 0, 8, 8)], scores=[0.90]),
+            key_256: make_gdf([(1, 0, 9, 8)], scores=[0.50]),
+            key_sr: make_gdf([(2, 0, 10, 8)], scores=[0.40])}
+
+
+@pytest.mark.parametrize("keys", [
+    (512, 256, (256, 2)),                    # get_multiscale_prediction
+    ((512, 1), (256, 1), (256, 2)),          # scripts/run_multiscale_arms.py (parse_arm)
+])
+def test_bands_rule_is_invariant_to_scale_key_spelling(keys):
+    """Both production callers must get the same fusion. The 256 arm is in-band and so must win the
+    contested cluster despite having the *lowest* score of the three — that is the entire content of
+    `256pref`, and it is what silently stopped happening at scene scale."""
+    fused, _ = fuse_predictions(_three_arm_ladder(*keys), rule="bands",
+                                bands={256: (0.0, np.inf)}, native_res=1.0, cross_arm_only=True)
+    assert int(fused["in_band"].sum()) == 1, "the 256 arm was not matched by the band"
+    assert len(fused) == 1, "the three overlapping detections did not cluster"
+    kept = fused.iloc[0]
+    assert kept["arm_key"] == "256", f"256pref did not win; kept {kept['arm_key']!r}"
+    assert kept["score"] == pytest.approx(0.50), "a higher-scoring off-band arm won the cluster"
+
+
+def test_arm_key_collapses_spellings_but_keeps_seam_tiles_distinct():
+    """`arm_key` is the *scale* identity a band names; `scale_key` is the *full* identity cross-tile
+    dedup needs. Collapsing the second would turn seam fusion into a no-op (interaction note 1)."""
+    from YOLOv8BeyondEarth.fusion import arm_key
+    assert arm_key(256) == arm_key((256, 1)) == arm_key((256, 1, "tile_03")) == "256"
+    assert arm_key((256, 2)) == "256sr2"
+    assert arm_key(512) != arm_key(256)
+
+    tiles = {(256, 1, "tile_a"): make_gdf([(0, 0, 8, 8)]),
+             (256, 1, "tile_b"): make_gdf([(1, 0, 9, 8)])}
+    pooled = pool_predictions(tiles)
+    assert set(pooled["arm_key"]) == {"256"}, "both tiles are the same arm"
+    assert pooled["scale_key"].nunique() == 2, "seam tiles must stay distinguishable"
+
+
+def test_a_bands_key_that_matches_no_arm_is_refused():
+    """The failure mode this defect had: `in_band` all-False, `bands` quietly degrading to
+    `scale_aware`, and a plausible catalog out the other end. Silence is the bug, so it now raises."""
+    with pytest.raises(ValueError, match="matches no arm"):
+        fuse_predictions({512: make_gdf([(0, 0, 8, 8)])}, rule="bands",
+                         bands={256: (0.0, np.inf)}, native_res=1.0)

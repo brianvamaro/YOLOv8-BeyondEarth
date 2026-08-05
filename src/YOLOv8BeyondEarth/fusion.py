@@ -84,6 +84,35 @@ def _parse_scale_key(key):
     return int(key), 1.0
 
 
+def arm_key(key):
+    """Canonical **arm** identity: slice size and SR factor only, tag excluded.
+
+    There are two different identities in play here and conflating them was a real defect.
+
+    * ``scale_key`` (``str(key)``) is the *full* identity and must keep neighbouring seam tiles
+      distinct, because they are the same scale and cross-tile dedup depends on telling them apart
+      (phase 5c, and interaction note 1 in the review backlog).
+    * ``arm_key`` is the *scale* identity, which is what a ``bands`` dict is written in terms of. A
+      band applies to "the 256 arm", not to "the 256 arm of tile_03".
+
+    Matching bands on the full key made ``rule="bands"`` depend on how the caller happened to spell its
+    dict keys, and the two production callers spell them differently:
+    ``get_multiscale_prediction`` iterates ``scales=(512, 256, (256, 2))`` and so keys the 256 arm as
+    the int ``256``, while ``scripts/run_multiscale_arms.py`` keys it through ``parse_arm()`` as the
+    tuple ``(256, 1)``. ``str(256) != str((256, 1))``, so on **every full-scene run** the production
+    band ``{256: (0, inf)}`` matched nothing, ``in_band`` was all-False, and ``256pref_engulf`` silently
+    degraded to plain ``scale_aware`` ordering — the 256 arm won nothing at all. Crop-scale runs went
+    through the other caller and were fine, which is exactly why no test caught it: the in-memory
+    wrapper refuses scene-scale rasters by design (G3-09), so the validated path and the production path
+    were never the same path.
+
+    ``256`` and ``(256, 1)`` and ``(256, 1, "tile_03")`` all return ``"256"``; ``(256, 2)`` returns
+    ``"256sr2"``.
+    """
+    slice_size, sr_factor = _parse_scale_key(key)
+    return str(slice_size) if sr_factor == 1.0 else f"{slice_size}sr{sr_factor:g}"
+
+
 def pool_predictions(gdfs):
     """Pool per-scale GeoDataFrames into one, attaching the provenance columns.
 
@@ -105,6 +134,7 @@ def pool_predictions(gdfs):
             raise ValueError(f"scale {key!r}: no is_within_slice/isin_slice column — the "
                              "truncation guard needs it (present in all pipeline outputs)")
         g["scale_key"] = str(key)
+        g["arm_key"] = arm_key(key)      # scale identity, tag-free: what `bands` is written in
         g["slice_size"] = slice_size
         g["sr_factor"] = sr_factor
         g["footprint"] = slice_size / sr_factor
@@ -294,8 +324,24 @@ def fuse_predictions(gdfs, cluster_thr=DEFAULT_CLUSTER_THR, metric="diou", rule=
             raise ValueError("rule='bands' needs bands={scale_key: (lo_px, hi_px)} and native_res")
         dpx = equivalent_diameter_px(pool, native_res)
         in_band = np.zeros(n, dtype=bool)
+        # Match on the tag-free ARM identity, not on `str(key)`: a band names a scale, and the two
+        # production callers spell the same scale differently (see `arm_key`). Matching the raw string
+        # made the production band silently match nothing on every full-scene run.
+        present = pool["arm_key"].to_numpy()
         for key, (lo, hi) in bands.items():
-            in_scale = pool["scale_key"].to_numpy() == str(key)
+            want = arm_key(key)
+            in_scale = present == want
+            if not in_scale.any():
+                # A band that names an arm which is not in the pool is almost always a key-spelling
+                # mistake, and its failure mode is invisible: `in_band` stays False, `rule="bands"`
+                # quietly degrades to `scale_aware`, and the run still produces a plausible catalog.
+                # That is exactly how `256pref_engulf` was inert in production while passing on crops,
+                # so this is fatal rather than a warning.
+                raise ValueError(
+                    f"bands key {key!r} (arm {want!r}) matches no arm in the pool; present arms are "
+                    f"{sorted(set(present))}. A bands rule whose key matches nothing degrades "
+                    "silently to scale_aware ordering, so this is refused rather than ignored. Note "
+                    f"`256` and `(256, 1)` are the same arm — pass the scale, not the raw dict key.")
             in_band |= in_scale & (dpx >= lo) & (dpx < hi)
         pool["in_band"] = in_band
 
