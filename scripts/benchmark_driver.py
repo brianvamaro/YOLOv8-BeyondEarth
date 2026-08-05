@@ -150,6 +150,10 @@ def run_once(raster, weights, out_dir, preset, overrides, rep, device="cuda:0", 
         "peak_gpu_gb": peak_gpu_gb(),
         "outputs": {"n_detections": int(len(gdf)), "n_after_nms": n_kept,
                     "discarded": dict(gdf.attrs.get("discarded", {})),
+                    # A3: kept rows that came from a fallback producer. Its own channel, so it is not
+                    # read as loss — and a re-masker falling back often is a cost signal too, since
+                    # the SAM call was paid for and then thrown away.
+                    "fallbacks": dict(gdf.attrs.get("fallbacks", {})),
                     # X-06: a benchmark run whose slices hit max_det measured a truncated workload,
                     # so the timing is not comparable with one that did not.
                     "truncation": dict(gdf.attrs.get("truncation", {}))},

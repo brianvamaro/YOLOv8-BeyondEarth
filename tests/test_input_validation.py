@@ -14,6 +14,7 @@ produced an empty catalog that was indistinguishable from an empty scene.
 import warnings
 from types import SimpleNamespace
 
+import geopandas as gpd
 import numpy as np
 import pytest
 import rasterio as rio
@@ -234,6 +235,43 @@ def test_systematic_unexpected_failure_warns(model, raster, tmp_path, monkeypatc
     assert len(gdf) == 0
     msgs = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
     assert any("pipeline failure" in m and "trace_failed:ValueError" in m for m in msgs), msgs
+
+
+def test_a_healthy_solution_g_run_does_not_report_a_pipeline_failure():
+    """Review item A3, with the reviewer's own reproduction.
+
+    ``remask_fallback_to_yolo`` counts detections that are **in the catalog** carrying the detector's
+    mask, but it was summed into both the ``unexpected`` numerator and the ``total`` denominator — so
+    a healthy Solution-G run tripped the one warning that is supposed to mean "systematically
+    broken", and ``attrs["discarded"]`` reported rows as lost that are present in the file. The rates
+    here are the real ones recorded in commit f4d8a22: 777 native-SAM guard failures, ~26,112 rows.
+    """
+    gdf = gpd.GeoDataFrame({"score": []}, geometry=[])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        P._report_discards(gdf, {"below_area_gate": 120, "remask_fallback_to_yolo": 777},
+                           n_kept=26112, truncation={})
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)], \
+        [str(w.message) for w in caught]
+
+    # survivors live in their own channel, and are not counted as losses
+    assert gdf.attrs["fallbacks"] == {"remask_fallback_to_yolo": 777}
+    assert gdf.attrs["discarded"] == {"below_area_gate": 120}
+
+
+def test_losing_a_detection_with_no_fallback_still_warns():
+    """The other half of A3's "decide explicitly". Before G2-03 this drop was named
+    ``remask_returned_none`` and was listed as expected, because back then *every* guard failure
+    deleted the detection. Now it fires only when there is no mask to fall back to, which means rows
+    were lost outright — so it must stay unexpected. The rename left the old key in the expected set,
+    which both broke the classification and left a dead string in the code."""
+    gdf = gpd.GeoDataFrame({"score": []}, geometry=[])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        P._report_discards(gdf, {"remask_failed_no_fallback": 50}, n_kept=100, truncation={})
+    msgs = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert any("pipeline failure" in m and "remask_failed_no_fallback" in m for m in msgs), msgs
+    assert "remask_returned_none" not in P._EXPECTED_DISCARDS
 
 
 def test_intentional_drops_do_not_warn(model, raster, tmp_path, monkeypatch):

@@ -78,6 +78,27 @@ logger = logging.getLogger(__name__)
 #: run warns. Area-gate and edge drops are intentional and excluded from the count.
 _DISCARD_WARN_FRACTION = 0.01
 
+#: Reasons that are **not discards at all** — the detection is in the catalog, carrying a note. They
+#: go to ``attrs["fallbacks"]`` rather than ``attrs["discarded"]``, for the same reason X-06 gave
+#: ``truncation`` its own channel: the units differ, so mixing them corrupts the arithmetic. Summing
+#: a survivor into "detections discarded for unexpected reasons" made a *healthy* Solution-G run trip
+#: the one warning that is supposed to mean "systematically broken" — 777 fallbacks against 26,112
+#: kept rows reads as 2.9% unexpected loss, while those 777 rows are present with ``mask_src="yolo"``
+#: (review item A3).
+_SURVIVOR_REASONS = ("remask_fallback_to_yolo",)
+
+#: Discards that are deliberate, so they never raise the "pipeline failure" warning.
+#:
+#: ``remask_failed_no_fallback`` is **deliberately absent** — the decision A3 asked for. Before
+#: G2-03 (commit 4231b23) this drop was called ``remask_returned_none`` and *was* expected, because
+#: back then any re-mask guard failure deleted the detection and ~0.68% of rows did so routinely.
+#: G2-03 changed what it means: a guard failure now falls back to the detector's own mask, so this
+#: reason fires only when there is **no** mask to fall back to — i.e. a detect-only model driving a
+#: ``remask_fn``, never the production seg path. On that path it is unreachable; off it, it means
+#: detections were lost outright with no recourse, which is exactly what X-05's warning is for. The
+#: rename left the old key here and so silently reclassified the drop; both halves are fixed.
+_EXPECTED_DISCARDS = ("below_area_gate", "slice_truncated_interior", "duplicate_geometry")
+
 
 def _report_discards(gdf, discarded, n_kept, truncation=None):
     """Attach the per-reason discard tally to the result and warn if failures look systematic.
@@ -86,25 +107,35 @@ def _report_discards(gdf, discarded, n_kept, truncation=None):
     re-masker or tracer reads as "a quiet scene" (review item X-05). Intentional drops (the area
     gate, interior slice truncation, exact duplicates) are recorded but never warned about.
 
-    ``truncation`` is the separate, **slice-level** channel X-06 added: whole groups of detections
-    the model never returned, so they cannot appear in a per-detection tally at all. It is kept in
-    its own ``attrs`` key precisely because its values count *slices*, not detections — summing it
-    into the discard denominator above would make the "unexpected fraction" arithmetic meaningless.
+    Three channels, deliberately separate because their units differ and no sum across them is
+    meaningful:
+
+    - ``attrs["discarded"]`` — detections the model produced that the pipeline did not keep.
+    - ``attrs["fallbacks"]`` — detections it *did* keep, with a caveat (:data:`_SURVIVOR_REASONS`).
+      No warning threshold is asserted on these: a fallback rate that would undermine a Goal-2
+      aggregate is a science judgement, and ``mask_src`` records the truth per row, so a consumer can
+      compute it exactly rather than trust a number nobody validated.
+    - ``truncation`` — the **slice-level** channel X-06 added: whole groups of detections the model
+      never returned, so they cannot appear in a per-detection tally at all. Its values count
+      *slices*, not detections, so summing it into the discard denominator would make the "unexpected
+      fraction" arithmetic meaningless.
     """
     tally = {k: v for k, v in discarded.items() if v}
+    fallbacks = {k: tally.pop(k) for k in _SURVIVOR_REASONS if k in tally}
     gdf.attrs["discarded"] = tally
-    expected = {"below_area_gate", "slice_truncated_interior", "duplicate_geometry",
-                "remask_returned_none"}
-    unexpected = sum(v for k, v in tally.items() if k not in expected)
+    gdf.attrs["fallbacks"] = fallbacks
+    unexpected = sum(v for k, v in tally.items() if k not in _EXPECTED_DISCARDS)
     total = n_kept + sum(tally.values())
     if unexpected and total and unexpected / total > _DISCARD_WARN_FRACTION:
         warnings.warn(
             f"{unexpected} of {total} detections ({unexpected / total:.1%}) were discarded for "
             f"unexpected reasons: "
-            f"{ {k: v for k, v in tally.items() if k not in expected} }. "
+            f"{ {k: v for k, v in tally.items() if k not in _EXPECTED_DISCARDS} }. "
             "This is a pipeline failure, not an empty scene.", RuntimeWarning, stacklevel=3)
     if tally:
         logger.info("discarded detections by reason: %s", tally)
+    if fallbacks:
+        logger.info("detections kept via a fallback producer (see mask_src): %s", fallbacks)
 
     trunc = {k: v for k, v in (truncation or {}).items() if v}
     gdf.attrs["truncation"] = trunc
@@ -776,11 +807,16 @@ def get_sliced_prediction(in_raster,
           when a ``remask_fn`` succeeded. A failed re-mask **keeps the detection** with the
           detector's own mask rather than deleting the row, so Solution G is genuinely
           detector-preserving (review item G2-03); the count is in
-          ``attrs["discarded"]["remask_fallback_to_yolo"]``.
+          ``attrs["fallbacks"]["remask_fallback_to_yolo"]``.
 
         ``gdf.attrs["discarded"]`` holds the per-reason count of detections the model produced but
         the pipeline did not keep, and ``gdf.attrs["resolved_config"]`` the parameters that
         produced the result (review items X-05 and G1-01).
+
+        ``gdf.attrs["fallbacks"]`` counts detections that **are** in the catalog but were produced by
+        a fallback — today only ``remask_fallback_to_yolo``. It is separate from ``discarded``
+        because these rows were kept: counting them as losses made a healthy Solution-G run report a
+        "pipeline failure" and understated the catalog it had just written (review item A3).
 
         ``gdf.attrs["truncation"]`` holds the **slice-level** losses — detections the model never
         returned at all, so they cannot appear in the per-detection tally (review item X-06):
@@ -1006,6 +1042,7 @@ def get_sliced_prediction(in_raster,
                      "n_after_nms": None if gdf_nms is None else int(len(gdf_nms))},
             crs=str(gdf.crs) if len(gdf) else None,
             discarded=gdf.attrs.get("discarded", {}),
+            fallbacks=gdf.attrs.get("fallbacks", {}),
             truncation=gdf.attrs.get("truncation", {}),
             wall_seconds=round(time.perf_counter() - started, 3),
             n_slices=int(num_slices))
