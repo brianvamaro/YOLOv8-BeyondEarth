@@ -99,12 +99,24 @@ def arm_key(key):
     dict keys, and the two production callers spell them differently:
     ``get_multiscale_prediction`` iterates ``scales=(512, 256, (256, 2))`` and so keys the 256 arm as
     the int ``256``, while ``scripts/run_multiscale_arms.py`` keys it through ``parse_arm()`` as the
-    tuple ``(256, 1)``. ``str(256) != str((256, 1))``, so on **every full-scene run** the production
-    band ``{256: (0, inf)}`` matched nothing, ``in_band`` was all-False, and ``256pref_engulf`` silently
-    degraded to plain ``scale_aware`` ordering — the 256 arm won nothing at all. Crop-scale runs went
-    through the other caller and were fine, which is exactly why no test caught it: the in-memory
-    wrapper refuses scene-scale rasters by design (G3-09), so the validated path and the production path
-    were never the same path.
+    tuple ``(256, 1)``. ``str(256) != str((256, 1))``, so **any run driven through that runner** had the
+    production band ``{256: (0, inf)}`` match nothing, ``in_band`` all-False, and ``256pref_engulf``
+    silently degrade to plain ``scale_aware`` ordering — the 256 arm winning nothing at all. No test
+    caught it because the in-memory wrapper refuses scene-scale rasters by design (G3-09), so the
+    validated path and that runner were never the same path.
+
+    **Blast radius — narrowed 2026-08-06 (review pass 8). This docstring previously said "on every
+    full-scene run", and that was wrong: no published number came from the broken caller.** The phase-4
+    full-scene artifacts (``data/solutionDE/fullscene/``) are dated **2026-07-11**, whereas
+    ``scripts/run_multiscale_arms.py`` was first added on **2026-07-31** (``66a6a56``) — it did not exist
+    when they were produced. They were produced by ``data/solutionDE/run_fullscene_goal3.py``, which keys
+    the arm as an ``int``. Four independent confirmations: those layers carry ``in_band`` **True on
+    exactly the kept 256 rows** (HiRISE 1,106,542, byte-equal to ``composition['256']``; NAC 21,015),
+    which the bug makes all-False by construction; the layers predate the fix by three weeks; and
+    scene-scale 256 retention is **99.43%** against **99.5%** for ``256pref_engulf`` and **29.1%** for
+    ``scale_aware`` on the crop. **So the phase-4 benchmark is valid scene-scale evidence for the rule,
+    and must not be re-run on G3-12's account.** This was a live hazard for *future* runs through that
+    runner, which is why the fix stands. See ``docs/code_review_2026-08-06_pass8.md`` §1.
 
     ``256`` and ``(256, 1)`` and ``(256, 1, "tile_03")`` all return ``"256"``; ``(256, 2)`` returns
     ``"256sr2"``.
