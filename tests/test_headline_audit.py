@@ -64,6 +64,8 @@ def test_g2_09_is_only_a_defect_while_the_table_disagrees(tmp_path):
     ("GATE-PEAKS", "the control sites give peaks at 43-76 degrees"),
     ("G2-01", "it is not something the re-masker introduces"),
     ("T3-01", "the near-circular pile-up is 12.9% on the treatment scene"),
+    ("T2-RECALL", "counts collapse at high incidence (7-24 vs 211-711 on identical ground)"),
+    ("T2-RECALL", "the detector finds 7–24 boulders where its partner finds 211–711"),
 ])
 def test_retired_claims_are_caught(tmp_path, cid, line):
     problems = _check(tmp_path, line)
@@ -89,6 +91,21 @@ def test_the_exemption_ends_at_a_blank_line(tmp_path):
             "\n"
             "SAM beats YOLO on every body.\n")
     assert len(_check(tmp_path, text)) == 1
+
+
+def test_matched_count_check_does_not_crash_without_the_table(tmp_path):
+    """`main()` runs the document scan with n_matched=None so it works on a fresh clone. Before the
+    pass-9 fix, any document quoting a matched count made that pre-scan raise TypeError from the
+    f-string — so the check named after the very defect this script exists for could never report."""
+    problems = _check(tmp_path, "The study matched 20,896 objects matched to a human label.")
+    assert problems == [], "no table means no matched-count verdict, but it must not raise"
+
+
+def test_matched_count_check_fires_when_the_table_is_present(tmp_path):
+    """...and with the table it must still catch a wrong count."""
+    problems = _check(tmp_path, "26,830 objects matched to a human label.",
+                      {"n_matched": 20896, "n_detections": 30756, "sam_wins_every_body": False})
+    assert len(problems) == 1 and "26,830" in problems[0] and "20,896" in problems[0]
 
 
 # --- an audit that cannot audit must not report success -------------------------------------------

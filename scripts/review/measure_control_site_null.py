@@ -157,10 +157,25 @@ def main():
         max_rayleigh_p=max(r["rayleigh_p"] for r in own),
         peak_range=[min(peaks), max(peaks)] if peaks else None,
         f_lower_range=[min(r["f_lower"] for r in own), max(r["f_lower"] for r in own)],
-        # The bar to write into the plan. An absolute R is the wrong shape for a gate because the
-        # null moves with n; this does not.
-        gate_form="R_candidate > max(R_control_max, sqrt(-ln(0.05)/n_candidate))",
-        R_control_max=max(r["R"] for r in own),
+        # The bar to write into the plan. Set at the largest bootstrap UPPER limit, not the largest
+        # point estimate: a bar at max-of-five point estimates is a bar set at its own sampling
+        # noise, and 0.443 sits below one control site's own R, so that site would essentially tie
+        # its own gate. Both are recorded so the difference stays visible.
+        gate_form="R_candidate > max(R_control_max_upper95, sqrt(-ln(0.05)/n_candidate))",
+        R_control_max_upper95=round(max(r["R_ci"][1] for r in own if r["R_ci"]), 4),
+        R_control_max_point_estimate=max(r["R"] for r in own),
+        gate_form_caveats=[
+            "sqrt(-ln(0.05)/n) exceeds the absolute term only for n < 16, so for any realistic "
+            "candidate this is a FLAT bar with a small-n guard, not a bar that scales with n.",
+            "R_control_max is strongly conditional on the aspect cut (0.330/0.443/0.509/0.539/0.642 "
+            "at aspect 1.0/1.35/1.5/1.7/2.0), so candidate and null MUST be read at one stated cut.",
+            "A map is thousands of cells. Applied per cell at alpha=0.05 this gate manufactures "
+            "fabric; it needs FDR control, a minimum effective n, and a tiling-preserving "
+            "permutation null before any map cell may be claimed. See goal4_global_maps_plan.md "
+            "gate 4 and backlog item G4-07.",
+            "A scalar R cannot separate a fabric aligned with the artifact axis from one orthogonal "
+            "to it, and this null is Mars-only at incidence 44.8-63.4 deg.",
+        ],
         note=("Densities from this sample are X-06 lower bounds (max_det unpassed on the "
               "2026-07-27 run); no density is quoted here. Angle statistics on this >=8 px / "
               ">=4 m tail are the high-confidence end and are not plausibly moved by the cap."))

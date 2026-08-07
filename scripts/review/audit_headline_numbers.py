@@ -98,6 +98,33 @@ RETIRED_CLAIMS = [
     ("T3-01", re.compile(r"12\.9\s*%|12\.88\s*%"),
      "the Test-3 near-circular pile-up is 4.23% on the production new-skimage set; 12.9% pooled "
      "three stacked catalogs, one of which (new-cv2) reads 35.5% on its own"),
+    # The two claims THIS SESSION withdrew. Review pass 9's skeptic found the registry had no entry
+    # for either — the guard built to stop the hand-out quoting withdrawn claims was empty exactly
+    # where it was needed, and both claims were still live in the citable document.
+    ("PEAKS-CARDINAL", re.compile(r"peaks?\s+(?:sit|sits|land|lands|lie|lies)\s+on\s+the\s+"
+                                  r"(?:pixel\s+)?cardinals?"
+                                  r"|peaks?\s+(?:are\s+)?on\s+the\s+cardinal\s+ax",
+                                  re.IGNORECASE),
+     "estimator-dependent and NOT established: under refine_peak the control-site peaks average "
+     "8.7 deg from a cardinal, under the doubled-angle circular mean 17.4 deg (MC p 0.20 vs 0.007); "
+     "on the 11 HiRISE scenes fig07 flips 13.5 deg / 6-of-11 / p 0.010 to 19.6 deg / 2-of-11 / "
+     "p 0.227. Cite the grid FRACTIONS, which need no peak estimator"),
+    ("NOT-INHERITED", re.compile(r"each\s+(?:producer|masker)\s+imprints\s+its\s+own"
+                                 r"|not\s+a\s+single\s+inherited\s+effect"
+                                 r"|exchanges?\s+YOLO'?s?\s+diagonal", re.IGNORECASE),
+     "pass 5 reported the residual as manufactured-not-inherited; pass 6 RETRACTED that (the "
+     "statistic conditioned each producer's rose on its own aspect column) and the standing verdict "
+     "is 'inherited (SAM ~ YOLO)' — the intersection has the two producers agreeing at 5/5 sites "
+     "under both estimators. What SAM does add is a cardinal signature on FRACTIONS; say that "
+     "instead. See fig09_controls._population_note"),
+    ("T2-RECALL", re.compile(r"7\s*[-–]\s*24\s*(?:vs|against)\s*211\s*[-–]\s*711"
+                             r"|211\s*[-–]\s*711", re.IGNORECASE),
+     "the pooled high-incidence recall collapse is a CROSS-PAIR MIXTURE: of the six repeat-pair "
+     "members, 24 is a low-incidence member and 498 a high-incidence one, so the two ranges are not "
+     "high-vs-low at all. Same-ground the three pairs give 30x (2270a), 1.43x and inverted on raw "
+     "counts (2270b), and cannot-tell (2260b, high-vs-high) — and the no-collapse pair is the only "
+     "statistically usable one. Source data/sam2_validation/t2_hirise_meta.json; table in "
+     "orientation_results_summary.md section T2"),
 ]
 
 
@@ -154,12 +181,18 @@ def check_docs(facts, docs=None):
             if in_correction:
                 continue          # the paragraph is disclaiming the wording, not asserting it
             flat = normalise(line)
-            for m in matched_pat.finditer(flat):
-                value = int(m.group(1).replace(",", ""))
-                if value != facts["n_matched"]:
-                    problems.append(
-                        f"{path.name}:{lineno}: quotes {value:,} as a matched count; the table "
-                        f"has {facts['n_matched']:,} matched of {facts['n_detections']:,}")
+            # Only runnable with the table. `main()` deliberately calls check_docs with
+            # n_matched=None first, so the retired-claim scan works on a fresh clone — without this
+            # guard that pre-scan raised TypeError from the f-string the moment any document quoted
+            # a matched count, i.e. the check named after the defect this script was written for
+            # could never report. Found by review pass 9.
+            if facts.get("n_matched") is not None:
+                for m in matched_pat.finditer(flat):
+                    value = int(m.group(1).replace(",", ""))
+                    if value != facts["n_matched"]:
+                        problems.append(
+                            f"{path.name}:{lineno}: quotes {value:,} as a matched count; the table "
+                            f"has {facts['n_matched']:,} matched of {facts['n_detections']:,}")
             for cid, pat, why in RETIRED_CLAIMS:
                 if cid == "G2-09" and facts.get("sam_wins_every_body"):
                     continue      # only a defect while the table says otherwise

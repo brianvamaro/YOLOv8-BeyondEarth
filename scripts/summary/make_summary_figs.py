@@ -900,12 +900,32 @@ def _scene_summary(st, order):
     # and the pixel diagonals, and comparing all three is what identifies the mechanism — the same
     # test the control sites use, so the two sections can be read against each other.
     pk = arr("peak")
-    dcard = np.array([min(axial_distance(p, 0.0), axial_distance(p, 90.0)) if np.isfinite(p)
-                      else np.nan for p in pk])
-    ddiag = np.array([min(axial_distance(p, 45.0), axial_distance(p, 135.0)) if np.isfinite(p)
-                      else np.nan for p in pk])
+
+    def _dc(p):
+        return min(axial_distance(p, 0.0), axial_distance(p, 90.0)) if np.isfinite(p) else np.nan
+
+    def _dd(p):
+        return min(axial_distance(p, 45.0), axial_distance(p, 135.0)) if np.isfinite(p) else np.nan
+
+    dcard = np.array([_dc(p) for p in pk])
+    ddiag = np.array([_dd(p) for p in pk])
+    # The SECOND estimator, for the same reason fig09 records it: this project's peak conclusions
+    # flip between refine_peak (mode of a sigma=4 smoothed density) and the doubled-angle circular
+    # mean, and on these 11 scenes they do — |peak-cardinal| 13.5 -> 19.6 deg, 6-of-11 -> 2-of-11
+    # within 10 deg. Any claim quoted off `peak` alone is a claim about the estimator.
+    pk_cm = arr("peak_circmean")
+    dcard_cm = np.array([_dc(p) for p in pk_cm])
+    ddiag_cm = np.array([_dd(p) for p in pk_cm])
     out = dict(n_scenes=len(order), n_with_power=int(powered.sum()),
-               ci_power_limit_deg=CI_POWER_LIMIT, random_expectation=45.0,
+               ci_power_limit_deg=CI_POWER_LIMIT,
+               # Two different nulls. |peak - sun| is the distance to ONE axis: null 45. The
+               # cardinal and diagonal distances are a `min` over two axes 90 deg apart, so half the
+               # range is unreachable and the null is 22.5. A single `random_expectation=45.0` made
+               # both of the latter look significant for free; it is split here.
+               random_expectation_sun=45.0, random_expectation_cardinal_or_diagonal=22.5,
+               mean_peak_minus_cardinal_circmean=round(float(np.nanmean(dcard_cm)), 1),
+               mean_peak_minus_diagonal_circmean=round(float(np.nanmean(ddiag_cm)), 1),
+               n_peaks_within_10deg_of_cardinal_circmean=int(np.nansum(dcard_cm <= 10)),
                mean_peak_minus_sun=round(float(np.nanmean(dsun)), 1),
                mean_peak_minus_sun_powered_only=(round(float(np.nanmean(dsun[powered])), 1)
                                                 if powered.any() else None),
