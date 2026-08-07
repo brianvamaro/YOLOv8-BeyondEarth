@@ -232,6 +232,22 @@ if __name__ == "__main__":
             print(f"[{k + 1}/{len(pngs)}] elapsed {time.time() - t_all:.0f}s", flush=True)
     wall["total_s"] = round(time.time() - t_all, 2)
 
+    # A tile that failed contributed no predictions but its TRUTHS are still built into `gts` below,
+    # so it scores as pure recall loss and silently depresses both arms' AP. Both arms lose the same
+    # tiles, so the arm-to-arm comparison (the number that matters) survives — but the absolute value
+    # does not, and the pre-registered gate is a comparison of absolutes. Drop the failed tiles from
+    # the truth side and say so, rather than quietly charging the detector for them.
+    if failures:
+        failed_stems = {stem for stem, _ in failures}
+        print(f"WARNING: {len(failed_stems)} of {len(pngs)} tiles failed; excluding them from the "
+              "truth set so they are not scored as recall loss. The gate below is computed on "
+              f"{len(pngs) - len(failed_stems)} tiles.", flush=True)
+    else:
+        failed_stems = set()
+    if not fused_frames or not base_frames:
+        raise RuntimeError(
+            f"every tile failed ({len(failures)} failures); nothing to score. First: "
+            f"{failures[0] if failures else None}")
     fused_cat = pd.concat(fused_frames, ignore_index=True)
     base_cat = pd.concat(base_frames, ignore_index=True)
     gpd.GeoDataFrame(fused_cat).to_file(OUT / "fused_catalog.gpkg")
@@ -242,6 +258,8 @@ if __name__ == "__main__":
     transform = from_origin(0, PAD, RES, RES)
     gts = {}
     for png in pngs:
+        if png.stem in failed_stems:
+            continue                       # see the WARNING above: not scored, not charged
         txt = DATA / "labels" / f"{png.stem}.txt"
         gts[png.stem] = load_yolo_seg_labels(txt, 500, 500, transform=transform) \
             if txt.exists() else []

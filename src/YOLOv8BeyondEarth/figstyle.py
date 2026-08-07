@@ -37,9 +37,12 @@ Two consequences worth knowing before editing:
 - ``sam``/``arm_sr2``/``obb_ra`` (aqua) sits at **2.74:1** against a white surface, below the 3:1
   mark minimum. That is a WARN, not a pass, and it obligates a relief channel — which is why every
   panel here carries a text title naming its producer and printing ``n``. Do not remove those labels.
-- The **sun axis is drawn in ink, not in a series hue**, deliberately. Orange would have been the
-  obvious choice and it collapses against aqua under deuteranopia (CVD ΔE 5.6); ink is ΔE 32 from
-  every series colour. It is further distinguished by its dash pattern and a direct label, so it can
+- The **sun axis is drawn in ink, not in a series hue**, deliberately. A *red* annotation was the
+  other candidate and it collapses against the orange reference under deuteranopia (CVD ΔE 5.6 — the
+  same figure quoted for ``obb_d0`` below, and the reason that slot is violet); ink is ΔE 32.9 from
+  every series colour. *(Corrected 2026-08-06: this read "orange … collapses against aqua … ΔE 5.6",
+  which contradicted line 30 above — the orange/aqua pair is the validated producer-triple worst pair
+  at ΔE **9.2**, a pass. The 5.6 belongs to red-vs-orange.)* It is further distinguished by its dash pattern and a direct label, so it can
   never be misread as a fourth producer.
 - Series colours are **1.1–2.2:1** against mid-grey imagery, i.e. invisible. Outlines drawn on a
   raster therefore *must* go through :func:`outline_effects`, which adds a contrasting casing.
@@ -99,6 +102,9 @@ UNIFORM_FRACTION = grid_fraction_uniform(10.0)
 
 # Sun-axis annotation: ink + a dash pattern + a direct label = three channels, no hue.
 _SUN_DASH = (0, (7, 2, 1.5, 2))
+
+#: "absent" marker for per-panel overrides, so a panel may legitimately pass ``None``.
+_sentinel = object()
 
 
 def color_of(color):
@@ -569,11 +575,23 @@ def rose_grid(panels, *, aspect_min, dpx_min, dm_min=None, ncols=None, suptitle=
             draw_sun_axis(ax, sun_axis=p["sun_axis"], label=p.get("sun_label", "sun"),
                           rmax=None if off_scale else rmax)
         sl = _stat_line(a, p.get("stats", stats), p.get("sun_axis"))
-        ax.set_title("\n".join(x for x in (p["label"], f"n = {a.size:,}", sl, p.get("note")) if x),
-                     fontsize=7.4, color=INK, pad=6)
+        # A panel that overrides any of the three cuts must SAY so in its own title, because the
+        # footer defers to it ("subset cuts differ between panels - each panel states its own").
+        # Until 2026-08-06 this caption was assigned to `ax._subset_cut` and never read by anything,
+        # so a mixed-cut grid rendered unlabelled panels under a footer promising otherwise - the
+        # one counterexample to this module's "there is no code path that draws an unlabelled rose"
+        # (review pass 9, D3-09). Latent, since both shipped callers pass figure-level cuts only.
         ax._subset_cut = subset_caption(aspect_min=p.get("aspect_min", aspect_min),
                                         dpx_min=p.get("dpx_min", dpx_min),
                                         dm_min=p.get("dm_min", dm_min))
+        panel_cut = (ax._subset_cut
+                     if any(p.get(k, _sentinel) not in (_sentinel, v)
+                            for k, v in (("aspect_min", aspect_min), ("dpx_min", dpx_min),
+                                         ("dm_min", dm_min)))
+                     else None)
+        ax.set_title("\n".join(x for x in (p["label"], f"n = {a.size:,}", sl, p.get("note"),
+                                           panel_cut) if x),
+                     fontsize=7.4, color=INK, pad=6)
         axes.append(ax)
     for i in range(n, nrows * ncols):
         fig.add_subplot(gs[i // ncols, i % ncols]).axis("off")

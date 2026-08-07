@@ -19,7 +19,9 @@ axis is drawn in ink rather than a series colour, and outlines over imagery get 
 import argparse
 import json
 import pickle
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -71,8 +73,11 @@ def _record(path):
         rel = str(p.resolve().relative_to(REPO))
     except ValueError:
         rel = str(p)
+    # `pd.Timestamp(posix, unit="s")` is tz-naive **UTC**, printed under a column labelled
+    # "modified" — 7 hours off local here, enough to move a file across a same-day boundary in a
+    # table a reader uses to ask "was this catalog written before X-06?" (review pass 9, D3-10).
     entry = dict(path=rel, bytes=p.stat().st_size if p.exists() else None,
-                 mtime=(pd.Timestamp(p.stat().st_mtime, unit="s").strftime("%Y-%m-%d %H:%M")
+                 mtime=(datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
                         if p.exists() else None))
     if not any(e["path"] == rel for e in _STATE["opened"]):
         _STATE["opened"].append(entry)
@@ -138,9 +143,18 @@ def build(name, save_png=False):
     fs.apply_rcparams()
     _STATE.update(fig=None, opened=[], save_png=save_png)
     _, st = REGISTRY[name]["fn"]()
+    measured = list(_STATE["opened"])
+    declared = " ".join(REGISTRY[name]["inputs"])
+    # The same cross-check the CLI runs. It used to exist only in `main()`, so the notebook — the
+    # path a reader actually executes, and the one Appendix B describes — never performed it
+    # (review pass 9, D3-05). `provenance_unverified` is the honest flag for a figure whose reads
+    # bypass the intercepted helpers: an empty `measured_inputs` is not evidence of cleanliness.
     prov = dict(name=name, title=REGISTRY[name]["title"],
                 declared_inputs=list(REGISTRY[name]["inputs"]),
-                measured_inputs=list(_STATE["opened"]))
+                measured_inputs=measured,
+                undeclared_inputs=[e["path"] for e in measured
+                                   if Path(e["path"]).name not in declared],
+                provenance_unverified=not measured)
     return _STATE["fig"], st, prov
 
 
@@ -709,28 +723,57 @@ def fig06_quantization():
     fig, ax = plt.subplots(1, 2, figsize=(10.4, 3.8))
     width = 0.26
 
-    def measure(b, acol, pcol, dpx_min):
-        s = t[(t.body == b) & (t[pcol] > ASPECT_MIN)]
-        if dpx_min:
-            s = s[s.dpx_sam >= dpx_min]
+    def measure(b, acol, pcol, dpx_min, population="reference"):
+        """Exact-snap rate and mean distance to the nearest pixel axis, for one producer on one body.
+
+        ``population`` decides who defines the rocks, and it is not a detail — it is worth a factor
+        of ~3 here (review pass 9, defect D3-04):
+
+        ``"reference"``   the humans decide which rocks are elongated and well-resolved, then all
+                          three producers are read on exactly those rocks. This is the project rule
+                          (`:530-532`) and what :func:`fig04a_threeway_matched` does, so it is what
+                          is plotted.
+        ``"own_aspect"``  each producer gated on its *own* aspect column — three different sets of
+                          rocks, which is what this figure published until 2026-08-06. Kept so the
+                          previously-shipped numbers stay reproducible and the size of the correction
+                          stays visible; the sibling defect in ``fig05`` was disclosed a day earlier
+                          and this one was simply missed.
+
+        Note the direction: the own-aspect gate *understated* YOLO's snap rate, so the corrected
+        reading makes the artifact **stronger**, not weaker.
+        """
+        s = t[t.body == b]
+        if population == "reference":
+            s = s[s.h_angle.notna() & (s.h_aspect > ASPECT_MIN)]
+            if dpx_min:
+                s = s[s.h_dpx >= dpx_min]
+        else:
+            s = s[s[pcol] > ASPECT_MIN]
+            if dpx_min:
+                s = s[s.dpx_sam >= dpx_min]
         a = s[acol].dropna().values % 180.0
         if not len(a):
             return np.nan, np.nan, 0
         d = np.minimum.reduce([axial_distance(a, v) for v in (0, 45, 90, 135)])
         return float((d <= TOL).mean()) * 100, float(d.mean()), int(len(a))
 
-    # No size floor here, deliberately: this is a statement about the whole elongated catalogue (and
-    # it is the subset the published quantization table used). The well-resolved subset is measured
-    # too and reported in the caption, because "does it survive a size cut?" is the obvious question.
+    # No size floor on the headline bars, deliberately: this is a statement about the whole elongated
+    # catalogue. The well-resolved subset is measured too and reported in the caption, because "does
+    # it survive a size cut?" is the obvious question.
     st = dict(exact_tol_deg=TOL, exact_fraction={}, mean_distance_to_axis={},
               uniform_mean_distance=11.25, exact_fraction_well_resolved={},
-              well_resolved_cut_px=DPX_MIN)
+              well_resolved_cut_px=DPX_MIN,
+              population="reference (h_aspect > 1.35, h_angle present; h_dpx for the size cut)",
+              exact_fraction_own_aspect_SUPERSEDED={})
     for k, (tag, acol, pcol, col) in enumerate(prods):
-        ex, md, ns, exw = [], [], [], []
+        ex, md, ns, exw, exo = [], [], [], [], []
         for b in bodies:
             e, m_, n_ = measure(b, acol, pcol, None)
             ex.append(e); md.append(m_); ns.append(n_)
             exw.append(measure(b, acol, pcol, DPX_MIN)[0])
+            exo.append(measure(b, acol, pcol, None, population="own_aspect")[0])
+        st["exact_fraction_own_aspect_SUPERSEDED"][tag] = dict(
+            zip(bodies, [None if not np.isfinite(v) else round(v, 2) for v in exo]))
         x = np.arange(len(bodies)) + (k - 1) * width
         ax[0].bar(x, ex, width, color=fs.color_of(col), edgecolor=fs.INK, lw=0.3, label=tag)
         for xi, v in zip(x, ex):
@@ -750,7 +793,9 @@ def fig06_quantization():
                            "(Mars / Moon / Earth)",
                transform=ax[0].transAxes, va="top", fontsize=6.6, color=fs.INK_SOFT)
     ax[0].set_ylabel("% of angles landing within 0.01° of\na pixel axis (0/45/90/135°)", fontsize=8)
-    ax[0].set_title("The artifact: a minority of angles snap EXACTLY onto a pixel axis",
+    # NOT "a minority": on the reference-defined population YOLO snaps 48.6% of Moon angles exactly
+    # onto a pixel axis. The old title was written against the own-aspect read, where it was 16.3%.
+    ax[0].set_title("The artifact: angles snap EXACTLY onto a pixel axis — up to half of them",
                     fontsize=9.5)
     _null_line(ax[1], 11.25, "isotropic  11.25°")
     ax[1].set_ylabel("mean distance to the nearest pixel axis (°)", fontsize=8)
@@ -764,7 +809,7 @@ def fig06_quantization():
     ax[0].set_ylim(top=max(v for d in st["exact_fraction"].values()
                            for v in d.values() if isinstance(v, float)) * 1.55)
     ax[1].set_ylim(0, 13.2)
-    fig.suptitle(f"boulder2024 validation tiles, matched boulders  ·  aspect > {ASPECT_MIN}  ·  "
+    fig.suptitle(f"boulder2024 validation tiles, matched boulders  ·  HUMAN aspect > {ASPECT_MIN}  ·  "
                  "no size floor  —  this is why the rose, not median |Δangle|, is the metric of "
                  "record", fontsize=9.6, y=1.04)
     fig.tight_layout()
@@ -1856,6 +1901,43 @@ def main():
                            measured_inputs=measured, title=REGISTRY[n]["title"], stats=st)
     sp.write_text(json.dumps(allstats, indent=2, default=str))
     print(f"\nstats -> {sp.relative_to(REPO)}")
+
+    # Two softer signals, reported but not fatal because each has a legitimate case.
+    #   `declared_unopened`: a decorator naming a fallback the run did not need (fig09's superseded
+    #                        quota sample is explicitly labelled "fallback only").
+    #   `no_measured`:       every figure reads something, so an empty list means the reads went
+    #                        around the intercepted helpers (gpd.read_file, rasterio.open, np.load)
+    #                        and this check is BLIND to that figure — which is worth knowing, since
+    #                        a blind row looks identical to a clean one in the provenance table.
+    declared_unopened, no_measured = [], []
+    for n in names:
+        rec = allstats.get(n)
+        if not rec:
+            continue
+        opened = " ".join(Path(e["path"]).name for e in rec["measured_inputs"])
+        if not rec["measured_inputs"]:
+            no_measured.append(n)
+        for decl in rec["inputs"]:
+            # A declaration is free prose that may name several files ("illumination geometry: a.json,
+            # b.json, c.json") or a glob. Pull out every path-like token and count the declaration as
+            # honoured if ANY of them was opened; a declaration naming no file at all (e.g. "measured
+            # tables") cannot be checked and is skipped rather than reported as a phantom miss.
+            names = {Path(tok.strip(" ,;()")).name
+                     for tok in re.findall(r"[\w./\\*-]+\.\w{2,5}\b", decl)}
+            if names and not any(nm in opened for nm in names):
+                declared_unopened.append((n, decl))
+    for label, items, note in (
+            ("DECLARED BUT NOT OPENED", declared_unopened,
+             "the decorator names a source this run did not read (a fallback is legitimate; a "
+             "silently-dropped input is not)"),
+            ("NO MEASURED INPUTS — this figure's provenance is UNVERIFIED", no_measured,
+             "its reads bypass read_csv/load_json/load_pickle, so the cross-check below cannot see "
+             "them")):
+        if items:
+            print(f"\n{label} ({note}):")
+            for it in items:
+                print(f"  {it if isinstance(it, str) else f'{it[0]}: {it[1]}'}")
+
     if undeclared:
         print("\nUNDECLARED INPUTS (a figure read a file its decorator does not mention —\n"
               "update the decorator so the document's provenance line stays true):")
@@ -1865,6 +1947,11 @@ def main():
         print("\nFAILED figures (nothing was silently skipped):")
         for n, e in failed:
             print(f"  {n}: {e}")
+    # A figure reading a file nobody declared is a FALSE PROVENANCE CLAIM in a citable document, so
+    # it exits non-zero like a build failure. Until 2026-08-06 this only printed and returned 0,
+    # while Appendix B told the reader it "fails loudly otherwise" — a guard that fails open,
+    # described as one that does not (review pass 9, D3-05).
+    if failed or undeclared:
         raise SystemExit(1)
 
 

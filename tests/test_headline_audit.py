@@ -23,8 +23,10 @@ import audit_headline_numbers as A                                          # no
 _TABLE_ABSENT = {"n_matched": None, "n_detections": None, "sam_wins_every_body": False}
 
 
-def _check(tmp_path, text, facts=None):
-    p = tmp_path / "doc.md"
+def _check(tmp_path, text, facts=None, name="doc.md"):
+    """`name` matters: in a jupytext `.py` a leading '# ' is a comment marker, in a `.md` it is an
+    H1 heading — and headings end a correction paragraph while comment markers do not."""
+    p = tmp_path / name
     p.write_text(text, encoding="utf-8")
     return A.check_docs(facts or _TABLE_ABSENT, docs=[p])
 
@@ -80,8 +82,25 @@ def test_a_retraction_may_quote_the_wording_it_retracts(tmp_path):
 def test_the_exemption_spans_the_paragraph_not_just_the_line(tmp_path):
     """A retraction wraps. The retired wording usually lands on a continuation line that carries no
     marker of its own, so a line-scoped exemption produces false positives on correct documents."""
+    text = ("*(Corrected 2026-08-06: this cell read\n"
+            "\"lower than YOLO on **every** body\", contradicting the table below.)*\n")
+    assert _check(tmp_path, text) == []
+
+
+def test_the_exemption_spans_a_wrapped_python_comment(tmp_path):
+    """Same, in a jupytext source, where every line carries a '# ' that is NOT a heading."""
     text = ("# *(Corrected 2026-08-06: this cell read\n"
             "#   \"lower than YOLO on **every** body\", contradicting the table below.)*\n")
+    assert _check(tmp_path, text, name="doc.py") == []
+
+
+def test_the_exemption_survives_a_blockquote_continuation(tmp_path):
+    """A blockquote is a container, not an assertion: '> ' continuation lines inside a retraction
+    quote must stay exempt, or a wrapped sentence resets on every single line. This is the shape the
+    real T2 correction in orientation_results_summary.md uses."""
+    text = ("> ⚠ **Withdrawn 2026-08-06.** The pooled form of this is a cross-pair mixture:\n"
+            "> the ranges quoted as high-vs-low incidence, 7-24 vs 211-711, put two of the six\n"
+            "> members on the wrong side.\n")
     assert _check(tmp_path, text) == []
 
 
@@ -90,6 +109,24 @@ def test_the_exemption_ends_at_a_blank_line(tmp_path):
     text = ("⚠ Corrected: an earlier draft overstated this.\n"
             "\n"
             "SAM beats YOLO on every body.\n")
+    assert len(_check(tmp_path, text)) == 1
+
+
+def test_the_exemption_ends_at_the_next_list_item(tmp_path):
+    """The blast-radius fix (pass 9, D1-02). Scoping the exemption to 'until the next blank line'
+    silenced 11.4% of all tracked lines, because these documents put the disclaiming word in the
+    FIRST bullet of long lists — so one caveat bullet exempted every claim after it."""
+    text = ("- One caveat: densities from this sample are lower bounds.\n"
+            "- The roses still reach R = 0.35 with peaks at 43-76 deg.\n"
+            "- The near-circular pile-up is 12.9% on the treatment scene.\n")
+    problems = _check(tmp_path, text)
+    assert len(problems) == 3, f"a caveat bullet must not silence its siblings: {problems}"
+
+
+def test_a_list_item_inside_a_quote_still_ends_the_exemption(tmp_path):
+    """Stripping the '>' container must not also swallow the list marker underneath it."""
+    text = ("> ⚠ Corrected: an earlier draft overstated this.\n"
+            "> - SAM beats YOLO on every body.\n")
     assert len(_check(tmp_path, text)) == 1
 
 

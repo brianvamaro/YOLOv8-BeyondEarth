@@ -57,6 +57,12 @@ _CORRECTION = re.compile(r"(⚠|corrected|caveat|but NOT|no longer|used to read|
                          r"|withdrawn|retracted|WRONG|does not reproduce)", re.IGNORECASE)
 
 
+#: A line that begins a NEW assertion, ending any correction paragraph in force. Blockquote markers
+#: are stripped before this is applied (a quote is a container), so `> - item` still counts.
+_NEW_BLOCK = re.compile(r"^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\|)")
+_QUOTE_PREFIX = re.compile(r"^(?:>\s*)+")
+
+
 def normalise(line):
     """Strip markdown emphasis and possessives so a claim cannot hide behind formatting.
 
@@ -169,17 +175,29 @@ def check_docs(facts, docs=None):
         text = path.read_text(encoding="utf-8", errors="replace")
         # A retraction is usually a paragraph, not a line: "(Corrected 2026-08-06: this read <the
         # retired wording>...)" wraps, and the wording lands on a continuation line carrying no
-        # marker of its own. So the exemption persists to the end of the paragraph — a blank line,
-        # or a bare comment marker, ends it.
+        # marker of its own. So the exemption persists across the *continuation* of that paragraph.
+        #
+        # But only the continuation. Scoping it to "until the next blank line" silenced **11.4% of
+        # all tracked lines**, longest unbroken run 47, because these documents put `⚠`/`caveat`/
+        # `corrected` in the first bullet of long bullet lists — so one disclaiming bullet exempted
+        # every claim after it (review pass 9, D1-02; demonstrated with a live smuggled claim).
+        # A new list item, heading, table row or block quote starts a new assertion and ends the
+        # exemption, which keeps the wrapped-retraction case working without the blast radius.
+        is_py = path.suffix == ".py"
         in_correction = False
         for lineno, line in enumerate(text.splitlines(), 1):
-            stripped = line.strip().lstrip("#").strip()
-            if not stripped:
+            raw = line.strip()
+            # In the jupytext .py sources a leading "# " is the comment marker, not a heading.
+            body = raw[1:].strip() if is_py and (raw == "#" or raw.startswith("# ")) else raw
+            # A blockquote is a CONTAINER, not an assertion: "> " continuation lines inside a
+            # retraction quote must stay exempt, or a wrapped sentence resets on every line.
+            body = _QUOTE_PREFIX.sub("", body)
+            if not body or _NEW_BLOCK.match(body):
                 in_correction = False
             if _CORRECTION.search(line):
                 in_correction = True
             if in_correction:
-                continue          # the paragraph is disclaiming the wording, not asserting it
+                continue          # this is the continuation of a retraction, not a fresh assertion
             flat = normalise(line)
             # Only runnable with the table. `main()` deliberately calls check_docs with
             # n_matched=None first, so the retired-claim scan works on a fresh clone — without this
