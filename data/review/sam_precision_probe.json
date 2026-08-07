@@ -1,0 +1,36 @@
+{
+  "raster": "ESP_017355_2260_RED.tif",
+  "n_slices": 12,
+  "n_boxes": 3944,
+  "sam_weights": "sam2.1_b.pt",
+  "power": {
+    "on_ac_power": true,
+    "battery_percent": 100,
+    "nvidia_smi": "2550 MHz, 96.74 W, [N/A]"
+  },
+  "identical": 2658,
+  "differing": 1286,
+  "unusable": 0,
+  "fraction_identical": 0.6739,
+  "claim_fraction_identical": 0.8,
+  "angle_delta_over_all_comparable_masks_deg": {
+    "median": 0.0,
+    "p90": 10.2577,
+    "p99": 59.0234,
+    "max": 89.5003
+  },
+  "angle_delta_over_differing_masks_only_deg": {
+    "n": 1286,
+    "median": 4.5051,
+    "p90": 32.328
+  },
+  "claim_median_deg": 0.0,
+  "claim_p90_deg": 3.09,
+  "comparison_bar_note": "the plan compares fp16's p90 against the crop-position jitter's MEDIAN (4.65 deg Mars / 2.69 deg Moon). That is not like-for-like, but it is conservative: matching the statistics would only make fp16 look better.",
+  "wall_seconds": {
+    "fp32": 12.96,
+    "fp16": 6.06
+  },
+  "wall_ratio_fp32_over_fp16": 2.137,
+  "wall_caveat": "single short run on a machine with a Modern-Standby / power-cap history; NOT a quotable speedup. Both sides ran back-to-back in one process, so the ratio is the only part with any standing."
+}

@@ -162,7 +162,21 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Local sample data / model weights (not committed)
-data/
+# Local sample data / model weights (not committed).
+# `data/**` + `!data/**/` rather than a bare `data/`: git will not descend into an excluded
+# DIRECTORY, so a bare `data/` makes the re-inclusions below impossible. This form ignores every
+# file under data/ while keeping the tree walkable.
+data/**
+!data/**/
+# ...the drivers and analysis scripts living under data/ are SOURCE, not data (2026-08-06).
+# 69 of them, and they are what produced most of the Goal-2/3 evidence — including
+# `data/solutionDE/run_ap50_test.py`, whose config-blind resume was a re-run blocker, and
+# `data/summary/run_fixed_area_scenes.py`, which produced the control-site null. Leaving them
+# untracked meant fixes to them were not durable and never reached review, which is exactly the
+# provenance failure the July/August review kept finding. Rasters, weights, catalogs and CSVs stay
+# ignored; the small JSON artifacts that a live gate *cites* are tracked so a claim's evidence
+# travels with the claim.
+!data/**/*.py
+!data/review/*.json
 # Model weights auto-downloaded by ultralytics into CWD (e.g. sam2.1_b.pt) — never commit
 *.pt

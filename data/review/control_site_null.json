@@ -1,0 +1,276 @@
+{
+ "source": "data\\summary\\fixed_area_scenes.csv",
+ "sample": "equal-area, 10 km2/scene, shuffled tiles",
+ "seed": 20260806,
+ "n_boot": 2000,
+ "sites": [
+  {
+   "scene": "ESP_013249_1270",
+   "res_m": 0.25,
+   "incidence": 44.801,
+   "sun_axis": 107.8,
+   "km2_valid": 10.01,
+   "n_tiles": 286,
+   "own_aspect": {
+    "n": 1965,
+    "R": 0.2252,
+    "R_null_mean": 0.02,
+    "R_null_p95": 0.039,
+    "R_over_null": 11.26,
+    "rayleigh_p": 5.346363725818803e-44,
+    "R_ci": [
+     0.1992,
+     0.2519
+    ],
+    "peak": 84.5,
+    "f_lower": 0.597,
+    "grid": 0.255,
+    "diag": 0.215
+   },
+   "no_aspect_cut": {
+    "n": 4182,
+    "R": 0.1617,
+    "R_null_mean": 0.0137,
+    "R_null_p95": 0.0268,
+    "R_over_null": 11.8,
+    "rayleigh_p": 3.3077607145533394e-48,
+    "R_ci": [
+     0.1409,
+     0.1854
+    ],
+    "peak": 82.5,
+    "f_lower": 0.571,
+    "grid": 0.241,
+    "diag": 0.224
+   }
+  },
+  {
+   "scene": "ESP_021862_1175",
+   "res_m": 0.25,
+   "incidence": 49.287,
+   "sun_axis": 114.5,
+   "km2_valid": 10.01,
+   "n_tiles": 329,
+   "own_aspect": {
+    "n": 1540,
+    "R": 0.2965,
+    "R_null_mean": 0.0226,
+    "R_null_p95": 0.0441,
+    "R_over_null": 13.13,
+    "rayleigh_p": 1.542835075018466e-59,
+    "R_ci": [
+     0.2658,
+     0.3311
+    ],
+    "peak": 79.6,
+    "f_lower": 0.583,
+    "grid": 0.268,
+    "diag": 0.168
+   },
+   "no_aspect_cut": {
+    "n": 3728,
+    "R": 0.2043,
+    "R_null_mean": 0.0145,
+    "R_null_p95": 0.0283,
+    "R_over_null": 14.07,
+    "rayleigh_p": 2.802040574131046e-68,
+    "R_ci": [
+     0.1817,
+     0.2295
+    ],
+    "peak": 78.7,
+    "f_lower": 0.557,
+    "grid": 0.243,
+    "diag": 0.206
+   }
+  },
+  {
+   "scene": "ESP_030222_1220",
+   "res_m": 0.5,
+   "incidence": 52.671,
+   "sun_axis": 108.8,
+   "km2_valid": 10.03,
+   "n_tiles": 151,
+   "own_aspect": {
+    "n": 2388,
+    "R": 0.1955,
+    "R_null_mean": 0.0181,
+    "R_null_p95": 0.0354,
+    "R_over_null": 10.78,
+    "rayleigh_p": 2.397780602054428e-40,
+    "R_ci": [
+     0.1629,
+     0.2315
+    ],
+    "peak": 82.4,
+    "f_lower": 0.573,
+    "grid": 0.286,
+    "diag": 0.192
+   },
+   "no_aspect_cut": {
+    "n": 8010,
+    "R": 0.1204,
+    "R_null_mean": 0.0099,
+    "R_null_p95": 0.0193,
+    "R_over_null": 12.16,
+    "rayleigh_p": 3.593084186592402e-51,
+    "R_ci": [
+     0.1032,
+     0.1386
+    ],
+    "peak": 82.2,
+    "f_lower": 0.545,
+    "grid": 0.253,
+    "diag": 0.216
+   }
+  },
+  {
+   "scene": "TRA_000828_2495",
+   "res_m": 0.25,
+   "incidence": 53.467,
+   "sun_axis": 54.6,
+   "km2_valid": 10.01,
+   "n_tiles": 345,
+   "own_aspect": {
+    "n": 271,
+    "R": 0.4399,
+    "R_null_mean": 0.0538,
+    "R_null_p95": 0.1051,
+    "R_over_null": 8.17,
+    "rayleigh_p": 1.6962496991730456e-23,
+    "R_ci": [
+     0.3717,
+     0.5152
+    ],
+    "peak": 17.3,
+    "f_lower": 0.756,
+    "grid": 0.292,
+    "diag": 0.17
+   },
+   "no_aspect_cut": {
+    "n": 534,
+    "R": 0.3296,
+    "R_null_mean": 0.0384,
+    "R_null_p95": 0.0749,
+    "R_over_null": 8.59,
+    "rayleigh_p": 6.392318408594864e-26,
+    "R_ci": [
+     0.2727,
+     0.3841
+    ],
+    "peak": 18.1,
+    "f_lower": 0.706,
+    "grid": 0.257,
+    "diag": 0.185
+   }
+  },
+  {
+   "scene": "ESP_076499_1160",
+   "res_m": 0.5,
+   "incidence": 63.388,
+   "sun_axis": 129.9,
+   "km2_valid": 10.03,
+   "n_tiles": 104,
+   "own_aspect": {
+    "n": 1673,
+    "R": 0.4429,
+    "R_null_mean": 0.0217,
+    "R_null_p95": 0.0423,
+    "R_over_null": 20.44,
+    "rayleigh_p": 2.871641700590138e-143,
+    "R_ci": [
+     0.4079,
+     0.4784
+    ],
+    "peak": 87.3,
+    "f_lower": 0.633,
+    "grid": 0.344,
+    "diag": 0.129
+   },
+   "no_aspect_cut": {
+    "n": 5107,
+    "R": 0.313,
+    "R_null_mean": 0.0124,
+    "R_null_p95": 0.0242,
+    "R_over_null": 25.24,
+    "rayleigh_p": 4.920921810732743e-218,
+    "R_ci": [
+     0.2912,
+     0.335
+    ],
+    "peak": 86.4,
+    "f_lower": 0.581,
+    "grid": 0.287,
+    "diag": 0.186
+   }
+  }
+ ],
+ "summary": {
+  "n_sites": 5,
+  "cut": "aspect_sam > 1.35 (own_aspect row only), dpx_sam >= 8, dm_sam >= 4.0 m",
+  "producer": "sam256 (angle_sam) \u2014 the Goal-4 production masker",
+  "n_range": [
+   271,
+   2388
+  ],
+  "R_range": [
+   0.1955,
+   0.4429
+  ],
+  "R_median": 0.2965,
+  "R_null_mean_range": [
+   0.0181,
+   0.0538
+  ],
+  "R_over_null_range": [
+   8.17,
+   20.44
+  ],
+  "max_rayleigh_p": 1.6962496991730456e-23,
+  "peak_range": [
+   17.3,
+   87.3
+  ],
+  "f_lower_range": [
+   0.573,
+   0.756
+  ],
+  "gate_form": "R_candidate > max(R_control_max, sqrt(-ln(0.05)/n_candidate))",
+  "R_control_max": 0.4429,
+  "note": "Densities from this sample are X-06 lower bounds (max_det unpassed on the 2026-07-27 run); no density is quoted here. Angle statistics on this >=8 px / >=4 m tail are the high-confidence end and are not plausibly moved by the cap."
+ },
+ "null_verification": {
+  "8": {
+   "mc_mean_R": 0.3178,
+   "formula_mean_R": 0.3133,
+   "mc_p95_R": 0.6,
+   "formula_p95_R": 0.6119,
+   "mc_frac_above_formula_p95": 0.0442
+  },
+  "100": {
+   "mc_mean_R": 0.0882,
+   "formula_mean_R": 0.0886,
+   "mc_p95_R": 0.1729,
+   "formula_p95_R": 0.1731,
+   "mc_frac_above_formula_p95": 0.0496
+  },
+  "1000": {
+   "mc_mean_R": 0.0277,
+   "formula_mean_R": 0.028,
+   "mc_p95_R": 0.0538,
+   "formula_p95_R": 0.0547,
+   "mc_frac_above_formula_p95": 0.0447
+  }
+ },
+ "supersedes": {
+  "bar": "R ~ 0.35, peaks 43-76 deg",
+  "source": "T1 control-site probe (raster-order prefix + detection quota); declared unrecoverable at results_summary.md:519-536",
+  "old_n_at_4m": [
+   8,
+   22,
+   103,
+   41,
+   12
+  ]
+ }
+}

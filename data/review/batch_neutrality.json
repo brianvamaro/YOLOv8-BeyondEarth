@@ -1,0 +1,20 @@
+{
+  "raster": "crop.tif",
+  "reference_batch": 1,
+  "tolerance_m": 0.96715195693236,
+  "comparisons": {
+    "1_vs_8": {
+      "n_a": 1987,
+      "n_b": 1987,
+      "n_matched": 1987,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 1973,
+      "frac_geometry_identical": 0.9929542023150478,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0003641843795776367
+    }
+  }
+}

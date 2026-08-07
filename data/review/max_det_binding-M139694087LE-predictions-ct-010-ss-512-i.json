@@ -1,0 +1,25 @@
+{
+  "catalog": "M139694087LE-predictions-ct-010-ss-512-is-1024-ov-020-downscaled-mask-nms.gpkg",
+  "raster": "M139694087LE.tif",
+  "raster_px": [
+    5118,
+    59183
+  ],
+  "slice_size": 512,
+  "sr_factor": 1,
+  "native_slice": 512,
+  "n_detections": 17549,
+  "n_slices": 1885,
+  "n_slices_with_detections": 934,
+  "mean_per_occupied_slice": 31.9,
+  "p50": 7,
+  "p99": 238,
+  "p999": 333,
+  "max_observed": 352,
+  "ultralytics_default_max_det": 300,
+  "headroom_at_max": -52,
+  "n_slices_over_200": 24,
+  "n_slices_over_250": 6,
+  "n_slices_at_or_over_300": 4,
+  "note": "post-NMS centroid counts: a LOWER BOUND on what the model emitted per slice, since cross-slice duplicates are already removed and partly-overlapping objects are not counted"
+}

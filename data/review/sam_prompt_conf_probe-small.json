@@ -1,0 +1,375 @@
+{
+  "raster": "ESP_017355_2260_RED.tif",
+  "slice_size": 256,
+  "conf": 0.1,
+  "sam_batch": 96,
+  "n_slices": 20,
+  "saved_catalog_max_per_slice": 253,
+  "power": {
+    "on_ac_power": true,
+    "battery_percent": 100,
+    "nvidia_smi": "0 MHz, 13.81 W, [N/A]"
+  },
+  "sam_weights": "sam2.1_b.pt",
+  "slices": [
+    {
+      "slice": 0,
+      "origin": [
+        11275,
+        66215
+      ],
+      "n_boxes": 71,
+      "masks_at_025": 71,
+      "masks_at_000": 71,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 71,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 1,
+      "origin": [
+        11275,
+        66010
+      ],
+      "n_boxes": 79,
+      "masks_at_025": 79,
+      "masks_at_000": 79,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 79,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 2,
+      "origin": [
+        11480,
+        66215
+      ],
+      "n_boxes": 155,
+      "masks_at_025": 155,
+      "masks_at_000": 155,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 2,
+      "encodes_at_000": 2,
+      "shared_masks": 155,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 3,
+      "origin": [
+        13120,
+        63960
+      ],
+      "n_boxes": 87,
+      "masks_at_025": 87,
+      "masks_at_000": 87,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 87,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 4,
+      "origin": [
+        12915,
+        63960
+      ],
+      "n_boxes": 75,
+      "masks_at_025": 75,
+      "masks_at_000": 75,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 75,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 5,
+      "origin": [
+        13325,
+        63960
+      ],
+      "n_boxes": 66,
+      "masks_at_025": 66,
+      "masks_at_000": 66,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 66,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 6,
+      "origin": [
+        11275,
+        65600
+      ],
+      "n_boxes": 85,
+      "masks_at_025": 85,
+      "masks_at_000": 85,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 85,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 7,
+      "origin": [
+        12095,
+        68060
+      ],
+      "n_boxes": 89,
+      "masks_at_025": 89,
+      "masks_at_000": 89,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 89,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 8,
+      "origin": [
+        11480,
+        66010
+      ],
+      "n_boxes": 149,
+      "masks_at_025": 149,
+      "masks_at_000": 149,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 2,
+      "encodes_at_000": 2,
+      "shared_masks": 149,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 9,
+      "origin": [
+        11275,
+        65805
+      ],
+      "n_boxes": 82,
+      "masks_at_025": 82,
+      "masks_at_000": 82,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 82,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 10,
+      "origin": [
+        7380,
+        40180
+      ],
+      "n_boxes": 81,
+      "masks_at_025": 81,
+      "masks_at_000": 81,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 81,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 11,
+      "origin": [
+        12300,
+        64370
+      ],
+      "n_boxes": 82,
+      "masks_at_025": 82,
+      "masks_at_000": 82,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 82,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 12,
+      "origin": [
+        11890,
+        67855
+      ],
+      "n_boxes": 98,
+      "masks_at_025": 98,
+      "masks_at_000": 98,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 2,
+      "encodes_at_000": 2,
+      "shared_masks": 98,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 13,
+      "origin": [
+        7380,
+        39975
+      ],
+      "n_boxes": 74,
+      "masks_at_025": 74,
+      "masks_at_000": 74,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 74,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 14,
+      "origin": [
+        12505,
+        64165
+      ],
+      "n_boxes": 78,
+      "masks_at_025": 78,
+      "masks_at_000": 78,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 78,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 15,
+      "origin": [
+        7380,
+        39770
+      ],
+      "n_boxes": 78,
+      "masks_at_025": 78,
+      "masks_at_000": 78,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 78,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 16,
+      "origin": [
+        11685,
+        67650
+      ],
+      "n_boxes": 90,
+      "masks_at_025": 90,
+      "masks_at_000": 90,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 90,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 17,
+      "origin": [
+        11890,
+        64575
+      ],
+      "n_boxes": 70,
+      "masks_at_025": 70,
+      "masks_at_000": 70,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 70,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 18,
+      "origin": [
+        12915,
+        55350
+      ],
+      "n_boxes": 93,
+      "masks_at_025": 93,
+      "masks_at_000": 93,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 93,
+      "differing_shared_masks": 0
+    },
+    {
+      "slice": 19,
+      "origin": [
+        13940,
+        48380
+      ],
+      "n_boxes": 58,
+      "masks_at_025": 58,
+      "masks_at_000": 58,
+      "dropped_at_025": 0,
+      "realigned_chunks_at_025": 0,
+      "realigned_chunks_at_000": 0,
+      "encodes_at_025": 1,
+      "encodes_at_000": 1,
+      "shared_masks": 58,
+      "differing_shared_masks": 0
+    }
+  ],
+  "totals": {
+    "boxes": 1740,
+    "masks_025": 1740,
+    "masks_000": 1740,
+    "realigned_025": 0,
+    "realigned_000": 0,
+    "encodes_025": 23,
+    "encodes_000": 23,
+    "rescued": 0,
+    "differing_shared_masks": 0,
+    "shared_masks": 1740
+  },
+  "summary": {
+    "fraction_of_prompted_boxes_left_unmasked_at_025": 0.0,
+    "fraction_rescued_by_conf_0": 0.0,
+    "encode_inflation_at_025": 1.0,
+    "conf_0_is_purely_additive": true,
+    "note": "purely additive means every box that produced a mask at 0.25 produced the SAME mask at 0.0, so no existing SAM geometry changes and the delta is only the rescued boxes"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "raster": "crop.tif",
+  "inference_size": 1024,
+  "conf": 0.1,
+  "max_det": 600,
+  "batch_size": 8,
+  "reps": 3,
+  "note": "speed values are ms per image (dt/batch), so summing over all results recovers per-run totals; ultralytics' profilers synchronise CUDA",
+  "arms": {
+    "256": {
+      "n_slices": 100,
+      "n_batches": 13,
+      "n_detections": 4518,
+      "model_call_wall_s": 4.008,
+      "wall_range_s": [
+        3.804,
+        4.054
+      ],
+      "wall_spread_pct": 6.6,
+      "seconds": {
+        "preprocess": 0.582,
+        "inference": 2.79,
+        "postprocess": 0.591
+      },
+      "share_of_model_call": {
+        "preprocess": 0.145,
+        "inference": 0.696,
+        "postprocess": 0.147
+      },
+      "accounted_s": 3.963,
+      "unaccounted_s": 0.044,
+      "unaccounted_share": 0.011,
+      "cpu_framework_share": 0.293
+    },
+    "512": {
+      "n_slices": 25,
+      "n_batches": 4,
+      "n_detections": 3251,
+      "model_call_wall_s": 1.556,
+      "wall_range_s": [
+        1.542,
+        1.617
+      ],
+      "wall_spread_pct": 4.8,
+      "seconds": {
+        "preprocess": 0.164,
+        "inference": 0.702,
+        "postprocess": 0.66
+      },
+      "share_of_model_call": {
+        "preprocess": 0.105,
+        "inference": 0.451,
+        "postprocess": 0.425
+      },
+      "accounted_s": 1.526,
+      "unaccounted_s": 0.03,
+      "unaccounted_share": 0.019,
+      "cpu_framework_share": 0.53
+    }
+  }
+}

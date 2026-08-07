@@ -1,0 +1,225 @@
+{
+  "tiles": {
+    "split": "validation",
+    "n_tiles": 200,
+    "seed": 0,
+    "preset": "goal3_production",
+    "res_m_per_px": 1.0,
+    "n_truths": 6982,
+    "caveat": "boulder2024 splits share source prefixes (G5-04), so absolute precision/recall are optimistic; the 0.10-vs-0.25 contrast is not",
+    "by_conf": {
+      "0.10": {
+        "n_detections": 19126,
+        "median_dpx": 5.4115163798060095,
+        "bands": [
+          {
+            "band": "all",
+            "ap": 0.4991523396434361,
+            "n_gt": 6982,
+            "n_gt_counted": 6982,
+            "n_pred": 19126,
+            "n_pred_ignored": 0,
+            "n_tp": 4807,
+            "n_fp": 14319,
+            "precision": 0.25133326362020286,
+            "recall": 0.6884846748782584
+          },
+          {
+            "band": "3-4",
+            "ap": 0.07304220782601088,
+            "n_gt": 6982,
+            "n_gt_counted": 602,
+            "n_pred": 19126,
+            "n_pred_ignored": 15800,
+            "n_tp": 195,
+            "n_fp": 3131,
+            "precision": 0.05862898376428142,
+            "recall": 0.3239202657807309
+          },
+          {
+            "band": "4-6",
+            "ap": 0.39344754975170726,
+            "n_gt": 6982,
+            "n_gt_counted": 3236,
+            "n_pred": 19126,
+            "n_pred_ignored": 9312,
+            "n_tp": 2030,
+            "n_fp": 7784,
+            "precision": 0.20684736091298145,
+            "recall": 0.6273176761433868
+          },
+          {
+            "band": "6-8",
+            "ap": 0.6268138232608146,
+            "n_gt": 6982,
+            "n_gt_counted": 1747,
+            "n_pred": 19126,
+            "n_pred_ignored": 15687,
+            "n_tp": 1391,
+            "n_fp": 2048,
+            "precision": 0.40447804594358827,
+            "recall": 0.7962220950200344
+          },
+          {
+            "band": "8-10",
+            "ap": 0.7358900792031644,
+            "n_gt": 6982,
+            "n_gt_counted": 596,
+            "n_pred": 19126,
+            "n_pred_ignored": 17955,
+            "n_tp": 507,
+            "n_fp": 664,
+            "precision": 0.43296327924850553,
+            "recall": 0.8506711409395973
+          },
+          {
+            "band": "10-14",
+            "ap": 0.7555938361653801,
+            "n_gt": 6982,
+            "n_gt_counted": 479,
+            "n_pred": 19126,
+            "n_pred_ignored": 18342,
+            "n_tp": 407,
+            "n_fp": 377,
+            "precision": 0.5191326530612245,
+            "recall": 0.8496868475991649
+          },
+          {
+            "band": "14-inf",
+            "ap": 0.7994652123578406,
+            "n_gt": 6982,
+            "n_gt_counted": 322,
+            "n_pred": 19126,
+            "n_pred_ignored": 18637,
+            "n_tp": 277,
+            "n_fp": 212,
+            "precision": 0.5664621676891616,
+            "recall": 0.860248447204969
+          }
+        ]
+      },
+      "0.25": {
+        "n_detections": 12199,
+        "median_dpx": 5.745261338003384,
+        "bands": [
+          {
+            "band": "all",
+            "ap": 0.4754939366578921,
+            "n_gt": 6982,
+            "n_gt_counted": 6982,
+            "n_pred": 12199,
+            "n_pred_ignored": 0,
+            "n_tp": 4426,
+            "n_fp": 7773,
+            "precision": 0.36281662431346834,
+            "recall": 0.6339157834431395
+          },
+          {
+            "band": "3-4",
+            "ap": 0.059394677650768314,
+            "n_gt": 6982,
+            "n_gt_counted": 602,
+            "n_pred": 12199,
+            "n_pred_ignored": 10447,
+            "n_tp": 169,
+            "n_fp": 1583,
+            "precision": 0.09646118721461187,
+            "recall": 0.2807308970099668
+          },
+          {
+            "band": "4-6",
+            "ap": 0.3642534178585169,
+            "n_gt": 6982,
+            "n_gt_counted": 3236,
+            "n_pred": 12199,
+            "n_pred_ignored": 6157,
+            "n_tp": 1859,
+            "n_fp": 4183,
+            "precision": 0.30767957629923864,
+            "recall": 0.5744746600741656
+          },
+          {
+            "band": "6-8",
+            "ap": 0.5871884795267862,
+            "n_gt": 6982,
+            "n_gt_counted": 1747,
+            "n_pred": 12199,
+            "n_pred_ignored": 9758,
+            "n_tp": 1252,
+            "n_fp": 1189,
+            "precision": 0.5129045473166735,
+            "recall": 0.7166571265025758
+          },
+          {
+            "band": "8-10",
+            "ap": 0.7233734617157876,
+            "n_gt": 6982,
+            "n_gt_counted": 596,
+            "n_pred": 12199,
+            "n_pred_ignored": 11268,
+            "n_tp": 491,
+            "n_fp": 440,
+            "precision": 0.527389903329753,
+            "recall": 0.8238255033557047
+          },
+          {
+            "band": "10-14",
+            "ap": 0.7417013193727386,
+            "n_gt": 6982,
+            "n_gt_counted": 479,
+            "n_pred": 12199,
+            "n_pred_ignored": 11597,
+            "n_tp": 387,
+            "n_fp": 215,
+            "precision": 0.6428571428571429,
+            "recall": 0.8079331941544885
+          },
+          {
+            "band": "14-inf",
+            "ap": 0.7804359118148495,
+            "n_gt": 6982,
+            "n_gt_counted": 322,
+            "n_pred": 12199,
+            "n_pred_ignored": 11799,
+            "n_tp": 268,
+            "n_fp": 132,
+            "precision": 0.67,
+            "recall": 0.8322981366459627
+          }
+        ]
+      }
+    },
+    "diff_010_vs_025": {
+      "n_matched": 12138,
+      "n_added": 6988,
+      "n_removed": 61,
+      "extra_fraction": 0.5728
+    },
+    "sfd_placement": {
+      "n_below_025": 8400,
+      "median_dpx_below_025": 4.95606688501821,
+      "median_dpx_at_or_above_025": 5.808687281605183,
+      "frac_below_025_under_5px": 0.5123809523809524,
+      "dpx_deciles_below_025": [
+        3.55,
+        3.9,
+        4.22,
+        4.67,
+        4.96,
+        5.26,
+        5.69,
+        6.3,
+        7.91
+      ]
+    },
+    "paired_ap_ci_025_to_010": {
+      "ap_a": 0.4754939366578921,
+      "ap_b": 0.4991523396434361,
+      "delta": 0.023658402985544003,
+      "lo": 0.02034950456573759,
+      "hi": 0.029649356078964406,
+      "n_images": 200.0,
+      "n_boot": 1000.0
+    }
+  }
+}

@@ -35,9 +35,11 @@ import matplotlib.pyplot as plt                                        # noqa: E
 
 from YOLOv8BeyondEarth import figstyle as fs                           # noqa: E402
 from YOLOv8BeyondEarth.orientation import (asymmetry_ratio, axial_distance,      # noqa: E402
+                                           axial_mean_direction, axial_resultant,
+                                           axial_resultant_uniform,
                                            axis_alignment_fraction, bootstrap_peak_ci,
                                            diagonal_fraction, grid_fraction, half_plane_fraction,
-                                           refine_peak)
+                                           rayleigh_p, refine_peak)
 
 DATA = ROOT / "data"
 SUM = DATA / "summary"
@@ -186,6 +188,19 @@ def stat_block(a, sun=None):
     out = dict(n=int(a.size), diag=round(diagonal_fraction(a), 3),
                grid=round(grid_fraction(a), 3), chirality=round(asymmetry_ratio(a), 3),
                f_lower=round(half_plane_fraction(a), 3), peak=round(refine_peak(a), 1))
+    # R travels with its own null: E[R] under isotropy is ~0.886/sqrt(n), so an R quoted without n
+    # is uninterpretable (the retired Goal-4 fabric bar was exactly that mistake).
+    out.update(R=round(axial_resultant(a), 4),
+               R_null_mean=round(axial_resultant_uniform(a.size), 4),
+               rayleigh_p=rayleigh_p(axial_resultant(a), a.size),
+               # The SECOND estimator, always. `peak` above is the mode of a sigma=4 smoothed
+               # density; this is the doubled-angle circular mean. Pass 6 found the shipped cardinal
+               # headline was "100% estimator, 0% sampling" across exactly these two, and an
+               # adversarial re-check on 2026-08-06 found the control-site "all five peaks within
+               # 17.3 deg of a cardinal" result does NOT survive the swap (mean |peak-cardinal|
+               # 8.7 -> 17.4 deg, Monte-Carlo p 0.007 -> 0.20). Recording both makes that visible in
+               # the artifact instead of discoverable only by a reviewer.
+               peak_circmean=round(axial_mean_direction(a), 1))
     if sun is not None:
         out["along_sun"] = round(axis_alignment_fraction(a, sun, 45.0), 3)
         out["peak_minus_sun"] = round(float(axial_distance(refine_peak(a), sun)), 1)
@@ -625,6 +640,27 @@ def fig05_axis_fractions():
             ax[0].text(x, v + 0.004, f"{v:.3f}", ha="center", fontsize=6.4, color=fs.INK_SOFT)
         st["per_axis"][tag] = dict(zip([f"{d}deg" for d in axes_deg], [round(v, 3) for v in fr]))
         st["per_axis"][tag]["n"] = int(len(a))
+
+    # The plotted bars gate each producer on ITS OWN aspect column, so the two are different sets of
+    # rocks — and the gate is not neutral: `aspect_yolo > 1.35` retains 44.0% of YOLO's
+    # diagonal-angle rows against only 31.2% of its cardinal ones, enriching the YOLO bar in
+    # diagonals. That selection is what made the published read look like YOLO *depleting* the
+    # cardinals. On the producer-common population (every matched detection, no elongation cut —
+    # the size population is already shared, since these are the same boxes with only the mask
+    # changed) YOLO's cardinal share is at or above isotropic, and the diagonal excess, while still
+    # real, is smaller. Recorded rather than plotted: both bars on one population would need a
+    # second panel, and the honest headline is the ratio between the two reads.
+    st["per_axis_common"] = {}
+    for tag, acol in (("YOLOv8-seg mask", "angle_yolo"), ("SAM2 re-mask", "angle_sam256")):
+        a = g[acol].dropna().values % 180.0
+        blk = {f"{d}deg": round(float((axial_distance(a, d) <= tol).mean()), 3) for d in axes_deg}
+        blk.update(n=int(len(a)), grid=round(grid_fraction(a), 3),
+                   diag=round(diagonal_fraction(a), 3))
+        st["per_axis_common"][tag] = blk
+    st["per_axis_common"]["_note"] = (
+        "No elongation cut, so both producers are read on the same rocks. This is the population "
+        "any YOLO-vs-SAM contrast should be quoted from; the plotted own-aspect bars are what each "
+        "producer's own pipeline would ship.")
     _null_line(ax[0], per_axis_unif, "isotropic  0.111")
     ax[0].set_xticks(np.arange(4), ["0°\n(N–S)", "45°", "90°\n(E–W)", "135°"])
     ax[0].set_ylabel(f"share of azimuths within ±{tol:.0f}° of the axis", fontsize=8)
@@ -799,13 +835,29 @@ def _scene_panels(d, meta, colour="sam", angle_col="angle_sam", aspect_col="aspe
     physical population — contaminating both the roses and the boulders/km² densities. Requiring
     ``max(8 px, 4 m)`` costs power on the fine scenes and buys a comparison that means something.
     Pass ``dm_min=None`` to reproduce the pixel-only cut.
+
+    ``aspect_col`` takes three shapes and **which one is correct depends on the question** (see
+    :func:`fig09_controls`):
+
+    * a single column name — each producer read on its own elongation call. What that producer's
+      pipeline would ship, but two producers read this way are **different sets of rocks**;
+    * ``None`` — no elongation cut, the producer-common population. Right for "how large is the
+      artifact", because the artifact lives disproportionately in the near-circular masks;
+    * a sequence of column names — the intersection, every listed producer calling the rock
+      elongated. Right for "do the producers agree about the same rock", because a long axis fitted
+      to an aspect-1.0 mask is a noise draw and agreement between two noise draws measures nothing.
+
+    The size cut is producer-common in all three (``dpx_sam`` for every row).
     """
     panels, st = [], {}
     order = sorted(meta, key=lambda s: meta[s].get("incidence") or 0)
     for sc in order:
         m = meta[sc]
         res = m.get("res_m")
-        g = d[(d.scene == sc) & (d[aspect_col] > ASPECT_MIN) & (d.dpx_sam >= DPX_MIN)]
+        g = d[(d.scene == sc) & (d.dpx_sam >= DPX_MIN)]
+        for col in ([] if aspect_col is None else
+                    [aspect_col] if isinstance(aspect_col, str) else list(aspect_col)):
+            g = g[g[col] > ASPECT_MIN]
         dm = g.dm_sam if "dm_sam" in g else g.dpx_sam * res      # legacy CSVs lack the metric column
         if dm_min:
             g = g[dm >= dm_min]
@@ -1077,9 +1129,31 @@ def fig08_repeat_pairs():
 @figure("fig09_controls",
         ["data/summary/fixed_area_scenes.csv + fixed_area_scenes_meta.json (the equal-area rescan)",
          "data/sam2_validation/t1_controls_sam.csv (superseded quota sample; fallback only)"],
-        "Control sites: on fabric-free ground each masker imprints its own grid axis — SAM2 cardinal, "
-        "YOLO diagonal — and neither follows the sun")
+        "Control sites: on fabric-free ground no rose is flat, SAM2's cardinal excess is present at "
+        "every site, and neither producer follows the sun")
 def fig09_controls():
+    """Control-site roses, read two ways.
+
+    **The plotted rows use each producer's OWN aspect column**, which is what that producer's
+    pipeline would ship — a defensible "what you would get" read, and the one previously published.
+    It is **not** a same-rocks contrast: the rows are different sets of rocks (the SAM row keeps
+    **271-2,388** boulders per site, the YOLO row **241-2,840**), and `:530-532` of this very file
+    states the project's rule that a population must never be defined by a model's own column. On
+    this population that gate is measurably not neutral — it keeps 38.7% of YOLO's diagonal-angle
+    rows against 35.3% of its cardinal ones — so the own-aspect read mildly **enriches the YOLO bar
+    in diagonal detections**.
+
+    So two same-rocks reads are recorded beside it: ``_producer_common`` (no elongation cut) and
+    ``_both_elongated`` (the intersection). **They answer different questions and the peak-distance
+    numbers are not stable enough to rank them** — see ``_population_note``, and read it before
+    quoting anything from this figure other than the fractions.
+
+    *(Two figures previously in this docstring — "5,186 rows ... 57.2% diagonal" and "44.0% vs 31.2%"
+    — were transplanted from review pass 7, which measured them on the `data/solutionG` HiRISE crop,
+    a different population from this figure's control sites. They do not reproduce here (2,651 rows,
+    33.7%, 38.7% vs 35.3%) and are corrected above. Importing a number across populations is the
+    exact defect this figure exists to document.)*
+    """
     d, meta, source = _fixed_area("controls")
     st, panels = {}, []
     for prod, acol, pcol, col in (("SAM2 re-mask", "angle_sam", "aspect_sam", "sam"),
@@ -1096,47 +1170,148 @@ def fig09_controls():
                 else "unequal area per site (legacy sampling)")
     fig, _ = fs.rose_grid(
         panels, aspect_min=ASPECT_MIN, dpx_min=DPX_MIN, dm_min=DM_MIN, ncols=len(scenes),
-        row_labels=["SAM2 re-mask", "YOLOv8-seg mask"],
+        row_labels=["SAM2 re-mask\n(own aspect cut)", "YOLOv8-seg mask\n(own aspect cut)"],
         suptitle="Geologically-null control sites (no depositional fabric expected), sun axes "
                  f"spanning 55–130° — {area_txt}, tiles sampled at random",
         footer_extra="brackets = bootstrap 95% interval on the peak  ·  no fabric is expected here, "
-                     "yet no rose is flat: SAM2's peaks sit on the CARDINAL axis and YOLO's on the "
-                     "pixel DIAGONAL, so each masker imprints its own grid signature — re-masking "
-                     "exchanges one for the other rather than removing it")
+                     "yet no rose is flat  ·  the robust signal is in the FRACTIONS: SAM2's cardinal "
+                     "share exceeds isotropic at 5/5 sites (0.255–0.344 vs 0.222)  ·  rows use each "
+                     "producer's OWN aspect cut, so they are different rocks — the SAM-vs-YOLO "
+                     "contrast is quoted from the producer-common read, not from these panels")
+
+    def _sig(frac, n):
+        """Departure of an axial band fraction from isotropic, in binomial sigmas at that site's n."""
+        if not n:
+            return 0.0
+        return float((frac - UNIF) / np.sqrt(UNIF * (1.0 - UNIF) / n))
+
+    def _card_diag(s, have, key):
+        cd = [min(axial_distance(s[x][key], 0.0), axial_distance(s[x][key], 90.0)) for x in have]
+        dd = [min(axial_distance(s[x][key], 45.0), axial_distance(s[x][key], 135.0)) for x in have]
+        return cd, dd
+
+    def _peak_summary(s, have, tag):
+        cd, dd = _card_diag(s, have, "peak")
+        # The same two statistics under the circular mean. Where these disagree with the mode-based
+        # pair above, the conclusion belongs to the estimator, not to the data.
+        cd_cm, dd_cm = _card_diag(s, have, "peak_circmean")
+        return dict(
+            source=source, population=tag, n_sites=len(have),
+            n_with_power=int(sum(bool(s[x].get("has_power")) for x in have)),
+            mean_peak_minus_sun=round(float(np.mean([s[x]["peak_minus_sun"] for x in have])), 1),
+            mean_peak_minus_cardinal=round(float(np.mean(cd)), 1),
+            mean_peak_minus_diagonal=round(float(np.mean(dd)), 1),
+            mean_peak_minus_cardinal_circmean=round(float(np.mean(cd_cm)), 1),
+            mean_peak_minus_diagonal_circmean=round(float(np.mean(dd_cm)), 1),
+            n_peaks_within_17deg_of_cardinal=int(sum(d <= 17.3 for d in cd)),
+            n_peaks_within_17deg_of_cardinal_circmean=int(sum(d <= 17.3 for d in cd_cm)),
+            # Two different nulls, and conflating them was a real error here. |peak - sun| is the
+            # distance to ONE axis: null 45. |peak - cardinal| and |peak - diagonal| are a `min` over
+            # two axes 90 deg apart, so half the range is unreachable and the null is 22.5 (Monte
+            # Carlo: 22.48 +/- 5.82 for a mean of five sites). Scored against 45 these two look
+            # significant for free.
+            random_expectation_sun=45.0, random_expectation_cardinal_or_diagonal=22.5,
+            mean_R=round(float(np.mean([s[x]["R"] for x in have])), 4),
+            R_range=[min(s[x]["R"] for x in have), max(s[x]["R"] for x in have)],
+            max_rayleigh_p=max(s[x]["rayleigh_p"] for x in have),
+            grid_range=[min(s[x]["grid"] for x in have), max(s[x]["grid"] for x in have)],
+            diag_range=[min(s[x]["diag"] for x in have), max(s[x]["diag"] for x in have)],
+            n_sites_grid_above_isotropic=int(sum(s[x]["grid"] > UNIF for x in have)),
+            n_sites_diag_above_isotropic=int(sum(s[x]["diag"] > UNIF for x in have)),
+            # A bare "above isotropic" count treats +0.7 sigma the same as +12 sigma. Both are
+            # recorded because the two answers differ (YOLO's diagonal is 4/5 by the strict count
+            # and 3/5 at 2 sigma on the plotted read) and quoting one as the other is how a weak
+            # leg gets cited as a strong one. 1 sigma = sqrt(p(1-p)/n) with p = 2/9.
+            n_sites_grid_above_isotropic_2sigma=int(sum(_sig(s[x]["grid"], s[x]["n"]) >= 2
+                                                        for x in have)),
+            n_sites_diag_above_isotropic_2sigma=int(sum(_sig(s[x]["diag"], s[x]["n"]) >= 2
+                                                        for x in have)),
+            grid_sigma=[round(_sig(s[x]["grid"], s[x]["n"]), 1) for x in have],
+            diag_sigma=[round(_sig(s[x]["diag"], s[x]["n"]), 1) for x in have],
+            isotropic_fraction=UNIF)
+
     for prod in ("SAM2 re-mask", "YOLOv8-seg mask"):
         have = [s for s in scenes if st[prod][s].get("peak") is not None]
-        pk = [st[prod][s]["peak_minus_sun"] for s in have]
-        cd = [min(axial_distance(st[prod][s]["peak"], 0.0),
-                  axial_distance(st[prod][s]["peak"], 90.0)) for s in have]
-        dd = [min(axial_distance(st[prod][s]["peak"], 45.0),
-                  axial_distance(st[prod][s]["peak"], 135.0)) for s in have]
-        st[prod]["_summary"] = dict(
-            source=source, n_sites=len(have),
-            n_with_power=int(sum(bool(st[prod][s].get("has_power")) for s in have)),
-            mean_peak_minus_sun=round(float(np.mean(pk)), 1),
-            mean_peak_minus_cardinal=round(float(np.mean(cd)), 1),
-            mean_peak_minus_diagonal=round(float(np.mean(dd)), 1), random_expectation=45.0)
-    # The load-bearing claim of this figure is that the residual is INHERITED, i.e. the two producers
-    # agree site by site. Aggregate means cannot show that, so the per-site agreement is recorded.
-    agree = {sc: round(float(axial_distance(st["SAM2 re-mask"][sc]["peak"],
-                                            st["YOLOv8-seg mask"][sc]["peak"])), 1)
-             for sc in scenes
-             if st["SAM2 re-mask"][sc].get("peak") is not None
-             and st["YOLOv8-seg mask"][sc].get("peak") is not None}
-    both_powered = {sc: v for sc, v in agree.items()
-                    if st["SAM2 re-mask"][sc].get("has_power")
-                    and st["YOLOv8-seg mask"][sc].get("has_power")}
-    st["_sam_vs_yolo_peak_agreement"] = dict(
-        per_site_deg=agree, median_deg=round(float(np.median(list(agree.values()))), 1),
-        max_deg=round(float(max(agree.values())), 1),
-        median_deg_both_powered=(round(float(np.median(list(both_powered.values()))), 1)
-                                 if both_powered else None),
-        n_both_powered=len(both_powered),
-        note="axial distance between the two producers' fitted peaks at the same site; small values "
-             "mean the residual is inherited from detection/imagery rather than added by re-masking. "
-             "The `both_powered` variant drops sites where either producer's peak interval exceeds "
-             f"{CI_POWER_LIMIT:.0f}deg, since agreement between two undetermined peaks is not "
-             "evidence of anything.")
+        st[prod]["_summary"] = _peak_summary(st[prod], have, "own aspect cut (as plotted)")
+
+    def _agreement(sam_st, yolo_st, tag):
+        def _by(key):
+            return {sc: round(float(axial_distance(sam_st[sc][key], yolo_st[sc][key])), 1)
+                    for sc in scenes
+                    if sam_st[sc].get(key) is not None and yolo_st[sc].get(key) is not None}
+        agree, agree_cm = _by("peak"), _by("peak_circmean")
+        both = {sc: v for sc, v in agree.items()
+                if sam_st[sc].get("has_power") and yolo_st[sc].get("has_power")}
+        return dict(
+            population=tag, per_site_deg=agree,
+            median_deg=round(float(np.median(list(agree.values()))), 1),
+            max_deg=round(float(max(agree.values())), 1),
+            median_deg_both_powered=(round(float(np.median(list(both.values()))), 1)
+                                     if both else None),
+            n_both_powered=len(both),
+            # Same statistic, other estimator. Adjudicated 2026-08-06: under the circular mean the
+            # ORDERING OF THE THREE POPULATIONS INVERTS, so no ranking of them may be quoted.
+            per_site_deg_circmean=agree_cm,
+            median_deg_circmean=round(float(np.median(list(agree_cm.values()))), 1),
+            note="axial distance between the two producers' fitted peaks at the same site; small "
+                 "values mean the residual is inherited from detection/imagery rather than added by "
+                 "re-masking. The `both_powered` variant drops sites where either producer's peak "
+                 f"interval exceeds {CI_POWER_LIMIT:.0f}deg, since agreement between two "
+                 "undetermined peaks is not evidence of anything. n = 5 sites: a site-level "
+                 "bootstrap puts fully-overlapping CIs on the three populations' medians and the "
+                 "minimum attainable two-sided sign-test p at n = 5 is 0.0625, so NO ordering of "
+                 "these medians is testable from this design.")
+
+    st["_sam_vs_yolo_peak_agreement"] = _agreement(
+        st["SAM2 re-mask"], st["YOLOv8-seg mask"], "own aspect cut (as plotted)")
+
+    # --- the two same-rocks reads, because they answer DIFFERENT questions -----------------------
+    # Neither is plotted: five more panels per read would triple the figure without adding a picture
+    # anyone reads differently. Every contrast number the notebook quotes comes from here.
+    for key, acut, tag in (
+            ("_producer_common", None, "producer-common (no aspect cut)"),
+            ("_both_elongated", ("aspect_sam", "aspect_yolo"),
+             "intersection (both producers call it elongated)")):
+        block = {}
+        for prod, acol, col in (("SAM2 re-mask", "angle_sam", "sam"),
+                                ("YOLOv8-seg mask", "angle_yolo", "yolo")):
+            _, s, _ = _scene_panels(d, meta, colour=col, angle_col=acol, aspect_col=acut,
+                                    dm_min=DM_MIN)
+            have = [x for x in scenes if s[x].get("peak") is not None]
+            block[prod] = s
+            block[prod]["_summary"] = _peak_summary(s, have, tag)
+        block["_sam_vs_yolo_peak_agreement"] = _agreement(
+            block["SAM2 re-mask"], block["YOLOv8-seg mask"], tag)
+        st[key] = block
+
+    st["_population_note"] = (
+        "THREE POPULATIONS, AND ONLY THE FRACTIONS ARE SAFE TO HEADLINE. (1) `own aspect cut` — "
+        "what is plotted, and what each producer's pipeline would ship, but the two rows are "
+        "different rocks. (2) `_producer_common` — no elongation cut, both producers on identical "
+        "rows. (3) `_both_elongated` — the intersection, i.e. rocks BOTH producers call elongated. "
+        "\n\n"
+        "WHAT SURVIVES ADVERSARIAL RE-CHECK (2026-08-06). Only two things. (a) SAM's cardinal grid "
+        "fraction exceeds isotropic at 5/5 sites on ALL THREE populations (own 0.255-0.344, "
+        "intersection 0.236-0.322, no cut 0.241-0.287 against 0.222), and it survives a "
+        "tile-clustered bootstrap (design effect 1.06-1.56). This leg needs no peak estimator and "
+        "is the one number here safe to headline. (b) The intersection shows the two producers' "
+        "peaks agreeing best, at 5/5 sites, under BOTH estimators — with the caveat that requiring "
+        "both producers to call a rock elongated conditions on the two masks agreeing in shape, "
+        "which partly selects for the answer (a SAM-only cut applied to both gives 17.6 deg under "
+        "the mode against the intersection's 6.1). "
+        "\n\n"
+        "WHAT DOES NOT SURVIVE, AND MUST NOT BE QUOTED: any RANKING of the three populations by "
+        "peak distance. Under the shipped `refine_peak` (mode of a sigma=4 smoothed density) the "
+        "median per-site peak agreement is 23.8 / 6.1 / 33.7 deg (own / intersection / no cut); "
+        "under the doubled-angle circular mean on identical rows it is 10.9 / 3.4 / 6.5 — the "
+        "no-cut read moves from worst to middle and the ordering inverts. Sweeping the smoothing "
+        "sigma over 1-32 reproduces the mode ordering at exactly ONE setting out of ten (the "
+        "shipped default), and at seven of ten the no-cut population agrees best. The mechanism is "
+        "visible in the roses: cardinal and diagonal bumps are near-equal in height at some sites "
+        "(1.255 vs 1.217 %/deg), so 'the peak' flips between them on a bandwidth change. This is "
+        "review pass 6's estimator finding repeating on the control sites. Compare "
+        "`median_deg` against `median_deg_circmean`, and `mean_peak_minus_cardinal` against "
+        "`mean_peak_minus_cardinal_circmean`, before quoting either.")
     return save(fig, "fig09_controls"), st
 
 

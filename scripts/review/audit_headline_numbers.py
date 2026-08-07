@@ -18,6 +18,7 @@ if a tracked document quotes something else. Run it after any re-run.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -33,8 +34,16 @@ T35 = REPO / "data" / "sam2_validation" / "t35_val_detections.csv"
 TRACKED_DOCS = [
     TOP / "docs" / "orientation_results_summary.md",
     TOP / "docs" / "sam2_orientation_validation_plan.md",
+    # The two documents that *define* the Goal-4 fabric gate. Added 2026-08-06: the retracted
+    # "R ~ 0.35" bar lived here for two review passes precisely because nothing checked them.
+    TOP / "docs" / "goal4_global_maps_plan.md",
+    TOP / "docs" / "solutions" / "G_sam2_remasking.md",
     TOP / "notebooks" / "Goal2_SAM2_angle_validation.py",
     TOP / "notebooks" / "Results_summary.py",
+    # The rendered hand-out. Generated from Results_summary.py, so in principle redundant — but it
+    # is the artifact people are actually given, it can be edited by hand, and a claim can also be
+    # assembled at render time from a table the source only describes.
+    TOP / "docs" / "results_summary.md",
 ]
 
 
@@ -44,11 +53,55 @@ def axial(a, b):
 
 
 #: A line that quotes the disclaimed wording in order to correct it is not itself a claim.
-_CORRECTION = re.compile(r"(⚠|corrected|caveat|but NOT|no longer|used to read|this read)",
-                         re.IGNORECASE)
+_CORRECTION = re.compile(r"(⚠|corrected|caveat|but NOT|no longer|used to read|this read"
+                         r"|withdrawn|retracted|WRONG|does not reproduce)", re.IGNORECASE)
 
 
-def derive(table=T35):
+def normalise(line):
+    """Strip markdown emphasis and possessives so a claim cannot hide behind formatting.
+
+    This is not cosmetic. ``audit_headline_numbers.py`` exited **0** while
+    ``Goal2_SAM2_angle_validation.py`` — the citable notebook — asserted "SAM's median |Δangle| is
+    lower than YOLO's on **every** body", contradicted by its own synthesis table twenty lines
+    later. The audit missed it purely because the pattern wanted the literal ``lower than YOLO on
+    every body`` and the text had a possessive and two asterisks in the way. A claim checker that
+    can be defeated by bold text is not a checker.
+    """
+    line = re.sub(r"[*_`\\]", "", line)
+    line = re.sub(r"\b(\w+)'s\b", r"\1", line)
+    return re.sub(r"\s+", " ", line)
+
+
+#: Claims that were verified wrong and must not come back. Each entry is
+#: ``(id, compiled pattern, why it is wrong)``; the pattern runs against the **normalised** line.
+#: A line that also matches ``_CORRECTION`` is exempt, so a document may quote a retired claim in
+#: order to retract it.
+RETIRED_CLAIMS = [
+    ("G2-09", re.compile(r"(lower than YOLO on every body"
+                         r"|beats YOLO (?:everywhere|on every body)"
+                         r"|closer to human than YOLO,? everywhere"
+                         r"|SAM (?:is )?closer (?:to human )?than YOLO on every body)",
+                         re.IGNORECASE),
+     "the saved T5 table has Mars favouring YOLO (SAM 10.97 vs YOLO 9.22 well-resolved)"),
+    ("GATE-R", re.compile(r"R\s*(?:≈|~|=)\s*0\.35", re.IGNORECASE),
+     "the R ~ 0.35 control-site bar came from the retracted quota sample (8-103 boulders/site, "
+     "where an isotropic R of 0.09-0.31 is expected for free) and is withdrawn; the equal-area "
+     "replacement is R 0.196-0.443 at n 271-2,388 — see data/review/control_site_null.json"),
+    ("GATE-PEAKS", re.compile(r"peaks?\s+(?:at\s+)?43\s*[-–]\s*76", re.IGNORECASE),
+     "same retracted sample; the equal-area replacement is peaks 17.3-87.3 deg"),
+    ("G2-01", re.compile(r"not something the re-?masker introduces"
+                         r"|cardinal .{0,40}is not SAM-specific"
+                         r"|no cardinal signature", re.IGNORECASE),
+     "on uniform-random synthetic truth with no tracer in the loop SAM returns grid 0.273 against "
+     "a truth of 0.227 (n=11,252, generator unbiased to +/-0.0039), and SAM's cardinal share "
+     "exceeds isotropic at 5/5 control sites — never state the signature as absent"),
+    ("T3-01", re.compile(r"12\.9\s*%|12\.88\s*%"),
+     "the Test-3 near-circular pile-up is 4.23% on the production new-skimage set; 12.9% pooled "
+     "three stacked catalogs, one of which (new-cv2) reads 35.5% on its own"),
+]
+
+
+def derive(table=None):
     """Re-derive the T5 headline numbers from the saved detections table.
 
     **Cohort:** matched boulders with ``h_aspect > 1.35`` and ``h_dpx >= 8`` — i.e. elongated and
@@ -58,7 +111,7 @@ def derive(table=T35):
     review item G2-05 rules out. The two give different numbers (Mars n=176 here against n=106
     there) and agree on the direction: Mars favours YOLO.
     """
-    df = pd.read_csv(table)
+    df = pd.read_csv(T35 if table is None else table)
     matched = df.dropna(subset=["h_angle"])
     well = matched[(matched.h_aspect > 1.35) & (matched.h_dpx >= 8)]
     out = {"n_detections": int(len(df)), "n_matched": int(len(matched)),
@@ -73,39 +126,74 @@ def derive(table=T35):
     return out
 
 
-def check_docs(facts, docs=TRACKED_DOCS):
-    """Fail on claims the table contradicts."""
+def check_docs(facts, docs=None):
+    """Fail on claims the tables contradict, and on claims already verified wrong.
+
+    ``docs`` is resolved at call time, not bound as a default, so the list stays overridable.
+    """
+    docs = TRACKED_DOCS if docs is None else docs
     problems = []
     matched_pat = re.compile(r"([\d,]{4,})\s+(?:matched\s+val\s+boulders|objects?\s+.?matched)",
                              re.IGNORECASE)
-    every_body = re.compile(r"(beats YOLO (?:everywhere|on every body)"
-                            r"|lower than YOLO on every body"
-                            r"|closer to human than YOLO, everywhere)", re.IGNORECASE)
 
     for path in docs:
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
+        # A retraction is usually a paragraph, not a line: "(Corrected 2026-08-06: this read <the
+        # retired wording>...)" wraps, and the wording lands on a continuation line carrying no
+        # marker of its own. So the exemption persists to the end of the paragraph — a blank line,
+        # or a bare comment marker, ends it.
+        in_correction = False
         for lineno, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip().lstrip("#").strip()
+            if not stripped:
+                in_correction = False
             if _CORRECTION.search(line):
-                continue          # the line is disclaiming the wording, not asserting it
-            for m in matched_pat.finditer(line):
+                in_correction = True
+            if in_correction:
+                continue          # the paragraph is disclaiming the wording, not asserting it
+            flat = normalise(line)
+            for m in matched_pat.finditer(flat):
                 value = int(m.group(1).replace(",", ""))
                 if value != facts["n_matched"]:
                     problems.append(
                         f"{path.name}:{lineno}: quotes {value:,} as a matched count; the table "
                         f"has {facts['n_matched']:,} matched of {facts['n_detections']:,}")
-            if not facts["sam_wins_every_body"] and every_body.search(line):
-                problems.append(
-                    f"{path.name}:{lineno}: claims SAM beats YOLO on every body, but the table "
-                    "has Mars favouring YOLO")
+            for cid, pat, why in RETIRED_CLAIMS:
+                if cid == "G2-09" and facts.get("sam_wins_every_body"):
+                    continue      # only a defect while the table says otherwise
+                if pat.search(flat):
+                    problems.append(f"{path.name}:{lineno}: [{cid}] retired claim — {why}\n"
+                                    f"      {flat.strip()[:150]}")
     return problems
 
 
-def main():
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--allow-missing-table", action="store_true",
+                    help="exit 0 instead of 2 when the gitignored T35 table is absent. Only for a "
+                         "fresh clone with no data/; a CI job that passes this is not auditing "
+                         "anything.")
+    args = ap.parse_args(argv)
+
+    # The retired-claim scan reads only tracked documents, so it runs with or without the table —
+    # and it is the half that caught the citable notebook. Run it first, unconditionally.
+    problems = check_docs({"n_matched": None, "n_detections": None,
+                           "sam_wins_every_body": False})
     if not T35.exists():
-        print(f"skip: {T35} not present (gitignored data)")
-        return 0
+        if problems:
+            print("INCONSISTENT CLAIMS (from the document scan; the table is absent):")
+            for p in problems:
+                print("  " + p)
+            return 1
+        # An audit that cannot audit must not report success. `data/` is gitignored, so returning 0
+        # here made this script pass vacuously on every fresh clone and in any CI without the data.
+        print(f"CANNOT AUDIT: {T35} is not present (gitignored data), so no number was checked "
+              "against its table. Fetch the data, or pass --allow-missing-table to accept a "
+              "documents-only scan.")
+        return 0 if args.allow_missing_table else 2
+
     facts = derive()
     print(f"detections {facts['n_detections']:,}   matched to a human label "
           f"{facts['n_matched']:,}")
@@ -121,7 +209,8 @@ def main():
         for p in problems:
             print("  " + p)
         return 1
-    print("\nall tracked documents agree with the table")
+    print(f"\nall tracked documents agree with the table, and none of the "
+          f"{len(RETIRED_CLAIMS)} retired claims has come back")
     return 0
 
 

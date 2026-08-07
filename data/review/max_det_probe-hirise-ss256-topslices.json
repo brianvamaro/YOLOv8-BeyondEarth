@@ -1,0 +1,212 @@
+{
+  "raster": "ESP_017355_2260_RED.tif",
+  "catalog": "ESP_017355_2260_RED-predictions-ct-010-ss-256-is-1024-ov-020-downscaled-mask-nms.gpkg",
+  "slice_size": 256,
+  "sr_factor": 1,
+  "native_slice": 256,
+  "inference_size": 1024,
+  "weights": "yolov8-m-boulder-detection-tmp.pt",
+  "power": {
+    "on_ac_power": false,
+    "battery_percent": 58,
+    "nvidia_smi": "0 MHz, 13.24 W, [N/A]"
+  },
+  "analytic_bytes_per_detection": {
+    "retained_uint8_at_imgsz": 1048576,
+    "transient_float32_at_imgsz": 4194304,
+    "note": "ops.process_mask builds N x imgsz^2 float32 in the interpolate and casts to N x imgsz^2 uint8, which the Results object keeps for the whole batch"
+  },
+  "saved_catalog_max_per_slice": 253,
+  "saved_catalog_occupied_slices": 24972,
+  "dense_batches": [
+    {
+      "first_slice": 35585,
+      "expected_total": 253,
+      "expected_per_slice": [
+        253
+      ]
+    },
+    {
+      "first_slice": 35475,
+      "expected_total": 243,
+      "expected_per_slice": [
+        243
+      ]
+    },
+    {
+      "first_slice": 35586,
+      "expected_total": 237,
+      "expected_per_slice": [
+        237
+      ]
+    },
+    {
+      "first_slice": 34384,
+      "expected_total": 232,
+      "expected_per_slice": [
+        232
+      ]
+    },
+    {
+      "first_slice": 34383,
+      "expected_total": 224,
+      "expected_per_slice": [
+        224
+      ]
+    },
+    {
+      "first_slice": 34385,
+      "expected_total": 213,
+      "expected_per_slice": [
+        213
+      ]
+    },
+    {
+      "first_slice": 35255,
+      "expected_total": 213,
+      "expected_per_slice": [
+        213
+      ]
+    },
+    {
+      "first_slice": 36579,
+      "expected_total": 208,
+      "expected_per_slice": [
+        208
+      ]
+    },
+    {
+      "first_slice": 35476,
+      "expected_total": 206,
+      "expected_per_slice": [
+        206
+      ]
+    },
+    {
+      "first_slice": 35365,
+      "expected_total": 206,
+      "expected_per_slice": [
+        206
+      ]
+    },
+    {
+      "first_slice": 21596,
+      "expected_total": 203,
+      "expected_per_slice": [
+        203
+      ]
+    },
+    {
+      "first_slice": 34600,
+      "expected_total": 199,
+      "expected_per_slice": [
+        199
+      ]
+    },
+    {
+      "first_slice": 36468,
+      "expected_total": 198,
+      "expected_per_slice": [
+        198
+      ]
+    },
+    {
+      "first_slice": 21486,
+      "expected_total": 197,
+      "expected_per_slice": [
+        197
+      ]
+    },
+    {
+      "first_slice": 34491,
+      "expected_total": 196,
+      "expected_per_slice": [
+        196
+      ]
+    },
+    {
+      "first_slice": 21376,
+      "expected_total": 195,
+      "expected_per_slice": [
+        195
+      ]
+    }
+  ],
+  "isolation": "one subprocess per cell",
+  "cells": [
+    {
+      "conf": 0.1,
+      "batch_size": 1,
+      "max_det": 300,
+      "resident_after_warmup_mib": 437.1,
+      "peak_alloc_mib": 1989.5,
+      "peak_reserved_mib": 2322.0,
+      "peak_frac_of_device": 0.285,
+      "spills_beyond_device": false,
+      "slices_measured": 16,
+      "detections_per_slice_max": 300,
+      "detections_per_slice_mean": 293.2,
+      "slices_at_cap": 11,
+      "cap_bound": true
+    },
+    {
+      "conf": 0.1,
+      "batch_size": 1,
+      "max_det": 1200,
+      "resident_after_warmup_mib": 489.1,
+      "peak_alloc_mib": 2408.5,
+      "peak_reserved_mib": 5690.0,
+      "peak_frac_of_device": 0.698,
+      "spills_beyond_device": false,
+      "slices_measured": 16,
+      "detections_per_slice_max": 370,
+      "detections_per_slice_mean": 317.4,
+      "slices_at_cap": 0,
+      "cap_bound": false
+    },
+    {
+      "conf": 0.25,
+      "batch_size": 1,
+      "max_det": 300,
+      "resident_after_warmup_mib": 391.1,
+      "peak_alloc_mib": 1709.5,
+      "peak_reserved_mib": 3048.0,
+      "peak_frac_of_device": 0.374,
+      "spills_beyond_device": false,
+      "slices_measured": 16,
+      "detections_per_slice_max": 255,
+      "detections_per_slice_mean": 217.8,
+      "slices_at_cap": 0,
+      "cap_bound": false
+    },
+    {
+      "conf": 0.25,
+      "batch_size": 1,
+      "max_det": 1200,
+      "resident_after_warmup_mib": 391.1,
+      "peak_alloc_mib": 1709.5,
+      "peak_reserved_mib": 3048.0,
+      "peak_frac_of_device": 0.374,
+      "spills_beyond_device": false,
+      "slices_measured": 16,
+      "detections_per_slice_max": 255,
+      "detections_per_slice_mean": 217.8,
+      "slices_at_cap": 0,
+      "cap_bound": false
+    }
+  ],
+  "true_load": {
+    "0.1": {
+      "max_per_slice": 370,
+      "mean_per_slice": 317.4,
+      "cap_300_engages": true,
+      "fraction_discarded_at_300": 0.055
+    },
+    "0.25": {
+      "max_per_slice": 255,
+      "mean_per_slice": 217.8,
+      "cap_300_engages": false,
+      "fraction_discarded_at_300": 0.0
+    }
+  }
+}

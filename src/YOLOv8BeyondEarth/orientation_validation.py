@@ -14,6 +14,8 @@ model/segmentation artifact?" with measurements that do NOT depend on the YOLO m
 Heavy IO deps (rasterio, pyogrio) are imported lazily so importing the orientation primitives
 stays cheap. Companion notebook: ``notebooks/Goal2_orientation_HiRISE_investigation.ipynb``.
 """
+import logging
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,8 @@ import pandas as pd
 from . import presets
 from .orientation import ellipse_angle180, structure_tensor_orientation, orientation_field
 from .polygon import _mask_bounds
+
+logger = logging.getLogger(__name__)
 
 
 def matched_area_ratio(model_gdf, ref_gdf, rom=None, min_radius_m=1.0):
@@ -292,9 +296,91 @@ def slice_masks_to_slice_res(prediction_result, slice_size):
     return out
 
 
+#: Ultralytics' own per-image detection cap (``cfg/default.yaml``), which applies to every call
+#: that does not pass ``max_det``. This is review item **X-06**, fixed in the production path
+#: 2026-08-04 and found again *in this module* on 2026-08-06: none of the tiled scanners below
+#: passed it, so the SAM2 equal-area rescan behind ``data/summary/fixed_area_scenes.csv`` ran
+#: capped. Across its 5,382 tiles the per-tile count walls at 295 with a mode of 111 tiles at 278,
+#: and the control site ``ESP_030222_1220`` averages 275.6 det/tile with 57.4% of its detections
+#: inside capped tiles.
+#:
+#: What that does and does not contaminate: the cap keeps the top N **by confidence**, and the
+#: analysed subset of that rescan is the >=8 px / >=4 m tail (5.7% of rows), which is the
+#: high-confidence end — so the **roses are not plausibly moved**, but **every boulders/km2 from a
+#: capped run is a scene-dependent lower bound**.
+#:
+#: Duplicated from :data:`predict.ULTRALYTICS_DEFAULT_MAX_DET` rather than imported: ``predict``
+#: pulls in cv2, geopandas and torch at module level and this module is deliberately cheap to
+#: import. ``tests/test_orientation_validation.py`` asserts the two never drift apart. Kept as the
+#: *function* default here for the same reason ``predict`` keeps it — an un-parameterised call
+#: reproduces the historical artifacts exactly; pass ``presets.GOAL1_PRODUCTION["max_det"]`` (600)
+#: for a fresh measurement.
+ULTRALYTICS_DEFAULT_MAX_DET = 300
+
+#: Mirror of :data:`predict._NEAR_MAX_DET_FRACTION`. A tile *at* the cap proves truncation; a tile
+#: just below it is where a tile that truncated and then lost a detection or two to ultralytics'
+#: empty-mask filter shows up instead, so both are recorded.
+_NEAR_MAX_DET_FRACTION = 0.9
+
+
+def _new_truncation(max_det):
+    """Fresh per-scan truncation tally. See :data:`ULTRALYTICS_DEFAULT_MAX_DET`."""
+    return {"max_det": int(max_det), "tiles": 0, "tiles_at_max_det": 0,
+            "tiles_near_max_det": 0, "max_det_returned": 0}
+
+
+def _note_tile_truncation(result, max_det, trunc):
+    """Record whether one tile came back at ultralytics' detection cap.
+
+    ``tiles_at_max_det`` is a **lower** bound, exactly as in
+    :func:`predict._note_slice_truncation`: ultralytics applies ``max_det`` inside NMS and
+    ``SegmentationPredictor.construct_result`` then drops detections whose upsampled mask is empty,
+    so a tile that truncated at N can arrive holding fewer than N. Handles both segmentation
+    (``result.boxes``) and OBB (``result.obb``) results.
+
+    The count degrades to 0 rather than raising if a result object exposes neither ``len()`` nor a
+    ``.data`` array: this is a diagnostic, and a diagnostic that can abort the scan it is watching is
+    worse than no diagnostic. (Real ultralytics ``Boxes``/``OBB`` support both; the fallback exists
+    for the stand-in models the test suite drives.)
+    """
+    n = 0
+    for attr in ("boxes", "obb"):
+        v = getattr(result, attr, None)
+        if v is None:
+            continue
+        try:
+            n = int(len(v))
+        except TypeError:
+            data = getattr(v, "data", None)
+            n = 0 if data is None else int(getattr(data, "shape", [len(data)])[0])
+        break
+    trunc["tiles"] += 1
+    trunc["max_det_returned"] = max(trunc["max_det_returned"], n)
+    if n >= max_det:
+        trunc["tiles_at_max_det"] += 1
+    elif n >= max(1, int(round(_NEAR_MAX_DET_FRACTION * max_det))):
+        trunc["tiles_near_max_det"] += 1
+    return trunc
+
+
+def _warn_if_truncated(trunc, where):
+    """Make a capped scan loud. Silence is what made X-06 survive two reviews."""
+    if trunc.get("tiles_at_max_det"):
+        warnings.warn(
+            f"{where}: {trunc['tiles_at_max_det']} of {trunc['tiles']} tiles returned the full "
+            f"max_det={trunc['max_det']}, so the model's output was cut off in each of them and "
+            "the faintest detections are missing. Densities from this scan are LOWER BOUNDS; "
+            "angle statistics on a high-confidence subset are far less exposed. Raise max_det "
+            "(presets.GOAL1_PRODUCTION uses 600) and re-scan. This count is a lower bound.",
+            RuntimeWarning, stacklevel=3)
+    if trunc.get("tiles"):
+        logger.info("%s: tile truncation record %s", where, trunc)
+    return trunc
+
+
 def detect_orientations(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
                         aspect_min=1.0, estimator="ellipse", drop_edge=True,
-                        contour_method="skimage"):
+                        contour_method="skimage", max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """Tile a raw image array into ``slice_size`` windows, run YOLO on each, and return a
     DataFrame ``[angle180, aspect, diameter_px]`` for every detection (geographic long-axis
     azimuth measured in the *image's own* frame).
@@ -311,16 +397,21 @@ def detect_orientations(model, img, slice_size=256, imgsz=1024, conf=0.10, devic
     Tiles are non-overlapping, so a boulder clipped here has no whole counterpart to recover it;
     dropping is the honest choice and matches what production emits away from a footprint edge.
     Pass ``drop_edge=False`` to reproduce the pre-fix numbers.
+
+    ``max_det`` is passed explicitly and its saturation recorded in ``df.attrs["truncation"]``
+    (review item X-06 — see :data:`ULTRALYTICS_DEFAULT_MAX_DET`).
     """
     from .orientation import is_mask_within_slice, mask_readout
 
     H, W = img.shape
     rows = []
+    trunc = _new_truncation(max_det)
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
             r0 = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
-                       device=device)[0]
+                       device=device, max_det=max_det)[0]
+            _note_tile_truncation(r0, max_det, trunc)
             for mb in slice_masks_to_slice_res(r0, slice_size):
                 if drop_edge and not is_mask_within_slice(mb, slice_size):
                     continue
@@ -328,11 +419,13 @@ def detect_orientations(model, img, slice_size=256, imgsz=1024, conf=0.10, devic
                                            contour_method=contour_method)
                 if np.isfinite(asp) and asp >= aspect_min:
                     rows.append((a, asp, dpx))
-    return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+    df = pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+    df.attrs["truncation"] = _warn_if_truncated(trunc, "detect_orientations")
+    return df
 
 
 def detect_binary_masks(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
-                        drop_edge=True):
+                        drop_edge=True, max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """Tile ``img`` like :func:`detect_orientations` but return every detection's processed
     **binary mask** (bbox-cropped) instead of tracing it — so different mask→polygon tracers can
     be compared on the *same* masks (Test 3d, the contour-tracer chirality swap).
@@ -341,16 +434,21 @@ def detect_binary_masks(model, img, slice_size=256, imgsz=1024, conf=0.10, devic
     same ``largest_blob_fill`` cleanup, same ``drop_edge`` rule (G2-02) — so the two helpers see
     the same population. Cropping to the blob's bounding box (both tracers crop internally anyway)
     keeps a cached run small; orientation is translation-invariant.
+
+    ``max_det`` is passed explicitly (X-06); the return is a plain list, so saturation is reported
+    through a ``RuntimeWarning`` and the module logger rather than an ``attrs`` channel.
     """
     from .orientation import is_mask_within_slice
 
     H, W = img.shape
     masks = []
+    trunc = _new_truncation(max_det)
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
             r0 = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
-                       device=device)[0]
+                       device=device, max_det=max_det)[0]
+            _note_tile_truncation(r0, max_det, trunc)
             for mb in slice_masks_to_slice_res(r0, slice_size):
                 if drop_edge and not is_mask_within_slice(mb, slice_size):
                     continue
@@ -359,10 +457,12 @@ def detect_binary_masks(model, img, slice_size=256, imgsz=1024, conf=0.10, devic
                     continue
                 ys, xs = np.nonzero(clean)
                 masks.append(clean[ys.min():ys.max() + 1, xs.min():xs.max() + 1].copy())
+    _warn_if_truncated(trunc, "detect_binary_masks")
     return masks
 
 
-def detect_mask_pairs(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):
+def detect_mask_pairs(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
+                      max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """Like :func:`detect_binary_masks` but returns **(native, downscaled)** mask pairs per
     detection from a single forward pass — Test 3g, isolating the production *downscale +
     re-threshold* stage.
@@ -393,12 +493,14 @@ def detect_mask_pairs(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
 
     H, W = img.shape
     native, down = [], []
+    trunc = _new_truncation(max_det)
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
             res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
-                        device=device)
+                        device=device, max_det=max_det)
             r0 = res[0]
+            _note_tile_truncation(r0, max_det, trunc)
             if r0.masks is None or len(r0.masks.data) == 0:
                 continue
             for m in r0.masks.data.cpu().numpy():
@@ -411,6 +513,7 @@ def detect_mask_pairs(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
                     continue
                 native.append(nat)
                 down.append(dn)
+    _warn_if_truncated(trunc, "detect_mask_pairs")
     return native, down
 
 
@@ -474,7 +577,7 @@ def _capture_process_mask(store, proto_store=None):
 
 
 def detect_soft_mask_triples(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
-                             soft_floor=0.02):
+                             soft_floor=0.02, max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """Tile ``img`` like :func:`detect_binary_masks` and return, per detection, the aligned triple
     ``(production, native, soft)`` from a **single forward pass** — Test 3e, isolating the 0.5
     binarisation from the estimator:
@@ -510,14 +613,16 @@ def detect_soft_mask_triples(model, img, slice_size=256, imgsz=1024, conf=0.10, 
     H, W = img.shape
     prod_l, nat_l, soft_l = [], [], []
     store = []
+    trunc = _new_truncation(max_det)
     with _capture_process_mask(store):
         for y0 in range(0, H - slice_size + 1, slice_size):
             for x0 in range(0, W - slice_size + 1, slice_size):
                 store.clear()
                 sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
                 res = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
-                            device=device)
+                            device=device, max_det=max_det)
                 r0 = res[0]
+                _note_tile_truncation(r0, max_det, trunc)
                 if r0.masks is None or len(r0.masks.data) == 0:
                     continue
                 md = r0.masks.data.cpu().numpy()
@@ -538,6 +643,7 @@ def detect_soft_mask_triples(model, img, slice_size=256, imgsz=1024, conf=0.10, 
                     nat_l.append(nat)
                     soft_l.append(s[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
                                   .astype(np.float32).copy())
+    _warn_if_truncated(trunc, "detect_soft_mask_triples")
     return prod_l, nat_l, soft_l
 
 
@@ -559,7 +665,8 @@ def _largest_filled(mb):
 
 
 def detect_segmenter_view(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0, pad_px=6,
-                          max_records=None, empty_cache_every=8):
+                          max_records=None, empty_cache_every=8,
+                          max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """Everything the segmenter sees for one boulder, at every resolution in the chain.
 
     This exists to make the orientation artifact's *mechanism* visible instead of argued. For each
@@ -592,6 +699,7 @@ def detect_segmenter_view(model, img, slice_size=256, imgsz=1024, conf=0.10, dev
     proto_res = imgsz / 4.0
     H, W = img.shape
     n_slices = 0
+    trunc = _new_truncation(max_det)
     # `store=None`: only the prototype-resolution field is captured. The upsampled field is 16x
     # larger and unused here, and materialising it per detection OOMs an 8 GB card on dense tiles.
     with _capture_process_mask(None, proto_store):
@@ -609,7 +717,8 @@ def detect_segmenter_view(model, img, slice_size=256, imgsz=1024, conf=0.10, dev
                 sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
                 big = cv2.resize(sl, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
                 r0 = model(np.stack([sl] * 3, axis=-1), imgsz=imgsz, conf=conf, verbose=False,
-                           device=device)[0]
+                           device=device, max_det=max_det)[0]
+                _note_tile_truncation(r0, max_det, trunc)
                 if r0.masks is None or len(r0.masks.data) == 0 or not proto_store:
                     continue
                 md = r0.masks.data.cpu().numpy()
@@ -655,13 +764,15 @@ def detect_segmenter_view(model, img, slice_size=256, imgsz=1024, conf=0.10, dev
                         slice_xy=(x0, y0)))
     meta = dict(slice_size=slice_size, imgsz=imgsz, upscale=up, proto_res=proto_res,
                 proto_px_per_native_px=proto_res / slice_size, n=len(records),
-                n_slices=n_slices, truncated=bool(max_records and len(records) >= max_records))
+                n_slices=n_slices, truncated=bool(max_records and len(records) >= max_records),
+                truncation=_warn_if_truncated(trunc, "detect_segmenter_view"))
     return records, meta
 
 
 def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
                           max_box_blowup=1.5, sam_batch=96,
-                          configs=("yolo", "sam256", "sam1024"), empty_cache_every=1):
+                          configs=("yolo", "sam256", "sam1024"), empty_cache_every=1,
+                          max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """Tile ``img`` like :func:`detect_binary_masks`, detect with YOLO, then **re-mask each
     detection with SAM2 box prompts** — Test 3c, the option-G (detector-preserving re-masking)
     prototype and its production path. Up to three aligned mask sets per kept detection, all from
@@ -692,6 +803,13 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
     prompt batch OOMs an 8 GB card). Returns ``(df, masks)`` with ``df = [cx, cy, score] +
     [area_<c> for c in configs]`` (centres in GLOBAL image px; areas in each side's own px) and
     ``masks = {c: [...] for c in configs}``. Per-side failure counts are in ``df.attrs["failed"]``.
+
+    ``max_det`` (review item **X-06**, extended here 2026-08-06) is passed to the detector
+    explicitly and its saturation recorded in ``df.attrs["truncation"]``. It was **not** passed
+    before, so ultralytics' 300 applied to every tile of every scan this function produced —
+    including the SAM2 equal-area rescan behind ``data/summary/fixed_area_scenes.csv``, which is
+    saturated on at least one control site. See :data:`ULTRALYTICS_DEFAULT_MAX_DET` for the
+    measured extent and for what it does and does not contaminate.
     """
     import cv2
     import torch
@@ -742,13 +860,16 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
     need_s256, need_s1024 = "sam256" in configs, "sam1024" in configs
     masks = {c: [] for c in configs}
     failed = {c: 0 for c in configs}
+    trunc = _new_truncation(max_det)
     rows, tile_i = [], 0
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
             tile_i += 1
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
             rgb = np.stack([sl] * 3, axis=-1)
-            r0 = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device)[0]
+            r0 = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device,
+                       max_det=max_det)[0]
+            _note_tile_truncation(r0, max_det, trunc)
             if r0.masks is None or len(r0.masks.data) == 0:
                 continue
             boxes = r0.boxes.xyxy.cpu().numpy()
@@ -791,6 +912,7 @@ def detect_sam2_mask_sets(model, sam, img, slice_size=256, imgsz=1024, conf=0.10
     df = pd.DataFrame(rows, columns=["cx", "cy", "score"] + [f"area_{c}" for c in configs])
     df.attrs["failed"] = failed
     df.attrs["realigned_chunks"] = realigned["chunks"]
+    df.attrs["truncation"] = _warn_if_truncated(trunc, "detect_sam2_mask_sets")
     return df, masks
 
 
@@ -1066,7 +1188,8 @@ def sam2_rotation_sweep(model, sam, crops, alphas, aspect_min=1.35, small_px=8.0
     return res
 
 
-def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0):
+def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
+                      max_det=ULTRALYTICS_DEFAULT_MAX_DET):
     """Solution H-obb orientation readout. Tile ``img`` exactly like :func:`detect_sam2_mask_sets`
     (non-overlapping ``slice_size`` windows, each upscaled to ``imgsz``, same ``conf``), run the
     trained **OBB** model per tile, and read each detection's long-axis azimuth **straight from the
@@ -1081,11 +1204,14 @@ def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
     from .orientation import obb_angle180
     H, W = img.shape
     rows = []
+    trunc = _new_truncation(max_det)
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
             sl = img[y0:y0 + slice_size, x0:x0 + slice_size]
             rgb = np.stack([sl] * 3, axis=-1)
-            r0 = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device)[0]
+            r0 = model(rgb, imgsz=imgsz, conf=conf, verbose=False, device=device,
+                       max_det=max_det)[0]
+            _note_tile_truncation(r0, max_det, trunc)
             if r0.obb is None or len(r0.obb) == 0:
                 continue
             corners = r0.obb.xyxyxyxy.cpu().numpy()      # (n, 4, 2) (col,row) in slice coords
@@ -1096,7 +1222,9 @@ def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
                     continue
                 dpx = 2.0 * np.sqrt(max(float(wh[k, 0] * wh[k, 1]), 0.0) / np.pi)
                 rows.append((ang, asp, dpx))
-    return pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+    df = pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
+    df.attrs["truncation"] = _warn_if_truncated(trunc, "detect_obb_angles")
+    return df
 
 
 def angles_from_moments(masks):

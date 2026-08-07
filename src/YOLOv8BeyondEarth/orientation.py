@@ -332,6 +332,80 @@ def half_plane_fraction_uniform():
     return 0.5
 
 
+def axial_resultant(angle180):
+    """Mean resultant length **R** of an axial azimuth set — the rose's concentration, in [0, 1].
+
+    Doubled-angle convention (Fisher, *Statistical Analysis of Circular Data*, §3.3):
+    ``R = |mean(exp(2i·θ))|``, so ``θ`` and ``θ + 180°`` are the same direction, as they must be for
+    a long axis. ``R = 0`` is perfectly spread, ``R = 1`` is every boulder on one axis.
+
+    **R is not scale-free in n, and that has bitten this project.** Under isotropy the expected R is
+    :func:`axial_resultant_uniform`, ``≈ 0.886/sqrt(n)`` — *large* at small n. The Goal-4 fabric gate
+    was for a time set at "R ≈ 0.35" from control sites holding 8–103 boulders, where the isotropic
+    expectation is itself 0.09–0.31: most of that bar was small-sample noise. **Never quote an R
+    without its n and its null** (:func:`rayleigh_p`).
+
+    Consolidated 2026-08-06 from two identical private copies (``analyze_sam_chirality.axial_mean``
+    and ``analyze_gate2b._resultant``). NaNs dropped; ``nan`` for empty input.
+    """
+    a = np.asarray(angle180, dtype=float)
+    a = a[np.isfinite(a)] % 180.0
+    if not a.size:
+        return float("nan")
+    return float(np.abs(np.mean(np.exp(2j * np.deg2rad(a)))))
+
+
+def axial_mean_direction(angle180):
+    """Dominant axis via the **doubled-angle circular mean** — the second peak estimator.
+
+    ``0.5 * atan2(<sin 2θ>, <cos 2θ>) mod 180``. This is the first-moment estimator the project used
+    before the figures switched to :func:`refine_peak` (the mode of a σ=4 smoothed density), and the
+    switch was never documented — review pass 6 found the shipped cardinal headline was "100%
+    estimator, 0% sampling" across the two.
+
+    **Report both, always.** They are not interchangeable: the mode finds the tallest bump, the
+    circular mean finds the balance point, and on a rose with two near-equal bumps (which control-site
+    roses have — cardinal and diagonal within ~3% of each other at some sites) they can differ by
+    tens of degrees and a bandwidth change can flip the mode between them. Any conclusion that holds
+    under one and not the other is a statement about the estimator.
+    """
+    a = np.asarray(angle180, dtype=float)
+    a = a[np.isfinite(a)] % 180.0
+    if not a.size:
+        return float("nan")
+    z = np.mean(np.exp(2j * np.deg2rad(a)))
+    return float(np.rad2deg(np.angle(z)) / 2.0 % 180.0)
+
+
+def axial_resultant_uniform(n):
+    """Expected :func:`axial_resultant` for ``n`` isotropic axial angles: ``sqrt(pi) / (2*sqrt(n))``.
+
+    The resultant of ``n`` unit vectors with uniform random directions is a 2-D random walk, so
+    ``|sum|`` is asymptotically Rayleigh with ``sigma = sqrt(n/2)`` and ``E|sum| = sqrt(n*pi)/2``;
+    dividing by ``n`` gives ``0.8862/sqrt(n)``. Accurate to well under 1% for ``n >= 10`` (verified
+    by Monte Carlo in ``tests/test_orientation_stats.py``). Returns ``nan`` for ``n < 1``.
+    """
+    n = int(n)
+    return float(np.sqrt(np.pi) / (2.0 * np.sqrt(n))) if n >= 1 else float("nan")
+
+
+def rayleigh_p(r, n):
+    """Rayleigh test: probability that ``n`` isotropic axial angles reach a resultant of at least
+    ``r``. ``p = exp(-n * r**2)``.
+
+    This is the bar an R-based claim needs, and it is what turns "R = 0.35" from a number into a
+    result: at n = 8 that is p = 0.37 (nothing), at n = 2,000 it is p ~ 1e-106. Inverting it gives
+    the isotropic critical value at any n — ``r_crit = sqrt(-ln(alpha)/n)``, e.g.
+    ``sqrt(2.996/n)`` at alpha = 0.05 — which is the form a *gate* should be written in, since it
+    scales with the sample the candidate fabric is measured on rather than with the one the null
+    happened to be measured on. Large-sample approximation; exact enough for ``n >= 10``.
+    """
+    n = int(n)
+    if n < 1 or not np.isfinite(r):
+        return float("nan")
+    return float(np.exp(-n * float(r) ** 2))
+
+
 def half_plane_fraction_about(angle180, ref_axis):
     """:func:`half_plane_fraction` generalised to an **arbitrary reference axis** ``ref_axis`` (deg).
 

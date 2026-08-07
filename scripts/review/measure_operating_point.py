@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -164,6 +165,37 @@ def check_cached_identity(cached, want, refresh):
     return True
 
 
+def archive_per_tile_outputs(pred_dir, conf):
+    """Copy ``preds/confXXX/`` aside before a re-measure overwrites it (re-run blocker **A-2**).
+
+    Per-tile prediction writes go out with ``on_conflict="overwrite"``, and ``--refresh`` clears the
+    *catalog* but never this directory — so a re-measure silently replaces the ~1,200 per-tile
+    manifests that are the **only surviving record of what the published operating-point table
+    measured** (the catalogs themselves carry no per-tile provenance, and the table predates the B2
+    identity sidecar). ~35 MB per confidence, so archiving is free next to the loss.
+
+    Do **not** "fix" this by removing ``on_conflict="overwrite"``: that was tried and refuted — the
+    fused layer for tile 1 of 200 already exists from the previous confidence's pass, so the run
+    would raise on its first tile.
+
+    Idempotent: an existing archive is never overwritten, so re-running twice in a day cannot
+    destroy the original by archiving the replacement over it.
+    """
+    import shutil
+    src = pred_dir / f"conf{int(conf * 100):03d}"
+    if not src.exists() or not any(src.iterdir()):
+        return None
+    dst = pred_dir / "_archive" / f"conf{int(conf * 100):03d}__{time.strftime('%Y%m%dT%H%M%S')}"
+    if dst.exists():
+        raise FileExistsError(f"{dst} already exists; refusing to overwrite an archive")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst)
+    n = sum(1 for _ in dst.rglob("*") if _.is_file())
+    print(f"[archive] conf {conf}: copied {n} per-tile files to {dst.relative_to(pred_dir.parent)} "
+          "before overwriting (A-2)", flush=True)
+    return dst
+
+
 def run_tiles(pngs, tile_dir, pred_dir, weights, conf, device, split="val", seed=0,
               n_tiles=None, refresh=False):
     """Every tile through the fused production ladder at one confidence. Returns one catalog."""
@@ -176,6 +208,8 @@ def run_tiles(pngs, tile_dir, pred_dir, weights, conf, device, split="val", seed
     identity = cache_identity(pngs, weights, conf, split, seed, n_tiles)
     if cached.exists() and check_cached_identity(cached, identity, refresh):
         return gpd.read_file(cached)
+    # Past the cache check, so this run WILL write per-tile outputs. Archive first (A-2).
+    archive_per_tile_outputs(pred_dir, conf)
 
     model = AutoDetectionModel.from_pretrained(
         model_type="ultralytics", model_path=str(weights), device=device,

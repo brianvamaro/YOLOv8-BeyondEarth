@@ -1,0 +1,28 @@
+{
+  "ss512": {
+    "n_a": 1987,
+    "n_b": 1987,
+    "n_matched": 1987,
+    "n_unmatched_a": 0,
+    "n_unmatched_b": 0,
+    "frac_unmatched": 0.0,
+    "n_geometry_identical": 1987,
+    "frac_geometry_identical": 1.0,
+    "area_ratio_median": 1.0,
+    "area_ratio_p99": 1.0,
+    "max_abs_score_delta": 0.0
+  },
+  "ss256": {
+    "n_a": 2669,
+    "n_b": 2669,
+    "n_matched": 2669,
+    "n_unmatched_a": 0,
+    "n_unmatched_b": 0,
+    "frac_unmatched": 0.0,
+    "n_geometry_identical": 2669,
+    "frac_geometry_identical": 1.0,
+    "area_ratio_median": 1.0,
+    "area_ratio_p99": 1.0,
+    "max_abs_score_delta": 0.0
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "tag": "ss256-skimage-w1",
+  "raster": "crop.tif",
+  "config": {
+    "confidence_threshold": 0.1,
+    "slice_size": 256,
+    "inference_size": 1024,
+    "overlap_height_ratio": 0.2,
+    "overlap_width_ratio": 0.2,
+    "min_area_threshold": 6,
+    "downscale_pred": true,
+    "postprocess": true,
+    "postprocess_match_threshold": 0.2,
+    "postprocess_class_agnostic": false,
+    "batch_size": 8,
+    "contour_method": "skimage",
+    "save_bbox": false,
+    "save_prenms": false,
+    "output_format": "gpkg",
+    "sr_factor": 1
+  },
+  "n_workers": 1,
+  "wall_seconds": 11.7,
+  "n_detections": 3288,
+  "n_after_nms": 2669,
+  "mask_resize_shapes": {
+    "gpu_to_cpu_MiB": 18072,
+    "resize 1024->256": 4518
+  },
+  "stages": {
+    "model call (GPU inference)": {
+      "calls": 13,
+      "seconds": 5.2193,
+      "us_per_call": 401484.82,
+      "pct_of_wall": 44.6
+    },
+    "_result_to_df (per slice, total)": {
+      "calls": 100,
+      "seconds": 5.1977,
+      "us_per_call": 51977.18,
+      "pct_of_wall": 44.41
+    },
+    "cv2.resize (mask downscale)": {
+      "calls": 4618,
+      "seconds": 2.2705,
+      "us_per_call": 491.67,
+      "pct_of_wall": 19.4
+    },
+    "Tensor.cpu (mask GPU->CPU)": {
+      "calls": 192,
+      "seconds": 1.6611,
+      "us_per_call": 8651.4,
+      "pct_of_wall": 14.19
+    },
+    "binary_mask_to_polygon (total)": {
+      "calls": 4518,
+      "seconds": 0.9098,
+      "us_per_call": 201.37,
+      "pct_of_wall": 7.77
+    },
+    "  ..._mask_bounds": {
+      "calls": 4518,
+      "seconds": 0.4221,
+      "us_per_call": 93.43,
+      "pct_of_wall": 3.61
+    },
+    "write_vector (+readback)": {
+      "calls": 1,
+      "seconds": 0.1878,
+      "us_per_call": 187803.8,
+      "pct_of_wall": 1.6
+    },
+    "  ...find_contours": {
+      "calls": 4518,
+      "seconds": 0.169,
+      "us_per_call": 37.4,
+      "pct_of_wall": 1.44
+    },
+    "  ..._enclosed_area (X-03 shoelace)": {
+      "calls": 4545,
+      "seconds": 0.1125,
+      "us_per_call": 24.76,
+      "pct_of_wall": 0.96
+    },
+    "mask_support_area (G1-06 gate)": {
+      "calls": 4518,
+      "seconds": 0.0637,
+      "us_per_call": 14.09,
+      "pct_of_wall": 0.54
+    },
+    "file_identity (sha256)": {
+      "calls": 2,
+      "seconds": 0.0521,
+      "us_per_call": 26030.8,
+      "pct_of_wall": 0.45
+    },
+    "shift_polygon": {
+      "calls": 4518,
+      "seconds": 0.0441,
+      "us_per_call": 9.77,
+      "pct_of_wall": 0.38
+    },
+    "add_geometries": {
+      "calls": 1,
+      "seconds": 0.0427,
+      "us_per_call": 42667.5,
+      "pct_of_wall": 0.36
+    },
+    "_ensure_png (TIFF->PNG)": {
+      "calls": 1,
+      "seconds": 0.0002,
+      "us_per_call": 246.8,
+      "pct_of_wall": 0.0
+    }
+  }
+}

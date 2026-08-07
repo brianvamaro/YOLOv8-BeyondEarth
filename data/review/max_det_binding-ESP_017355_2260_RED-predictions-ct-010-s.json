@@ -1,0 +1,25 @@
+{
+  "catalog": "ESP_017355_2260_RED-predictions-ct-010-ss-256sr2-is-1024-ov-020-downscaled-mask-nms.gpkg",
+  "raster": "ESP_017355_2260_RED.tif",
+  "raster_px": [
+    22490,
+    85922
+  ],
+  "slice_size": 256,
+  "sr_factor": 2,
+  "native_slice": 128,
+  "n_detections": 1804771,
+  "n_slices": 182646,
+  "n_slices_with_detections": 94856,
+  "mean_per_occupied_slice": 29.4,
+  "p50": 30,
+  "p99": 59,
+  "p999": 73,
+  "max_observed": 151,
+  "ultralytics_default_max_det": 300,
+  "headroom_at_max": 149,
+  "n_slices_over_200": 0,
+  "n_slices_over_250": 0,
+  "n_slices_at_or_over_300": 0,
+  "note": "post-NMS centroid counts: a LOWER BOUND on what the model emitted per slice, since cross-slice duplicates are already removed and partly-overlapping objects are not counted"
+}

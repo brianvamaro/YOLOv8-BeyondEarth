@@ -1,0 +1,34 @@
+{
+  "raster": "crop.tif",
+  "slice_size": 256,
+  "inference_size": 1024,
+  "x01": {
+    "n_at_conf_010": 4518,
+    "n_at_conf_025": 2848,
+    "extra_detections": 1670,
+    "extra_fraction": 0.586376404494382,
+    "added_median_dpx_native": 6.616700220714396,
+    "kept_median_dpx_native": 7.955976277359199
+  },
+  "g1_06": {
+    "area_gate_px": 6,
+    "downscale_pred": true,
+    "fraction_of_masks_with_fractional_px": 1.0,
+    "n_kept_old_gate": 4492,
+    "n_kept_new_gate": 4518,
+    "n_rescued_by_new_gate": 26,
+    "n_dropped_by_new_gate": 0,
+    "rescued_fraction": 0.00578806767586821,
+    "rescued_median_dpx_native": 3.1915382432114616
+  },
+  "x03": {
+    "n_detections": 4518,
+    "n_multi_contour": 27,
+    "multi_contour_fraction": 0.00597609561752988,
+    "n_selection_differs": 0,
+    "selection_differs_fraction": 0.0,
+    "median_dpx_ratio_old_over_new": null,
+    "min_dpx_ratio_old_over_new": null,
+    "n_worse_than_10pct": 0
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "imgsz": 1024,
+  "overlap": 0.2,
+  "ladder": [
+    [
+      512,
+      1
+    ],
+    [
+      256,
+      1
+    ],
+    [
+      256,
+      2
+    ]
+  ],
+  "scenes": {
+    "hirise": {
+      "raster_px": [
+        22490,
+        85922
+      ],
+      "scene_px": 1932385780,
+      "arms": {
+        "512": {
+          "native_slice": 512,
+          "step_px": 410,
+          "n_slices": 11550,
+          "grid": [
+            55,
+            210
+          ],
+          "model_px_per_scene_px": 6.27,
+          "closed_form_imgsz2_over_step2": 6.24,
+          "n_detections": 686669
+        },
+        "256": {
+          "native_slice": 256,
+          "step_px": 205,
+          "n_slices": 46090,
+          "grid": [
+            110,
+            419
+          ],
+          "model_px_per_scene_px": 25.01,
+          "closed_form_imgsz2_over_step2": 24.95,
+          "n_detections": 1112849
+        },
+        "256sr2": {
+          "native_slice": 128,
+          "step_px": 103,
+          "n_slices": 182646,
+          "grid": [
+            219,
+            834
+          ],
+          "model_px_per_scene_px": 99.11,
+          "closed_form_imgsz2_over_step2": 98.84,
+          "n_detections": 1804771
+        }
+      },
+      "total_slices": 240286,
+      "model_px_per_scene_px_full_ladder": 130.39,
+      "sr_arm_share_of_model_px": 0.76,
+      "sr_over_256_slice_ratio": 3.963,
+      "sr_over_256_detection_ratio": 1.622,
+      "ledger_sr_arm_wall_ratio": 2.73,
+      "wall_ratio_upper_bound": 3.963,
+      "ledger_exceeds_bound": false,
+      "excess_over_bound": 0.69
+    },
+    "nac": {
+      "raster_px": [
+        5118,
+        59183
+      ],
+      "scene_px": 302898594,
+      "arms": {
+        "512": {
+          "native_slice": 512,
+          "step_px": 410,
+          "n_slices": 1885,
+          "grid": [
+            13,
+            145
+          ],
+          "model_px_per_scene_px": 6.53,
+          "closed_form_imgsz2_over_step2": 6.24,
+          "n_detections": 17549
+        },
+        "256": {
+          "native_slice": 256,
+          "step_px": 205,
+          "n_slices": 7225,
+          "grid": [
+            25,
+            289
+          ],
+          "model_px_per_scene_px": 25.01,
+          "closed_form_imgsz2_over_step2": 24.95,
+          "n_detections": 21342
+        },
+        "256sr2": {
+          "native_slice": 128,
+          "step_px": 103,
+          "n_slices": 28750,
+          "grid": [
+            50,
+            575
+          ],
+          "model_px_per_scene_px": 99.53,
+          "closed_form_imgsz2_over_step2": 98.84,
+          "n_detections": 8827
+        }
+      },
+      "total_slices": 37860,
+      "model_px_per_scene_px_full_ladder": 131.07,
+      "sr_arm_share_of_model_px": 0.759,
+      "sr_over_256_slice_ratio": 3.979,
+      "sr_over_256_detection_ratio": 0.414,
+      "ledger_sr_arm_wall_ratio": 6.63,
+      "wall_ratio_upper_bound": 3.979,
+      "ledger_exceeds_bound": true,
+      "excess_over_bound": 1.67
+    }
+  }
+}

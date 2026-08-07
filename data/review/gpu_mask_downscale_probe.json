@@ -1,0 +1,38 @@
+{
+  "raster": "crop.tif",
+  "inference_size": 1024,
+  "arms": {
+    "256": {
+      "downscale_factor": 4,
+      "n_slices": 48,
+      "n_masks": 1371,
+      "n_value_identical": 1371,
+      "frac_value_identical": 1.0,
+      "max_abs_value_diff": 0.0,
+      "n_polygons": 1371,
+      "n_polygon_identical": 1371,
+      "frac_polygon_identical": 1.0,
+      "cpu_path_s": 1.163,
+      "gpu_path_s": 0.103,
+      "speedup": 11.28,
+      "transferred_MiB_now": 5484.0,
+      "transferred_MiB_proposed": 342.8
+    },
+    "512": {
+      "downscale_factor": 2,
+      "n_slices": 25,
+      "n_masks": 3240,
+      "n_value_identical": 3240,
+      "frac_value_identical": 1.0,
+      "max_abs_value_diff": 0.0,
+      "n_polygons": 3240,
+      "n_polygon_identical": 3240,
+      "frac_polygon_identical": 1.0,
+      "cpu_path_s": 2.951,
+      "gpu_path_s": 0.554,
+      "speedup": 5.32,
+      "transferred_MiB_now": 12960.0,
+      "transferred_MiB_proposed": 3240.0
+    }
+  }
+}

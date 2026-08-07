@@ -1,0 +1,102 @@
+{
+  "tag": "ss256-skimage-w8",
+  "raster": "crop.tif",
+  "config": {
+    "confidence_threshold": 0.1,
+    "slice_size": 256,
+    "inference_size": 1024,
+    "overlap_height_ratio": 0.2,
+    "overlap_width_ratio": 0.2,
+    "min_area_threshold": 6,
+    "downscale_pred": true,
+    "postprocess": true,
+    "postprocess_match_threshold": 0.2,
+    "postprocess_class_agnostic": false,
+    "batch_size": 8,
+    "contour_method": "skimage",
+    "save_bbox": false,
+    "save_prenms": false,
+    "output_format": "gpkg",
+    "sr_factor": 1
+  },
+  "n_workers": 8,
+  "wall_seconds": 9.48,
+  "n_detections": 3288,
+  "n_after_nms": 2669,
+  "mask_resize_shapes": {
+    "gpu_to_cpu_MiB": 18072,
+    "resize 1024->256": 4518
+  },
+  "stages": {
+    "model call (GPU inference)": {
+      "calls": 13,
+      "seconds": 5.089,
+      "us_per_call": 391460.37
+    },
+    "cv2.resize (mask downscale)": {
+      "calls": 4618,
+      "seconds": 4.1296,
+      "us_per_call": 894.24
+    },
+    "binary_mask_to_polygon (total)": {
+      "calls": 4518,
+      "seconds": 4.0294,
+      "us_per_call": 891.86
+    },
+    "  ..._mask_bounds": {
+      "calls": 4518,
+      "seconds": 3.4314,
+      "us_per_call": 759.49
+    },
+    "_result_to_df (per slice, total)": {
+      "calls": 100,
+      "seconds": 3.2847,
+      "us_per_call": 32846.67
+    },
+    "mask_support_area (G1-06 gate)": {
+      "calls": 4518,
+      "seconds": 1.7876,
+      "us_per_call": 395.67
+    },
+    "Tensor.cpu (mask GPU->CPU)": {
+      "calls": 192,
+      "seconds": 1.6661,
+      "us_per_call": 8677.47
+    },
+    "write_vector (+readback)": {
+      "calls": 1,
+      "seconds": 0.1943,
+      "us_per_call": 194274.9
+    },
+    "  ...find_contours": {
+      "calls": 4518,
+      "seconds": 0.18,
+      "us_per_call": 39.84
+    },
+    "  ..._enclosed_area (X-03 shoelace)": {
+      "calls": 4545,
+      "seconds": 0.173,
+      "us_per_call": 38.07
+    },
+    "shift_polygon": {
+      "calls": 4518,
+      "seconds": 0.046,
+      "us_per_call": 10.17
+    },
+    "file_identity (sha256)": {
+      "calls": 2,
+      "seconds": 0.0417,
+      "us_per_call": 20868.15
+    },
+    "add_geometries": {
+      "calls": 1,
+      "seconds": 0.0361,
+      "us_per_call": 36068.9
+    },
+    "_ensure_png (TIFF->PNG)": {
+      "calls": 1,
+      "seconds": 0.0002,
+      "us_per_call": 223.1
+    }
+  }
+}

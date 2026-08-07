@@ -1,0 +1,38 @@
+{
+  "catalog": "ESP_017355_2260_RED-predictions-ct-010-ss-256-is-1024-ov-020-downscaled-mask-nms.gpkg",
+  "slice_size": 256,
+  "sr_factor": 1,
+  "sam_batch": 96,
+  "n_detections": 1112849,
+  "n_slices": 46090,
+  "claim": "at production density, ceil(n_boxes/sam_batch) is already exactly 1 encode",
+  "caveat": "post-NMS centroid counts are a lower bound on what the model returns per slice, so every multiplier below is a lower bound",
+  "cases": {
+    "as_saved_effective_conf_0.25": {
+      "encodes": 31909,
+      "occupied_slices": 24972,
+      "encodes_per_occupied_slice": 1.278,
+      "slices_over_sam_batch": 6921,
+      "fraction_of_occupied_over_sam_batch": 0.2772,
+      "mean_per_occupied": 70.1,
+      "max_per_slice": 253.0,
+      "encodes_above_one_each": 6937
+    },
+    "corrected_to_conf_0.10": {
+      "encodes": 40303,
+      "occupied_slices": 24972,
+      "encodes_per_occupied_slice": 1.614,
+      "slices_over_sam_batch": 13300,
+      "fraction_of_occupied_over_sam_batch": 0.5326,
+      "mean_per_occupied": 102.1,
+      "max_per_slice": 368.7,
+      "encodes_above_one_each": 15331
+    }
+  },
+  "verdict": {
+    "claim_holds_at_effective_conf_0.25": false,
+    "claim_holds_at_declared_conf_0.10": false,
+    "wasted_encodes_at_conf_0.10": 15331,
+    "summary": "1.61 encodes per occupied slice at the declared conf 0.10 (53.3% of occupied slices exceed sam_batch=96), so an encode-once/decode-many path would remove 15,331 redundant image encodes on this scene \u2014 not zero."
+  }
+}

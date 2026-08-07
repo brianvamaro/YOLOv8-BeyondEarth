@@ -1,0 +1,120 @@
+{
+  "equivalence": {
+    "production_like": {
+      "n": 4000,
+      "differing": 0,
+      "returned_none": 0,
+      "multi_component": 0,
+      "equal_area_ties": 0,
+      "first_bad": null
+    },
+    "multi_blob": {
+      "n": 4000,
+      "differing": 0,
+      "returned_none": 0,
+      "multi_component": 3966,
+      "equal_area_ties": 2024,
+      "first_bad": null
+    },
+    "holed": {
+      "n": 4000,
+      "differing": 0,
+      "returned_none": 0,
+      "multi_component": 2011,
+      "equal_area_ties": 2011,
+      "first_bad": null
+    },
+    "speckle": {
+      "n": 4000,
+      "differing": 0,
+      "returned_none": 0,
+      "multi_component": 4000,
+      "equal_area_ties": 446,
+      "first_bad": null
+    },
+    "border_touching": {
+      "n": 4000,
+      "differing": 0,
+      "returned_none": 0,
+      "multi_component": 4000,
+      "equal_area_ties": 401,
+      "first_bad": null
+    },
+    "fractional": {
+      "n": 4000,
+      "differing": 0,
+      "returned_none": 0,
+      "multi_component": 4000,
+      "equal_area_ties": 409,
+      "first_bad": null
+    },
+    "degenerate": {
+      "n": 4000,
+      "differing": 0,
+      "returned_none": 1383,
+      "multi_component": 0,
+      "equal_area_ties": 0,
+      "first_bad": null
+    }
+  },
+  "total_masks": 28000,
+  "total_differing": 0,
+  "total_equal_area_ties": 5291,
+  "timings": [
+    {
+      "mask_size": 256,
+      "blob_radius": 4,
+      "blob_px": 49,
+      "blob_fraction_of_array": 0.00075,
+      "old_ms": 1.0911,
+      "new_ms": 0.0842,
+      "speedup": 12.95
+    },
+    {
+      "mask_size": 256,
+      "blob_radius": 8,
+      "blob_px": 197,
+      "blob_fraction_of_array": 0.00301,
+      "old_ms": 1.0842,
+      "new_ms": 0.0892,
+      "speedup": 12.16
+    },
+    {
+      "mask_size": 256,
+      "blob_radius": 24,
+      "blob_px": 1793,
+      "blob_fraction_of_array": 0.02736,
+      "old_ms": 1.084,
+      "new_ms": 0.128,
+      "speedup": 8.47
+    },
+    {
+      "mask_size": 128,
+      "blob_radius": 4,
+      "blob_px": 49,
+      "blob_fraction_of_array": 0.00299,
+      "old_ms": 0.32,
+      "new_ms": 0.0558,
+      "speedup": 5.74
+    },
+    {
+      "mask_size": 64,
+      "blob_radius": 4,
+      "blob_px": 49,
+      "blob_fraction_of_array": 0.01196,
+      "old_ms": 0.1098,
+      "new_ms": 0.0452,
+      "speedup": 2.43
+    },
+    {
+      "mask_size": 512,
+      "blob_radius": 8,
+      "blob_px": 197,
+      "blob_fraction_of_array": 0.00075,
+      "old_ms": 4.2658,
+      "new_ms": 0.2107,
+      "speedup": 20.25
+    }
+  ],
+  "note": "timings are CPU-only and therefore not affected by the GPU power state; the 1.97 ms/boulder figure they are compared against came from the 2026-08-02/03 research profile of Solution G"
+}
