@@ -1189,7 +1189,7 @@ def sam2_rotation_sweep(model, sam, crops, alphas, aspect_min=1.35, small_px=8.0
 
 
 def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=0,
-                      max_det=ULTRALYTICS_DEFAULT_MAX_DET):
+                      max_det=ULTRALYTICS_DEFAULT_MAX_DET, drop_edge=True):
     """Solution H-obb orientation readout. Tile ``img`` exactly like :func:`detect_sam2_mask_sets`
     (non-overlapping ``slice_size`` windows, each upscaled to ``imgsz``, same ``conf``), run the
     trained **OBB** model per tile, and read each detection's long-axis azimuth **straight from the
@@ -1200,10 +1200,27 @@ def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
     (North=0, East=90, [0,180)), so the diagonal-fraction is directly comparable to YOLO's and G's
     numbers on the same scene. ``diameter_px`` is the box's equivalent-area diameter in native px
     (``2*sqrt(w*h/pi)`` from ``obb.xywhr``); use it with the elongated + well-resolved subset cut.
+
+    ``drop_edge=True`` discards boxes touching the tile boundary — **the G2-02 rule this function
+    was missing** (added 2026-08-07, review pass on Solution H). Its ellipse sibling
+    :func:`detect_orientations` has taken it since ``649da7d`` for the stated reason that a
+    tile-clipped object carries a spurious straight edge aligned with the grid, i.e. a cardinal bias
+    fed straight into a cardinal-bias test. **The rectangle readout is hurt roughly twice as hard:**
+    measured raster-free on the section-4c null field, cutting shapes at the 256-px seams moves an
+    ideal min-area-rectangle reader **0.2200 → 0.2935 (+0.074)** against **+0.032** for an ellipse
+    reader, because a fragment's tightest rectangle sits flush with the seam.
+
+    This is a **prospective** fix, not a retrospective one. At the 2026-07-09 H evaluation neither
+    readout filtered, so the published H-obb-vs-H-seg comparison is symmetric in *rule* (though not
+    in magnitude). But ``detect_orientations`` filters by default *today*, so any refreshed
+    H-obb-vs-H-seg or H-obb-vs-G comparison would otherwise put a seam-filtered ellipse readout
+    against an unfiltered rectangle one — manufacturing exactly the bias this review was checking
+    for. Pass ``drop_edge=False`` to reproduce the 2026-07-09 numbers.
     """
     from .orientation import obb_angle180
     H, W = img.shape
     rows = []
+    n_edge = 0
     trunc = _new_truncation(max_det)
     for y0 in range(0, H - slice_size + 1, slice_size):
         for x0 in range(0, W - slice_size + 1, slice_size):
@@ -1217,6 +1234,14 @@ def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
             corners = r0.obb.xyxyxyxy.cpu().numpy()      # (n, 4, 2) (col,row) in slice coords
             wh = r0.obb.xywhr.cpu().numpy()[:, 2:4]       # (n, 2) w,h in native slice px
             for k in range(len(corners)):
+                # Corner coordinates are in the slice's own frame, so "touches the tile edge" is a
+                # direct test on them — no mask needed, unlike `is_mask_within_slice`.
+                if drop_edge:
+                    cx_, cy_ = corners[k][:, 0], corners[k][:, 1]
+                    if (cx_.min() <= 0 or cy_.min() <= 0
+                            or cx_.max() >= slice_size - 1 or cy_.max() >= slice_size - 1):
+                        n_edge += 1
+                        continue
                 ang, asp = obb_angle180(corners[k])
                 if not np.isfinite(ang):
                     continue
@@ -1224,6 +1249,7 @@ def detect_obb_angles(model, img, slice_size=256, imgsz=1024, conf=0.10, device=
                 rows.append((ang, asp, dpx))
     df = pd.DataFrame(rows, columns=["angle180", "aspect", "diameter_px"])
     df.attrs["truncation"] = _warn_if_truncated(trunc, "detect_obb_angles")
+    df.attrs["edge_dropped"] = n_edge
     return df
 
 

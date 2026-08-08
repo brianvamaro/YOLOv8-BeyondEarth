@@ -143,6 +143,37 @@ def test_detect_obb_angles_passes_max_det(img):
     assert df.attrs["truncation"]["max_det"] == 44
 
 
+def test_detect_obb_angles_drops_tile_edge_boxes(img):
+    """The G2-02 rule, extended to the OBB readout 2026-08-07.
+
+    A box clipped by a tile seam has its tightest rectangle flush with that seam, i.e. exactly
+    cardinal — fed straight into a cardinal-bias test. Measured raster-free on the section-4c null
+    field, seam fragments move a min-area-rectangle reader +0.074 against +0.032 for an ellipse
+    reader, so the rectangle arm is hurt about twice as hard. `detect_orientations` has filtered
+    since 649da7d; this sibling did not, which would have manufactured that asymmetry in any
+    refreshed H-obb-vs-H-seg comparison.
+    """
+    class _EdgeYOLO(FakeYOLO):
+        def __call__(self, image, imgsz=None, conf=None, verbose=None, device=None, max_det=None):
+            self.calls.append({"max_det": max_det})
+            # one interior box, one flush against the left/top edge of the slice
+            corners = np.array([[[4., 4.], [9., 4.], [9., 13.], [4., 13.]],
+                                [[0., 0.], [6., 0.], [6., 9.], [0., 9.]]], np.float32)
+            obb = SimpleNamespace(xyxyxyxy=torch.from_numpy(corners),
+                                  xywhr=torch.from_numpy(
+                                      np.tile(np.array([6.5, 8.5, 5., 9., 0.], np.float32), (2, 1))))
+            return [SimpleNamespace(boxes=None, obb=_Len(obb, 2), masks=None)]
+
+    kept = OV.detect_obb_angles(_EdgeYOLO(0), img, slice_size=SLICE, imgsz=SLICE * 4)
+    assert len(kept) == 4, "one interior box per tile should survive (2x2 tiles)"
+    assert kept.attrs["edge_dropped"] == 4
+
+    unfiltered = OV.detect_obb_angles(_EdgeYOLO(0), img, slice_size=SLICE, imgsz=SLICE * 4,
+                                      drop_edge=False)
+    assert len(unfiltered) == 8, "drop_edge=False must reproduce the 2026-07-09 behaviour"
+    assert unfiltered.attrs["edge_dropped"] == 0
+
+
 def test_detect_sam2_mask_sets_passes_max_det(img):
     """The one the queue names: this is the function behind the equal-area rescan."""
     model, sam = FakeYOLO(n_per_tile=3), FakeSAM()
