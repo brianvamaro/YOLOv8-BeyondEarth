@@ -1320,6 +1320,19 @@ def rock_trace_orientations(img, truth, bg, cap, cap_frac=0.5, win_frac=2.5):
     row-for-row with ``truth`` (empty/degenerate → NaN): what a shadow-discounting reader recovers.
     Its departure from ``truth.angle180`` is the shaping any rock-tracer still incurs, and
     SAM-minus-proxy is the SAM-specific excess.
+
+    ⚠ **This proxy is NOT the shadow-free endpoint it was billed as** (review pass 9, 2026-08-07).
+    "The shadow is excluded by construction" is true of the *threshold* and false of the *result*:
+    the proxy's departure from truth appears **only when a shadow is drawn**. Re-rendered
+    proxy-minus-truth pull (n ≈ 2,930 per incidence, se ≈ 0.08) is **+0.070 ± 0.085 with no shadow** —
+    consistent with zero — against **−0.158 / −0.373 / −0.395 / −0.107°** at incidence 30 / 42 / 58 /
+    68°. So ≈0.23° of its pull is a shadow-induced artifact of the proxy itself, and only ~55–60% is
+    the detection-selection effect it is credited with.
+
+    **Consequence for callers:** ``SAM − proxy`` is *not* a clean illumination-only metric — it
+    **overstates** the SAM-specific excess by ≈0.23°, so published values around 0.5–0.7° correspond
+    to ~0.3–0.5° against truth. The error is conservative, so conclusions bounded by it survive.
+    Where truth is available (it is, on synthetic fields), prefer **SAM − truth**.
     """
     from scipy import ndimage as ndi
 
