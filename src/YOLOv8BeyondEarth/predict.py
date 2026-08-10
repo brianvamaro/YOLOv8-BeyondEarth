@@ -650,6 +650,40 @@ def YOLOv8(detection_model, image, has_mask, shift_amount, slice_size, min_area_
     return _result_to_df(prediction_results[0], detection_model, has_mask, shift_amount, slice_size,
                          min_area_threshold, downscale_pred, contour_method)
 
+
+def prediction_filenames(stem, *, confidence_threshold, slice_size, inference_size,
+                         overlap_height_ratio, sr_factor=1, downscale_pred=False,
+                         mask_tag=None, output_format="shp"):
+    """The output filenames :func:`get_sliced_prediction` writes, for a raster named ``stem``.
+
+    Exposed as a function because **downstream analysis has to locate these catalogs**, and code
+    that hardcodes the pattern silently stops finding them the moment any encoded parameter moves.
+    That is not hypothetical: three call sites in ``data/solutionDE/analyze_hseg_acceptance.py``
+    pinned ``ct-010`` and an untagged mask, so the H-seg x G run — which changes *both*, by
+    retuning ``confidence_threshold`` and passing ``mask_tag="sam2"`` — could not be scored at all
+    (found 2026-08-09). Import this instead of re-deriving the pattern.
+
+    Returns the four layers the function can write: ``bbox``, ``mask``, ``bbox_nms`` and ``nms``.
+    ``nms`` is the post-NMS *mask* layer — the one analysis normally wants. Which subset actually
+    lands on disk depends on ``save_bbox`` / ``save_prenms`` / ``save_nms`` and ``postprocess``.
+    """
+    ext = ".gpkg" if output_format == "gpkg" else ".shp"
+    ss_str = str(slice_size) if sr_factor == 1 else f"{slice_size}sr{sr_factor}"
+    bbox = (str(stem) + "-predictions-ct-" + str(int(confidence_threshold * 100)).zfill(3) + "-ss-"
+            + ss_str + "-is-" + str(inference_size) + "-ov-"
+            + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox" + ext)
+    mask = bbox.replace("-bbox" + ext, "-mask" + ext)
+    if downscale_pred:
+        bbox = bbox.replace("-bbox" + ext, "-downscaled-bbox" + ext)
+        mask = mask.replace("-mask" + ext, "-downscaled-mask" + ext)
+    if mask_tag:  # keep a re-masked layer (e.g. SAM2) from overwriting the plain YOLO one
+        bbox = bbox.replace("-bbox" + ext, f"-bbox-{mask_tag}" + ext)
+        mask = mask.replace("-mask" + ext, f"-mask-{mask_tag}" + ext)
+    return {"bbox": bbox, "mask": mask,
+            "bbox_nms": bbox[: -len(ext)] + "-nms" + ext,
+            "nms": mask[: -len(ext)] + "-nms" + ext}
+
+
 def get_sliced_prediction(in_raster,
                           detection_model=None,
                           confidence_threshold: float = 0.1,
@@ -878,19 +912,15 @@ def get_sliced_prediction(in_raster,
     # configuration BEFORE any inference runs. Checking at write time instead means a full scene
     # burns its whole compute budget and then raises on the last line (G1-07 follow-up).
     ext = ".gpkg" if output_format == "gpkg" else ".shp"
-    ss_str = str(slice_size) if sr_factor == 1 else f"{slice_size}sr{sr_factor}"
-    bbox_filename = in_raster.stem + "-predictions-ct-" + str(int(confidence_threshold * 100)).zfill(3) + "-ss-" + \
-        ss_str + "-is-" + str(inference_size) + "-ov-" + str(int(overlap_height_ratio * 100)).zfill(3) + "-bbox" + ext
-    mask_filename = bbox_filename.replace("-bbox" + ext, "-mask" + ext)
-    if downscale_pred:
-        bbox_filename = bbox_filename.replace("-bbox" + ext, "-downscaled-bbox" + ext)
-        mask_filename = mask_filename.replace("-mask" + ext, "-downscaled-mask" + ext)
-    if mask_tag:  # keep a re-masked layer (e.g. SAM2) from overwriting the plain YOLO one
-        bbox_filename = bbox_filename.replace("-bbox" + ext, f"-bbox-{mask_tag}" + ext)
-        mask_filename = mask_filename.replace("-mask" + ext, f"-mask-{mask_tag}" + ext)
+    _names = prediction_filenames(
+        in_raster.stem, confidence_threshold=confidence_threshold, slice_size=slice_size,
+        inference_size=inference_size, overlap_height_ratio=overlap_height_ratio,
+        sr_factor=sr_factor, downscale_pred=downscale_pred, mask_tag=mask_tag,
+        output_format=output_format)
+    bbox_filename, mask_filename = _names["bbox"], _names["mask"]
     out_bbox_shp = output_dir / bbox_filename
     out_mask_shp = output_dir / mask_filename
-    nms_mask_shp = out_mask_shp.with_name(out_mask_shp.stem + "-nms" + ext)
+    nms_mask_shp = output_dir / _names["nms"]
     presets.check_config_conflict(nms_mask_shp if postprocess else out_mask_shp,
                                   resolved_config, on_conflict)
 
@@ -1073,7 +1103,7 @@ def get_sliced_prediction(in_raster,
         written = []
         if save_nms:
             if save_bbox:
-                nms_bbox = out_bbox_shp.with_name(out_bbox_shp.stem + "-nms" + ext)
+                nms_bbox = output_dir / _names["bbox_nms"]
                 bboxes_to_shp(gdf_nms, nms_bbox)
                 written.append(nms_bbox)
             outlines_to_shp(gdf_nms, nms_mask_shp)
