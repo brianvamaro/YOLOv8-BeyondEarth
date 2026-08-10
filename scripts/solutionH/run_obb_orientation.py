@@ -15,7 +15,7 @@ rotation-aug weight + "_rot" to cache the R-A arm ALONGSIDE the baseline (both k
   conda run -n bouldernet python YOLOv8-BeyondEarth/scripts/solutionH/run_obb_orientation.py \
       YOLOv8-BeyondEarth/data/weights/yolo26m-h-obb-rot.pt _rot
 """
-import sys, numpy as np, rasterio
+import json, sys, numpy as np, rasterio
 sys.path.insert(0, "YOLOv8-BeyondEarth/src")
 from ultralytics import YOLO
 from YOLOv8BeyondEarth.orientation_validation import detect_obb_angles
@@ -39,13 +39,25 @@ def predict_tile(img):
 
 # 1) real crop, full readout (slice 256) ------------------------------------------------------
 img = rasterio.open(CROP).read(1)
-detect_obb_angles(m, img, slice_size=256, imgsz=1024, conf=0.10).to_csv(f"{OUT}/obb_crop_angles{SUF}.csv", index=False)
+crop_df = detect_obb_angles(m, img, slice_size=256, imgsz=1024, conf=0.10)
+crop_df.to_csv(f"{OUT}/obb_crop_angles{SUF}.csv", index=False)
 
 # 2) uniform-truth null: render boulders at KNOWN uniform angles, run H-obb -------------------
 fimg, truth = render_boulder_field(size=2048, n=1600, diam_px=(10, 26), aspect=(1.6, 3.0),
                                    sun_az_deg=255.0, seed=1)
 truth.to_csv(f"{OUT}/obb_null_truth{SUF}.csv", index=False)
-detect_obb_angles(m, fimg, slice_size=256, imgsz=1024, conf=0.10).to_csv(f"{OUT}/obb_null_pred{SUF}.csv", index=False)
+null_df = detect_obb_angles(m, fimg, slice_size=256, imgsz=1024, conf=0.10)
+null_df.to_csv(f"{OUT}/obb_null_pred{SUF}.csv", index=False)
+
+# 2b) provenance: `edge_dropped` lives in df.attrs and does NOT survive to_csv, so record it.
+# Without it a drop_edge run is indistinguishable from a plain one on disk, and the whole point
+# of the seam experiment is how much the filter removed.
+prov = {"weights": WEIGHTS, "suffix": SUF, "drop_edge": True,
+        "crop": {"kept": int(len(crop_df)), "edge_dropped": int(crop_df.attrs.get("edge_dropped", -1))},
+        "null": {"kept": int(len(null_df)), "edge_dropped": int(null_df.attrs.get("edge_dropped", -1))}}
+with open(f"{OUT}/obb_readout_provenance{SUF}.json", "w") as fh:
+    json.dump(prov, fh, indent=2)
+print("provenance:", json.dumps(prov))
 
 # 3) example tiles for overlays --------------------------------------------------------------
 ex = {}
