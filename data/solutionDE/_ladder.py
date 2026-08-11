@@ -21,14 +21,46 @@ DATA = Path(r"c:\Users\brian\Documents\PhD\BoulderNet\YOLOv8-BeyondEarth\data")
 DE = DATA / "solutionDE"
 SAM_WEIGHTS = DATA / "weights" / "sam2.1_b.pt"
 
+#: Every ladder catalog is named `...-is-1024-...`, and so is the analyzer's reader, so the ladder
+#: owns this rather than inheriting it. Asserted against the preset below: if production ever moves
+#: off 1024 that must be a loud failure, not a silently unfindable catalog.
+LADDER_INFERENCE_SIZE = 1024
+
 #: The configuration both ladders have used since 2026-07-10. It is deliberately **not** the
 #: production preset: `min_area_threshold` None vs 6, `postprocess_match_threshold` 0.5 vs 0.2 and
 #: `max_det` 300 vs 600 (G1-01; found again 2026-08-09). It stays the default so every catalog
 #: already on disk remains reproducible and the existing H-seg verdict keeps its baseline — pass
 #: `--preset goal1_production` to run the shipped configuration instead. Whichever is used gets
 #: printed at the top of the run and written into the timings record.
-LEGACY_LADDER = dict(inference_size=1024, overlap_height_ratio=0.2, overlap_width_ratio=0.2,
-                     downscale_pred=True, postprocess=True)
+#: The output-shape keys are spelled out here because the production preset defines its own, and
+#: the two must be comparable key-for-key rather than one of them arriving as a function default.
+LEGACY_LADDER = dict(overlap_height_ratio=0.2, overlap_width_ratio=0.2,
+                     downscale_pred=True, postprocess=True,
+                     save_bbox=False, save_prenms=False, output_format="gpkg")
+
+#: Keys the ladder supplies itself, so they must be stripped from a preset before it is forwarded.
+_LADDER_OWNED = ("slice_size", "sr_factor", "confidence_threshold", "inference_size")
+
+
+def ladder_config(preset):
+    """The `get_sliced_prediction` kwargs for this run, minus the ones the ladder owns.
+
+    Follows `scripts/run_multiscale_arms.py:78-85` rather than `predict_production`. `resolve()`
+    rejects any override key the preset does not define, and **`sr_factor` is not a preset key** —
+    so the SR arm cannot go through `predict_production` at all. (`output_format`, `save_bbox` and
+    `save_prenms` *are* preset keys, which is why they are spelled out in `LEGACY_LADDER` too: the
+    two configurations have to be comparable key-for-key.)
+    """
+    if preset is None:
+        return dict(LEGACY_LADDER)
+    from YOLOv8BeyondEarth import presets
+    base = presets.PRESETS[preset]
+    if base.get("inference_size", LADDER_INFERENCE_SIZE) != LADDER_INFERENCE_SIZE:
+        raise ValueError(
+            f"preset {preset!r} has inference_size={base['inference_size']}, but every ladder "
+            f"catalog is named '-is-{LADDER_INFERENCE_SIZE}-' and the analyzer reads that name. "
+            "Update LADDER_INFERENCE_SIZE and the analyzer's catalog_name together.")
+    return {k: v for k, v in base.items() if k not in _LADDER_OWNED and not k.startswith("_")}
 
 
 def add_ladder_args(p):
@@ -46,7 +78,61 @@ def add_ladder_args(p):
                    help="run the named production preset instead of the legacy ladder config. "
                         "Default (None) reproduces every catalog currently on disk.")
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--trust-existing", action="store_true",
+                   help="skip catalogs that have no manifest even under a non-default --preset. "
+                        "Only pass this if you know the files on disk were made with the "
+                        "configuration you are asking for; otherwise they get relabelled.")
     return p
+
+
+#: Config keys that define the result but are **absent from the filename**, so two runs that differ
+#: only in these collide by name. Exactly the legacy-vs-production deltas, which is the point.
+_SILENT_KEYS = ("min_area_threshold", "postprocess_match_threshold", "max_det",
+                "contour_method", "postprocess_class_agnostic")
+
+
+#: Returned when an existing catalog carries no usable record of how it was made.
+UNVERIFIABLE = "<no manifest>"
+
+
+def _config_mismatch(nms_path, cfg, trust_existing=False):
+    """Compare an existing catalog's manifest against the config this run would use.
+
+    The resume check short-circuits before `get_sliced_prediction` can call
+    `presets.check_config_conflict`, so without this a `--preset goal1_production` run would
+    happily 'skip' a legacy catalog sitting under the same name and report it as its own.
+
+    Returns None when they agree, :data:`UNVERIFIABLE` when nothing is recorded (the caller decides
+    — that is not automatically safe), or a human-readable diff string.
+    """
+    from YOLOv8BeyondEarth import presets
+    if trust_existing:
+        return None
+    mpath = presets.manifest_path(nms_path)
+    if not mpath.exists():
+        return UNVERIFIABLE
+    try:
+        prev = json.loads(mpath.read_text()).get("config", {})
+    except (OSError, ValueError):
+        return UNVERIFIABLE
+    if not prev:
+        return UNVERIFIABLE
+    from YOLOv8BeyondEarth.predict import ULTRALYTICS_DEFAULT_MAX_DET
+    fallback = {"min_area_threshold": None, "postprocess_match_threshold": 0.5,
+                "max_det": ULTRALYTICS_DEFAULT_MAX_DET, "contour_method": "skimage",
+                "postprocess_class_agnostic": False}
+    diffs = []
+    for k in _SILENT_KEYS:
+        if k not in prev:
+            continue
+        want = cfg.get(k, fallback[k])
+        got = prev[k]
+        if isinstance(want, float) or isinstance(got, float):
+            if want is not None and got is not None and abs(float(want) - float(got)) < 1e-9:
+                continue
+        if want != got:
+            diffs.append(f"{k} on disk={got!r} this run={want!r}")
+    return "; ".join(diffs) or None
 
 
 def _remasker(device):
@@ -63,13 +149,14 @@ def run_ladder(*, weights, arms, timings_path, args, key_fn):
     and both spellings are already on disk, so it stays caller-supplied.
     """
     from sahi import AutoDetectionModel
-    from YOLOv8BeyondEarth.predict import (get_sliced_prediction, predict_production,
-                                           prediction_filenames)
+    from YOLOv8BeyondEarth.predict import get_sliced_prediction, prediction_filenames
 
     mask_tag = "sam2" if args.remask else None
     cfg_name = args.preset or "legacy_ladder"
+    cfg = ladder_config(args.preset)
     print(f"[config] weights={Path(weights).name} conf={args.conf} preset={cfg_name} "
           f"remask={bool(args.remask)} mask_tag={mask_tag} dir_tag={args.dir_tag!r}", flush=True)
+    print(f"[config] {json.dumps({k: str(v) for k, v in sorted(cfg.items())})}", flush=True)
     if args.preset is None:
         print("[config] NOTE this is the historical ladder config, NOT the shipped production one "
               "(min_area_threshold None vs 6, nms 0.5 vs 0.2, max_det 300 vs 600). Intentional — "
@@ -89,25 +176,47 @@ def run_ladder(*, weights, arms, timings_path, args, key_fn):
         # The resume check must follow the SAME naming the writer uses, or a re-masked / retuned
         # run either re-does finished work or, worse, is skipped against a catalog that is not it.
         nms = out_dir / prediction_filenames(
-            Path(raster).stem, confidence_threshold=args.conf, slice_size=ss, inference_size=1024,
-            overlap_height_ratio=0.2, sr_factor=sr, downscale_pred=True, mask_tag=mask_tag,
-            output_format="gpkg")["nms"]
+            Path(raster).stem, confidence_threshold=args.conf, slice_size=ss,
+            inference_size=LADDER_INFERENCE_SIZE,
+            overlap_height_ratio=cfg["overlap_height_ratio"], sr_factor=sr,
+            downscale_pred=cfg["downscale_pred"], mask_tag=mask_tag, output_format="gpkg")["nms"]
         if nms.exists():
+            stale = _config_mismatch(nms, cfg, trust_existing=args.trust_existing)
+            if stale == UNVERIFIABLE and args.preset is None:
+                # The legacy default IS what every un-manifested catalog on disk was made with,
+                # so "no manifest" is the expected, correct state for a bare run.
+                stale = None
+            if stale == UNVERIFIABLE:
+                # Every catalog written before the manifest machinery — which is ALL of the
+                # 2026-07-10 ladder output — carries no record of its configuration. So for
+                # precisely the files most at risk there is nothing to compare against, and a
+                # non-default run would otherwise "skip" a legacy catalog and report it as its own.
+                # Refuse instead. In the intended workflow the new config goes to a fresh
+                # --dir-tag, so this never fires.
+                raise SystemExit(
+                    f"[STOP] {key}: {nms.name} exists but has NO manifest, so its configuration "
+                    f"cannot be verified, and this run is not the legacy default "
+                    f"(preset={cfg_name}). Skipping it would silently score a legacy catalog as "
+                    f"{cfg_name}. Use a fresh --dir-tag, or pass --trust-existing if you are "
+                    "certain the file on disk was made with this configuration.")
+            if stale:
+                raise SystemExit(
+                    f"[STOP] {key}: {nms.name} already exists but was produced by a DIFFERENT "
+                    f"configuration: {stale}.\nThe filename does not encode these parameters, so "
+                    "resuming here would score a legacy catalog as if it were this run — which is "
+                    "exactly the mislabelling `presets.check_config_conflict` exists to prevent, "
+                    "and the resume check runs before the writer can enforce it. Use a fresh "
+                    "--dir-tag for the new configuration, or delete the old catalog deliberately.")
             print(f"[skip] {key}", flush=True)
             continue
         print(f"[run ] {key}: {Path(raster).name} ss={ss} sr={sr}", flush=True)
         t0 = time.time()
-        common = dict(output_dir=out_dir, remask_fn=remask_fn, mask_tag=mask_tag,
-                      save_prenms=False, save_bbox=False, output_format="gpkg")
-        if args.preset is None:
-            gdf, gdf_nms = get_sliced_prediction(
-                raster, detection_model=model, confidence_threshold=args.conf,
-                slice_size=ss, sr_factor=sr, **LEGACY_LADDER, **common)
-        else:
-            gdf, gdf_nms = predict_production(
-                raster, model, out_dir, preset=args.preset, confidence_threshold=args.conf,
-                slice_size=ss, sr_factor=sr,
-                **{k: v for k, v in common.items() if k != "output_dir"})
+        # One call for both configurations — they differ only in `cfg`, which is the whole point of
+        # naming the choice instead of having two code paths that can drift.
+        gdf, gdf_nms = get_sliced_prediction(
+            raster, detection_model=model, confidence_threshold=args.conf,
+            slice_size=ss, sr_factor=sr, inference_size=LADDER_INFERENCE_SIZE,
+            output_dir=out_dir, remask_fn=remask_fn, mask_tag=mask_tag, **cfg)
         # X-06: slice-level truncation is invisible in the row count, so record it beside the wall
         # clock. An empty dict is the acceptance condition.
         timings[key] = {"wall_s": round(time.time() - t0, 2), "slice_size": ss, "sr_factor": sr,
