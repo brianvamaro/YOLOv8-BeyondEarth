@@ -29,6 +29,46 @@ they are different definitions of "same operating point", not an inconsistency t
 
     python data/solutionDE/tune_hseg_conf.py --preset goal1_production
     python data/solutionDE/tune_hseg_conf.py --preset goal1_production --score-only   # re-score
+
+RESULT SO FAR (2026-08-09, `--preset goal1_production`, 20 ROM tiles, >= 4 px):
+
+    arm   conf  precision  recall     F1   det/km2
+    prod  0.10     0.4226  0.8842  0.5719    8733.6
+    hseg  0.10     0.5176  0.8838  0.6529    7121.6
+    hseg  0.20     0.6268  0.8143  0.7083    5414.4
+    hseg  0.40     0.7655  0.6675  0.7132    3623.2
+
+**H-seg at nominal 0.10 is already stricter than production at 0.10** — more precise and sparser —
+so both crossings lie BELOW the swept range and the grid has to be extended downward, not upward.
+At equal nominal conf, pooled recall is a dead heat (0.8838 vs 0.8842) while precision differs by
+0.095: the two score distributions are calibrated very differently, which is exactly why step 0
+exists, and the mismatch ran AGAINST H-seg in the original comparison.
+
+Linear extrapolation from the 0.10/0.15 points puts **both** criteria at **conf ~0.017-0.021** —
+they agree, so there is probably no criterion conflict to adjudicate. That is an extrapolation over
+4x the grid step on a convex curve; it needs measuring, and 0.02 is a low enough operating point
+that whether it is a fair match or a pathological one is a judgement call worth making explicitly
+before the H-seg x G run inherits it.
+
+TO FINISH IT (not yet run):
+
+    python data/solutionDE/tune_hseg_conf.py --preset goal1_production --filter-check \
+        --batch-size 2 --grid 0.01 0.02 0.03 0.05 0.07 0.10
+
+⚠ **`--batch-size 2` is required below ~0.05.** This is an 8151 MiB card and `max_det=600` at
+batch 8 already peaks near 7.7 GiB; a conf-0.02 point OOM'd after 3 of 20 tiles. Batch-2 points get
+their own directories, so they cannot silently mix with the batch-8 points above.
+⚠ **The mixed-batch caveat, and it differs by criterion.** G1-02 measured batch 1 vs 8 at *exact
+count parity* with *0.70% differing geometry*. So the **density crossing is unaffected**, while the
+**precision crossing carries a small geometry caveat** because it depends on overlap matching. If
+that matters, re-run the whole curve at `--batch-size 2` (~25 min) for uniformity rather than
+splicing. Also re-run the production reference at the same batch — the command above does.
+
+FILTER-CHECK, measured: `score >= t` on the conf-0.10 run reproduces a real run at t to within
+-0.05% on count and 0.0004 on precision, across t = 0.15..0.40. So on a SINGLE ARM the shortcut this
+script declines to take would in fact have been fine — worth knowing for the full-scene case where
+re-running is expensive. It does **not** license the same shortcut after fusion, where B-3 measured
+87.9%.
 """
 import argparse
 import json
@@ -58,8 +98,16 @@ SIZE_FLOORS = {"all": 0.0, "ge4px": 4.0, "ge8px": 8.0}
 HEADLINE = "ge4px"
 
 
+#: Set from the CLI. Batch size is result-defining (G1-02: exact count parity, 0.70% differing
+#: geometry) and absent from the filename, so a non-default batch gets its own directory rather
+#: than colliding with the batch-8 points — the ladder's manifest guard would otherwise, correctly,
+#: refuse to continue. Low-confidence points need it: max_det=600 at batch 8 OOMs an 8 GiB card.
+BATCH = None
+
+
 def _tag(conf):
-    return f"_tune{int(round(conf * 100)):03d}"
+    b = f"b{BATCH}" if BATCH else ""
+    return f"_tune{int(round(conf * 100)):03d}{b}"
 
 
 def _sub(kind, conf, stem):
@@ -140,6 +188,8 @@ def main():
                         "real run at t — the shortcut this script deliberately does not take")
     args = p.parse_args()
     args.remask, args.dir_tag = False, ""       # the sweep owns these
+    global BATCH
+    BATCH = args.batch_size
 
     with rasterio.open(ROOT / "data" / "mars_hirise" / "raster"
                        / "ESP_017355_2260_RED.tif") as src:

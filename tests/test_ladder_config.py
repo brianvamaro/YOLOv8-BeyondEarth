@@ -64,6 +64,42 @@ def test_production_differs_from_legacy_in_exactly_the_documented_keys(ladder):
     assert prod["max_det"] == 600
 
 
+def test_every_silently_colliding_key_has_a_legacy_fallback(ladder):
+    """`_config_mismatch` looks up `fallback[k]` for each `_SILENT_KEYS` entry the config omits.
+
+    A key added to one list and not the other raises KeyError on the first legacy run that meets a
+    manifest — which is how adding `batch_size` to the guard broke it.
+    """
+    import inspect
+    src = inspect.getsource(ladder._config_mismatch)
+    for k in ladder._SILENT_KEYS:
+        assert f'"{k}"' in src, f"{k} is in _SILENT_KEYS but has no fallback in _config_mismatch"
+
+
+def test_a_legacy_config_meeting_a_production_manifest_is_a_mismatch(ladder, tmp_path):
+    """End-to-end on the pure logic: the guard must name all four deltas, batch_size included."""
+    import json
+    nms = tmp_path / "x-nms.gpkg"
+    nms.write_bytes(b"")
+    (tmp_path / "x-nms-manifest.json").write_text(json.dumps({"config": {
+        "min_area_threshold": 6, "postprocess_match_threshold": 0.2, "max_det": 600,
+        "contour_method": "skimage", "postprocess_class_agnostic": False, "batch_size": 2}}))
+    diff = ladder._config_mismatch(nms, ladder.ladder_config(None))
+    assert diff and diff is not ladder.UNVERIFIABLE
+    for key in ("min_area_threshold", "postprocess_match_threshold", "max_det", "batch_size"):
+        assert key in diff
+    # Same config on both sides must agree, including the overridden batch.
+    same = {**ladder.ladder_config("goal1_production"), "batch_size": 2}
+    assert ladder._config_mismatch(nms, same) is None
+
+
+def test_missing_manifest_is_unverifiable_not_silently_ok(ladder, tmp_path):
+    nms = tmp_path / "y-nms.gpkg"
+    nms.write_bytes(b"")
+    assert ladder._config_mismatch(nms, ladder.ladder_config(None)) == ladder.UNVERIFIABLE
+    assert ladder._config_mismatch(nms, ladder.ladder_config(None), trust_existing=True) is None
+
+
 def test_a_preset_that_moved_off_1024_is_a_loud_failure(ladder, monkeypatch):
     """Catalog names hardcode `-is-1024-`, on both the writing and the reading side."""
     from YOLOv8BeyondEarth import presets

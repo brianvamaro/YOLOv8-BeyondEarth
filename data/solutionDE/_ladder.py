@@ -78,6 +78,12 @@ def add_ladder_args(p):
                    help="run the named production preset instead of the legacy ladder config. "
                         "Default (None) reproduces every catalog currently on disk.")
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="override the config's batch size. Needed at low confidence: this is an "
+                        "8 GiB card and max_det=600 at batch 8 already peaks near 7.7 GiB, so a "
+                        "conf-0.02 sweep point OOMs. Count parity is exact across batch sizes "
+                        "(G1-02) but geometry differs by ~0.70%%, so it is treated as "
+                        "result-defining and a run cannot silently mix batches.")
     p.add_argument("--trust-existing", action="store_true",
                    help="skip catalogs that have no manifest even under a non-default --preset. "
                         "Only pass this if you know the files on disk were made with the "
@@ -87,8 +93,11 @@ def add_ladder_args(p):
 
 #: Config keys that define the result but are **absent from the filename**, so two runs that differ
 #: only in these collide by name. Exactly the legacy-vs-production deltas, which is the point.
+#: `batch_size` is here because G1-02 measured batch 1 vs 8 at **exact count parity but 0.70%
+#: differing geometry** — so it is result-defining for anything that matches polygons, and it is
+#: no more present in the filename than the others.
 _SILENT_KEYS = ("min_area_threshold", "postprocess_match_threshold", "max_det",
-                "contour_method", "postprocess_class_agnostic")
+                "contour_method", "postprocess_class_agnostic", "batch_size")
 
 
 #: Returned when an existing catalog carries no usable record of how it was made.
@@ -118,9 +127,12 @@ def _config_mismatch(nms_path, cfg, trust_existing=False):
     if not prev:
         return UNVERIFIABLE
     from YOLOv8BeyondEarth.predict import ULTRALYTICS_DEFAULT_MAX_DET
+    # What `get_sliced_prediction` uses when the config does not name the key — i.e. what the
+    # legacy ladder actually ran with. Must cover every _SILENT_KEYS entry or the lookup below
+    # raises KeyError on a legacy run; `test_ladder_config.py` asserts the two stay in step.
     fallback = {"min_area_threshold": None, "postprocess_match_threshold": 0.5,
                 "max_det": ULTRALYTICS_DEFAULT_MAX_DET, "contour_method": "skimage",
-                "postprocess_class_agnostic": False}
+                "postprocess_class_agnostic": False, "batch_size": 8}
     diffs = []
     for k in _SILENT_KEYS:
         if k not in prev:
@@ -154,6 +166,8 @@ def run_ladder(*, weights, arms, timings_path, args, key_fn):
     mask_tag = "sam2" if args.remask else None
     cfg_name = args.preset or "legacy_ladder"
     cfg = ladder_config(args.preset)
+    if getattr(args, "batch_size", None):
+        cfg["batch_size"] = int(args.batch_size)
     print(f"[config] weights={Path(weights).name} conf={args.conf} preset={cfg_name} "
           f"remask={bool(args.remask)} mask_tag={mask_tag} dir_tag={args.dir_tag!r}", flush=True)
     print(f"[config] {json.dumps({k: str(v) for k, v in sorted(cfg.items())})}", flush=True)
