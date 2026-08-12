@@ -182,6 +182,15 @@ def main():
                    help="H-seg confidences to sweep (each one a real run)")
     p.add_argument("--prod-conf", type=float, default=0.10,
                    help="production's shipped operating point, the thing being matched")
+    p.add_argument("--prod-grid", type=float, nargs="*", default=None,
+                   help="ALSO sweep production upward and report the reverse match: the production "
+                        "conf that meets H-seg at --match-hseg-conf. Matching is symmetric, and "
+                        "this is the executable direction — driving H-seg DOWN to production's "
+                        "0.10 needs conf ~0.02, where mask memory OOMs an 8 GiB card (measured: "
+                        "2.8x the detections per tile at 0.01, ~1.1 GiB of masks per slice), while "
+                        "production going UP has fewer detections and is cheaper, not dearer.")
+    p.add_argument("--match-hseg-conf", type=float, default=0.10,
+                   help="the H-seg operating point that --prod-grid is matched against")
     p.add_argument("--score-only", action="store_true", help="skip inference, re-score what exists")
     p.add_argument("--filter-check", action="store_true",
                    help="also measure how far `score >= t` on the lowest run diverges from the "
@@ -207,15 +216,18 @@ def main():
     print(f"[pop] {len(tiles)} ROM tiles, {area_km2:.3f} km2, {len(human)} human boulders, "
           f"preset={args.preset or 'legacy_ladder'}", flush=True)
 
+    prod_grid = sorted({args.prod_conf, *(args.prod_grid or [])})
     if not args.score_only:
-        run_one("prod", args.prod_conf, args)
+        for c in prod_grid:
+            run_one("prod", c, args)
         for c in args.grid:
             run_one("hseg", c, args)
 
     rows = []
-    prod, _ = score_one("prod", args.prod_conf, human, polys, area_km2)
-    for band, m in prod.items():
-        rows.append(dict(arm="prod", conf=args.prod_conf, band=band, **m))
+    for c in prod_grid:
+        got, _ = score_one("prod", c, human, polys, area_km2)
+        for band, m in got.items():
+            rows.append(dict(arm="prod", conf=c, band=band, **m))
     for c in args.grid:
         got, _ = score_one("hseg", c, human, polys, area_km2)
         for band, m in got.items():
@@ -231,20 +243,45 @@ def main():
     answer = {"preset": args.preset, "prod_conf": args.prod_conf, "headline_band": HEADLINE}
     for band in SIZE_FLOORS:
         h = df[(df.arm == "hseg") & (df.band == band)]
-        ref = df[(df.arm == "prod") & (df.band == band)].iloc[0]
+        pr = df[(df.arm == "prod") & (df.band == band)]
+        ref = pr[np.isclose(pr.conf, args.prod_conf)].iloc[0]
         eq_p = crossing(h, "precision", ref.precision)
         eq_d = crossing(h, "per_km2", ref.per_km2)
         answer[band] = {"prod_precision": float(ref.precision), "prod_per_km2": float(ref.per_km2),
                         "equal_precision_conf": eq_p, "equal_density_conf": eq_d}
         tag = "  <-- HEADLINE" if band == HEADLINE else ""
-        print(f"\n[{band}] production precision {ref.precision:.4f}, {ref.per_km2:.1f}/km2{tag}")
-        print(f"   (a) equal-precision  H-seg conf = "
+        print(f"\n[{band}] production at {args.prod_conf}: precision {ref.precision:.4f}, "
+              f"{ref.per_km2:.1f}/km2{tag}")
+        print(f"   FORWARD (move H-seg down to production):")
+        print(f"     (a) equal-precision  H-seg conf = "
               f"{'not reached in grid' if eq_p is None else f'{eq_p:.4f}'}")
-        print(f"   (b) equal-density    H-seg conf = "
+        print(f"     (b) equal-density    H-seg conf = "
               f"{'not reached in grid' if eq_d is None else f'{eq_d:.4f}'}")
         if eq_p is not None and eq_d is not None and abs(eq_p - eq_d) > 0.05:
-            print(f"   ⚠ the two criteria differ by {abs(eq_p - eq_d):.3f} — they are different "
+            print(f"     ⚠ the two criteria differ by {abs(eq_p - eq_d):.3f} — different "
                   "definitions of the same operating point. Freeze one deliberately.")
+
+        # Reverse: matching is symmetric, and moving production UP is the direction that runs.
+        if len(pr) > 1:
+            hm = h[np.isclose(h.conf, args.match_hseg_conf)]
+            if len(hm):
+                hr = hm.iloc[0]
+                rp = crossing(pr, "precision", hr.precision)
+                rd = crossing(pr, "per_km2", hr.per_km2)
+                answer[band].update(hseg_ref_conf=args.match_hseg_conf,
+                                    hseg_precision=float(hr.precision),
+                                    hseg_per_km2=float(hr.per_km2),
+                                    reverse_equal_precision_prod_conf=rp,
+                                    reverse_equal_density_prod_conf=rd)
+                print(f"   REVERSE (move production up to H-seg at {args.match_hseg_conf}: "
+                      f"precision {hr.precision:.4f}, {hr.per_km2:.1f}/km2):")
+                print(f"     (a) equal-precision  production conf = "
+                      f"{'not reached in grid' if rp is None else f'{rp:.4f}'}")
+                print(f"     (b) equal-density    production conf = "
+                      f"{'not reached in grid' if rd is None else f'{rd:.4f}'}")
+                if rp is not None and rd is not None and abs(rp - rd) > 0.05:
+                    print(f"     ⚠ the two criteria differ by {abs(rp - rd):.3f} — freeze one "
+                          "deliberately.")
 
     if args.filter_check:
         lo = min(args.grid)
