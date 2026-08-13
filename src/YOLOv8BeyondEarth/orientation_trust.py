@@ -192,6 +192,51 @@ def cardinal_concentration_profile(angles_deg, bands=(0.5, 1.0, 2.0, 5.0, 10.0))
     return pd.DataFrame(rows)
 
 
+def rose_agreement(paired, *, group=None, model_angle="angle_sam", human_angle="h_angle",
+                   select="model", aspect_min=1.35, dpx_min=8.0, min_n=100):
+    """Compare a producer's aggregate rose against the human reference **on the same rocks**.
+
+    Splits an aggregate lean into the part that is *real* and the part the producer *manufactures*:
+
+    * **peak direction** — if the producer and the human agree, the direction is a property of the
+      ground, not of the masker.
+    * **resultant length R** — if the producer's R exceeds the human's, it is exaggerating the
+      strength of a real preference.
+
+    That decomposition is what makes a control-site "null" interpretable. Measured on the labelled
+    scenes: peaks agree to **0.9-7.8° per scene**, while SAM's R runs above the human's everywhere and
+    by **2.1x on Mars** (0.335 vs 0.157, i.e. +0.178) — consistent with the archive's Mars ΔR of
+    +0.134 [+0.05, +0.20]. So a control-site R is an **over-estimate** of the real background, which
+    makes a gate calibrated on it **conservative rather than permissive** — the safe direction.
+
+    ``select`` picks the selection column: ``"model"`` cuts on the producer's own aspect/size (what an
+    operator can do at map time), ``"human"`` on the reference's (the sensitivity check). Selection
+    happens **once**, and both roses are then read on that one set — this is a matched comparison, not
+    the differential-selection error, which conditioned each producer on its own aspect separately.
+    """
+    from .fabric_gate import axial_resultant
+
+    a_col, d_col = ("aspect_sam", "dpx_sam") if select == "model" else ("h_aspect", "h_dpx")
+    d = paired.dropna(subset=[model_angle, human_angle, a_col, d_col])
+    d = d[(d[a_col] > aspect_min) & (d[d_col] >= dpx_min)]
+    keys = [group] if isinstance(group, str) else (list(group) if group else [])
+    groups = d.groupby(keys) if keys else [((), d)]
+    rows = []
+    for key, g in groups:
+        if len(g) < min_n:
+            continue
+        zm, zh = axial_resultant(g[model_angle].to_numpy()), axial_resultant(g[human_angle].to_numpy())
+        pm = float(np.rad2deg(np.angle(zm)) / 2 % 180)
+        ph = float(np.rad2deg(np.angle(zh)) / 2 % 180)
+        rec = dict(zip(keys, key if isinstance(key, tuple) else (key,))) if keys else {}
+        rec.update(n=len(g), R_model=abs(zm), R_human=abs(zh),
+                   R_inflation=(abs(zm) / abs(zh) if abs(zh) > 0 else np.nan),
+                   dR=abs(zm) - abs(zh), peak_model=pm, peak_human=ph,
+                   abs_dpeak=abs((pm - ph + 90) % 180 - 90))
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
 def trust_surface(paired, control, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAULT_DPX_CUTS,
                   min_n=MIN_CELL_N, accuracy_source="", artifact_source="", **kw):
     """All surfaces on one grid. See :class:`TrustSurface`."""

@@ -122,6 +122,40 @@ def test_resultant_surface_reports_R_and_a_direction():
     assert abs(peak.loc[0.0, 1.0] - 70.0) < 6.0
 
 
+def _paired_rose(n, peak, kappa_model, kappa_human, seed=0):
+    """Both producers leaning the same way, the model more strongly than the human."""
+    return pd.DataFrame({
+        "angle_sam": _rose(peak, kappa_model, n, seed),
+        "h_angle": _rose(peak, kappa_human, n, seed + 1),
+        "aspect_sam": 1.5, "dpx_sam": 10.0, "h_aspect": 1.5, "h_dpx": 10.0})
+
+
+def test_rose_agreement_separates_a_shared_direction_from_an_inflated_strength():
+    """The decomposition that made the control-site lean interpretable: same peak, bigger R."""
+    d = _paired_rose(6000, peak=70.0, kappa_model=0.9, kappa_human=0.4, seed=40)
+    r = ot.rose_agreement(d, min_n=100).iloc[0]
+    assert r.abs_dpeak < 6.0, "a shared direction must show as agreeing peaks"
+    assert r.R_model > r.R_human and r.R_inflation > 1.3, "and the model must read stronger"
+    assert abs(r.peak_human - 70.0) < 8.0
+
+
+def test_rose_agreement_reports_no_inflation_when_there_is_none():
+    d = _paired_rose(6000, peak=70.0, kappa_model=0.6, kappa_human=0.6, seed=42)
+    r = ot.rose_agreement(d, min_n=100).iloc[0]
+    assert 0.8 < r.R_inflation < 1.25 and r.abs_dpeak < 6.0
+
+
+def test_rose_agreement_groups_and_honours_the_selection_column():
+    d = pd.concat([_paired_rose(400, 30.0, 0.9, 0.4, 50).assign(body="a"),
+                   _paired_rose(400, 120.0, 0.9, 0.4, 60).assign(body="b")], ignore_index=True)
+    out = ot.rose_agreement(d, group="body", min_n=100)
+    assert set(out.body) == {"a", "b"} and len(out) == 2
+    # Selecting on the human columns must still work and still find both groups.
+    d.loc[d.body == "a", "aspect_sam"] = 1.0          # model would now reject group a
+    assert len(ot.rose_agreement(d, group="body", select="model", min_n=100)) == 1
+    assert len(ot.rose_agreement(d, group="body", select="human", min_n=100)) == 2
+
+
 def test_as_long_covers_every_grid_cell():
     s = ot.trust_surface(_paired(300, 5.0, 1.5, 8.0), _control(3000, 0.25, 1.5, 8.0),
                          aspect_cuts=(1.0, 1.5), dpx_cuts=(0.0, 4.0, 8.0), min_n=50)
