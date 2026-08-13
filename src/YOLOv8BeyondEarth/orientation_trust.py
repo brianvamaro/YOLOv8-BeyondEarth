@@ -1,0 +1,177 @@
+"""At which **aspect ratio × size** do we trust a SAM orientation?
+
+The working answer — ``aspect >= 1.7, dpx >= 8`` — came from a single ladder inside the SAM-signature
+characterization, was never a dedicated study, and the archive flags it PROVISIONAL *"from one coarse
+ladder never crossed with size"*. Meanwhile the code default is ``aspect >= 1.35``. The two disagree,
+and the 1.35–1.7 band is exactly where SAM's ΔR against human tracing is significant (Mars +0.134
+[+0.05, +0.20]) — so the looser default admits the boulders most likely to carry the artifact.
+
+This matters because the cut is not a detail. The Goal-4 fabric bar ``R_control_max`` moves
+**0.330 → 0.642** across aspect 1.0 → 2.0, which is larger than most fabric signals anyone would
+want to claim, and :func:`YOLOv8BeyondEarth.fabric_gate.fabric_gate` *enforces* that a candidate and
+its null share a cut without being able to say which cut is right. Goal-3 phase 5a's re-mask floor
+waits on the same number.
+
+**Three surfaces over the same (aspect, size) grid**, because a threshold is a trade-off and one
+number cannot show it:
+
+* **accuracy** — median ``|Δangle|`` between SAM and a human tracer on matched boulders. Lower is
+  better. This is the axis that says "is the angle right".
+* **artifact** — grid fraction above the isotropic 0.2222 on fabric-free control ground. Lower is
+  better. This is the axis that says "is what's left contaminated", and it is the one that feeds the
+  fabric gate.
+* **yield** — how many boulders survive. Strict cuts buy accuracy with statistical power, and a
+  gate with no power manufactures nothing but shrugs.
+
+**On cutting by the model's own aspect/size.** That is deliberate and is *not* the differential-
+selection error the review retired. That error was comparing two producers each conditioned on its
+**own** aspect column — two different sets of rocks. Here a single producer is characterised against
+truth, and the cut has to be one an operator can actually apply at map time, when no human labels
+exist. The model's own ``aspect_sam``/``dpx_sam`` is the only thing available then, so it is the
+right thing to threshold on. Human-side columns are used for the *comparison*, never for selection.
+"""
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from .orientation import grid_fraction, grid_fraction_uniform
+
+#: Isotropic reference for the grid fraction (±10° of a cardinal), i.e. 4/18.
+ISOTROPIC_GRID = grid_fraction_uniform()
+
+#: Default grid. Aspect spans the disputed 1.35-1.7 band with room either side; size spans the
+#: Prieur 5x5 px mapping floor up to where masks are comfortably resolved.
+DEFAULT_ASPECT_CUTS = (1.0, 1.2, 1.35, 1.5, 1.7, 2.0)
+DEFAULT_DPX_CUTS = (0.0, 4.0, 6.0, 8.0, 12.0, 16.0)
+
+#: Below this many surviving boulders a cell's statistics are noise, and are reported as NaN rather
+#: than as a small number that looks precise.
+MIN_CELL_N = 50
+
+
+def axial_abs_delta(a_deg, b_deg):
+    """Absolute difference between two **axial** angles, in [0, 90].
+
+    Orientations are mod 180, so 179° and 1° differ by 2°, not 178°.
+    """
+    d = np.abs(np.asarray(a_deg, dtype=float) - np.asarray(b_deg, dtype=float)) % 180.0
+    return np.minimum(d, 180.0 - d)
+
+
+@dataclass
+class TrustSurface:
+    """The three surfaces plus the grid they were computed on."""
+    accuracy: pd.DataFrame          # median |Δangle| vs human, degrees
+    accuracy_n: pd.DataFrame
+    artifact: pd.DataFrame          # grid fraction − isotropic, on control ground
+    artifact_n: pd.DataFrame
+    aspect_cuts: tuple
+    dpx_cuts: tuple
+    accuracy_source: str = ""
+    artifact_source: str = ""
+
+    def as_long(self):
+        """Tidy form: one row per (aspect, dpx) cell with every statistic."""
+        rows = []
+        for a in self.aspect_cuts:
+            for s in self.dpx_cuts:
+                rows.append(dict(
+                    aspect_min=a, dpx_min=s,
+                    median_abs_dangle=self.accuracy.loc[s, a],
+                    n_accuracy=self.accuracy_n.loc[s, a],
+                    grid_excess=self.artifact.loc[s, a],
+                    n_artifact=self.artifact_n.loc[s, a]))
+        return pd.DataFrame(rows)
+
+
+def _empty(dpx_cuts, aspect_cuts):
+    return pd.DataFrame(np.nan, index=list(dpx_cuts), columns=list(aspect_cuts))
+
+
+def accuracy_surface(paired, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAULT_DPX_CUTS,
+                     model_angle="angle_sam", human_angle="h_angle",
+                     aspect_col="aspect_sam", dpx_col="dpx_sam", min_n=MIN_CELL_N):
+    """Median ``|Δangle|`` between model and human, over the (aspect, size) grid.
+
+    ``paired`` needs one row per boulder matched between the producer and a human tracer.
+    Selection uses the **model's** aspect/size (see module docstring); the human columns are only
+    ever the comparison.
+    """
+    need = [model_angle, human_angle, aspect_col, dpx_col]
+    d = paired.dropna(subset=need)
+    med = _empty(dpx_cuts, aspect_cuts)
+    cnt = _empty(dpx_cuts, aspect_cuts)
+    dang = axial_abs_delta(d[model_angle].to_numpy(), d[human_angle].to_numpy())
+    asp, dpx = d[aspect_col].to_numpy(), d[dpx_col].to_numpy()
+    for a in aspect_cuts:
+        for s in dpx_cuts:
+            sel = (asp > a) & (dpx >= s)
+            n = int(sel.sum())
+            cnt.loc[s, a] = n
+            med.loc[s, a] = float(np.median(dang[sel])) if n >= min_n else np.nan
+    return med, cnt
+
+
+def artifact_surface(control, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAULT_DPX_CUTS,
+                     angle_col="angle_sam", aspect_col="aspect_sam", dpx_col="dpx_sam",
+                     min_n=MIN_CELL_N):
+    """Grid-fraction **excess over isotropic** on fabric-free control ground.
+
+    This is the axis the fabric gate actually cares about: not whether individual angles are right,
+    but whether the surviving population still carries the cardinal signature that a fabric claim
+    would be confused with.
+    """
+    need = [angle_col, aspect_col, dpx_col]
+    d = control.dropna(subset=need)
+    out = _empty(dpx_cuts, aspect_cuts)
+    cnt = _empty(dpx_cuts, aspect_cuts)
+    ang, asp, dpx = d[angle_col].to_numpy(), d[aspect_col].to_numpy(), d[dpx_col].to_numpy()
+    for a in aspect_cuts:
+        for s in dpx_cuts:
+            sel = (asp > a) & (dpx >= s)
+            n = int(sel.sum())
+            cnt.loc[s, a] = n
+            out.loc[s, a] = (float(grid_fraction(pd.Series(ang[sel]))) - ISOTROPIC_GRID
+                             if n >= min_n else np.nan)
+    return out, cnt
+
+
+def trust_surface(paired, control, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAULT_DPX_CUTS,
+                  min_n=MIN_CELL_N, accuracy_source="", artifact_source="", **kw):
+    """Both surfaces on one grid. See :class:`TrustSurface`."""
+    acc, acc_n = accuracy_surface(paired, aspect_cuts=aspect_cuts, dpx_cuts=dpx_cuts,
+                                  min_n=min_n, **kw)
+    art, art_n = artifact_surface(control, aspect_cuts=aspect_cuts, dpx_cuts=dpx_cuts, min_n=min_n)
+    return TrustSurface(accuracy=acc, accuracy_n=acc_n, artifact=art, artifact_n=art_n,
+                        aspect_cuts=tuple(aspect_cuts), dpx_cuts=tuple(dpx_cuts),
+                        accuracy_source=accuracy_source, artifact_source=artifact_source)
+
+
+def recommend_cut(surface, *, max_abs_dangle, max_grid_excess, min_n=200):
+    """Cheapest admissible cut: the one keeping most boulders while meeting both tolerances.
+
+    "Cheapest" is deliberate. Tightening a cut always improves both statistics and always costs
+    yield, so without a yield objective the answer is trivially "the strictest cell" — which is how
+    a threshold ends up set at its own sampling noise. This returns the **loosest** cut that still
+    satisfies the stated tolerances, and reports what was rejected so the choice is inspectable.
+    """
+    long = surface.as_long()
+    ok = long[(long.median_abs_dangle <= max_abs_dangle)
+              & (long.grid_excess <= max_grid_excess)
+              & (long.n_artifact >= min_n)
+              & long.median_abs_dangle.notna()
+              & long.grid_excess.notna()]
+    if ok.empty:
+        return {"found": False, "reason": "no cell meets both tolerances",
+                "tolerances": {"max_abs_dangle": max_abs_dangle,
+                               "max_grid_excess": max_grid_excess, "min_n": min_n},
+                "best_accuracy": float(long.median_abs_dangle.min(skipna=True)),
+                "best_grid_excess": float(long.grid_excess.min(skipna=True))}
+    best = ok.sort_values(["n_artifact"], ascending=False).iloc[0]
+    return {"found": True, "aspect_min": float(best.aspect_min), "dpx_min": float(best.dpx_min),
+            "median_abs_dangle": float(best.median_abs_dangle),
+            "grid_excess": float(best.grid_excess), "n_artifact": int(best.n_artifact),
+            "n_accuracy": int(best.n_accuracy), "n_admissible_cells": int(len(ok)),
+            "tolerances": {"max_abs_dangle": max_abs_dangle,
+                           "max_grid_excess": max_grid_excess, "min_n": min_n}}
