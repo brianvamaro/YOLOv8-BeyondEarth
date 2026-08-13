@@ -68,6 +68,8 @@ class TrustSurface:
     artifact_n: pd.DataFrame
     aspect_cuts: tuple
     dpx_cuts: tuple
+    R: pd.DataFrame = None          # background resultant length — what the fabric gate consumes
+    peak: pd.DataFrame = None       # its direction, doubled-angle circular mean, degrees
     accuracy_source: str = ""
     artifact_source: str = ""
 
@@ -81,7 +83,9 @@ class TrustSurface:
                     median_abs_dangle=self.accuracy.loc[s, a],
                     n_accuracy=self.accuracy_n.loc[s, a],
                     grid_excess=self.artifact.loc[s, a],
-                    n_artifact=self.artifact_n.loc[s, a]))
+                    n_artifact=self.artifact_n.loc[s, a],
+                    background_R=(np.nan if self.R is None else self.R.loc[s, a]),
+                    background_peak_deg=(np.nan if self.peak is None else self.peak.loc[s, a])))
         return pd.DataFrame(rows)
 
 
@@ -137,13 +141,66 @@ def artifact_surface(control, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAU
     return out, cnt
 
 
+def resultant_surface(control, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAULT_DPX_CUTS,
+                      angle_col="angle_sam", aspect_col="aspect_sam", dpx_col="dpx_sam",
+                      min_n=MIN_CELL_N):
+    """Background **resultant length R** and its peak, over the grid.
+
+    This is the statistic the fabric gate actually consumes — it tests a candidate's resultant
+    against the control background's, projected onto direction — so it is the surface that decides
+    how high the bar sits. Grid fraction is reported alongside it for continuity with the archive,
+    but it is the *worse* statistic for this population: measured on the control sites the excess is
+    a **broad lean centred 13-20° off E-W** (per-site circular-mean peaks 69.2 / 75.1 / 74.4 / 51.4 /
+    77.2°), not a pixel-grid snap — only **5.9%** of the ±10° excess lies within 0.5° of a cardinal,
+    and the observed/uniform ratio is near-constant across the 0.5-10° bands. So grid fraction counts
+    the *shoulder* of something that is not cardinal, and a rising grid fraction under a tightening
+    aspect cut mostly means "the broad lean got stronger", not "the grid artifact got worse".
+    """
+    from .fabric_gate import axial_resultant
+
+    need = [angle_col, aspect_col, dpx_col]
+    d = control.dropna(subset=need)
+    R = _empty(dpx_cuts, aspect_cuts)
+    peak = _empty(dpx_cuts, aspect_cuts)
+    ang, asp, dpx = d[angle_col].to_numpy(), d[aspect_col].to_numpy(), d[dpx_col].to_numpy()
+    for a in aspect_cuts:
+        for s in dpx_cuts:
+            sel = (asp > a) & (dpx >= s)
+            if int(sel.sum()) < min_n:
+                continue
+            z = axial_resultant(ang[sel])
+            R.loc[s, a] = float(abs(z))
+            peak.loc[s, a] = float(np.rad2deg(np.angle(z)) / 2 % 180)
+    return R, peak
+
+
+def cardinal_concentration_profile(angles_deg, bands=(0.5, 1.0, 2.0, 5.0, 10.0)):
+    """Observed-vs-uniform ratio at a ladder of distances from the nearest cardinal.
+
+    Separates a **pixel-grid snap** from a **broad directional lean**: a snap piles the excess into
+    the smallest band, so the ratio falls steeply as the band widens; a broad lean gives a
+    near-constant ratio. Used to show that the control-site excess is the latter.
+    """
+    a = np.asarray(angles_deg, dtype=float)
+    a = a[np.isfinite(a)] % 180.0
+    dc = np.minimum(np.minimum(a, np.abs(a - 90.0)), np.abs(a - 180.0))
+    rows = []
+    for b in bands:
+        obs, exp = float((dc <= b).mean()), b / 90.0
+        rows.append(dict(band_deg=b, observed=obs, uniform=exp,
+                         ratio=obs / exp if exp else np.nan, excess=obs - exp))
+    return pd.DataFrame(rows)
+
+
 def trust_surface(paired, control, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAULT_DPX_CUTS,
                   min_n=MIN_CELL_N, accuracy_source="", artifact_source="", **kw):
-    """Both surfaces on one grid. See :class:`TrustSurface`."""
+    """All surfaces on one grid. See :class:`TrustSurface`."""
     acc, acc_n = accuracy_surface(paired, aspect_cuts=aspect_cuts, dpx_cuts=dpx_cuts,
                                   min_n=min_n, **kw)
     art, art_n = artifact_surface(control, aspect_cuts=aspect_cuts, dpx_cuts=dpx_cuts, min_n=min_n)
+    R, peak = resultant_surface(control, aspect_cuts=aspect_cuts, dpx_cuts=dpx_cuts, min_n=min_n)
     return TrustSurface(accuracy=acc, accuracy_n=acc_n, artifact=art, artifact_n=art_n,
+                        R=R, peak=peak,
                         aspect_cuts=tuple(aspect_cuts), dpx_cuts=tuple(dpx_cuts),
                         accuracy_source=accuracy_source, artifact_source=artifact_source)
 

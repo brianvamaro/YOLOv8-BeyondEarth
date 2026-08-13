@@ -14,6 +14,12 @@ def test_axial_delta_wraps_at_180_not_360():
     assert (ot.axial_abs_delta(np.linspace(0, 360, 50), np.linspace(0, 360, 50)) == 0).all()
 
 
+def _rose(peak_deg, kappa, n, seed=0):
+    """n axial angles concentrated on `peak_deg` (von Mises in doubled-angle space)."""
+    rng = np.random.default_rng(seed)
+    return np.rad2deg(rng.vonmises(np.deg2rad(peak_deg) * 2, kappa, n)) / 2 % 180
+
+
 def _paired(n, err_deg, aspect, dpx, seed=0):
     rng = np.random.default_rng(seed)
     h = rng.uniform(0, 180, n)
@@ -84,6 +90,36 @@ def test_recommend_cut_says_so_when_nothing_qualifies():
     s = ot.trust_surface(paired, control, aspect_cuts=(1.0,), dpx_cuts=(0.0,), min_n=50)
     rec = ot.recommend_cut(s, max_abs_dangle=5.0, max_grid_excess=0.01)
     assert not rec["found"] and "best_accuracy" in rec
+
+
+def test_profile_tells_a_snap_from_a_broad_lean():
+    """The distinction that reinterpreted the control-site excess.
+
+    A snap piles the excess into the smallest band, so the observed/uniform ratio falls steeply as
+    the band widens. A broad lean gives a near-constant ratio.
+    """
+    rng = np.random.default_rng(20)
+    n = 40000
+    # snap: 5% of rows pinned within 0.2 deg of a cardinal, rest uniform
+    snap = np.concatenate([rng.uniform(-0.2, 0.2, n // 20) % 180, rng.uniform(0, 180, n)])
+    # broad lean: von Mises about 90 deg, wide
+    lean = _rose(90.0, 0.6, n, 21)
+
+    ps = ot.cardinal_concentration_profile(snap)
+    pl = ot.cardinal_concentration_profile(lean)
+    # snap: ratio at 0.5 deg is far above the ratio at 10 deg
+    assert ps.ratio.iloc[0] / ps.ratio.iloc[-1] > 4
+    # broad lean: roughly flat
+    assert 0.5 < pl.ratio.iloc[0] / pl.ratio.iloc[-1] < 2.0
+
+
+def test_resultant_surface_reports_R_and_a_direction():
+    """R is what the fabric gate consumes, so the surface has to expose it."""
+    control = pd.concat([_control(3000, 0.25, 1.5, 10.0, 30)], ignore_index=True)
+    control["angle_sam"] = _rose(70.0, 0.8, len(control), 31)
+    R, peak = ot.resultant_surface(control, aspect_cuts=(1.0,), dpx_cuts=(0.0,), min_n=50)
+    assert 0.2 < R.loc[0.0, 1.0] < 0.6
+    assert abs(peak.loc[0.0, 1.0] - 70.0) < 6.0
 
 
 def test_as_long_covers_every_grid_cell():
