@@ -38,6 +38,32 @@ def test_accuracy_improves_as_the_cut_tightens_when_small_boulders_are_worse():
     assert cnt.loc[0.0, 1.0] == 800 and cnt.loc[8.0, 1.0] == 400
 
 
+def test_max_size_ratio_drops_the_catastrophically_mismatched_pairs():
+    """Upstream matching is centroid-only, so a fragment can pair with a big human polygon.
+
+    Rare (0.4% of real pairs) but ~40 deg wrong when it happens, so the guard has to exist even
+    though the median barely moves.
+    """
+    good = _paired(500, 4.0, aspect=1.5, dpx=10.0, seed=60)
+    good["h_dpx"] = 10.0
+    junk = _paired(20, 45.0, aspect=1.5, dpx=10.0, seed=61)      # angle unrelated to the human
+    junk["h_dpx"] = 40.0                                          # 4x size disagreement
+    d = pd.concat([good, junk], ignore_index=True)
+
+    med_all, cnt_all = ot.accuracy_surface(d, aspect_cuts=(1.0,), dpx_cuts=(0.0,), min_n=10)
+    med_flt, cnt_flt = ot.accuracy_surface(d, aspect_cuts=(1.0,), dpx_cuts=(0.0,), min_n=10,
+                                           max_size_ratio=2.0)
+    assert cnt_all.loc[0.0, 1.0] == 520 and cnt_flt.loc[0.0, 1.0] == 500
+    assert med_flt.loc[0.0, 1.0] <= med_all.loc[0.0, 1.0]
+
+
+def test_no_size_filter_by_default_so_the_archive_stays_comparable():
+    d = _paired(300, 5.0, aspect=1.5, dpx=10.0, seed=62)
+    d["h_dpx"] = 100.0                                            # wildly mismatched on purpose
+    _, cnt = ot.accuracy_surface(d, aspect_cuts=(1.0,), dpx_cuts=(0.0,), min_n=10)
+    assert cnt.loc[0.0, 1.0] == 300, "default must not silently filter"
+
+
 def test_thin_cells_are_nan_not_a_precise_looking_small_number():
     d = _paired(5, 3.0, aspect=2.5, dpx=20.0)
     med, cnt = ot.accuracy_surface(d, aspect_cuts=(2.0,), dpx_cuts=(16.0,), min_n=50)

@@ -95,15 +95,36 @@ def _empty(dpx_cuts, aspect_cuts):
 
 def accuracy_surface(paired, *, aspect_cuts=DEFAULT_ASPECT_CUTS, dpx_cuts=DEFAULT_DPX_CUTS,
                      model_angle="angle_sam", human_angle="h_angle",
-                     aspect_col="aspect_sam", dpx_col="dpx_sam", min_n=MIN_CELL_N):
+                     aspect_col="aspect_sam", dpx_col="dpx_sam", min_n=MIN_CELL_N,
+                     max_size_ratio=None, human_dpx_col="h_dpx"):
     """Median ``|Δangle|`` between model and human, over the (aspect, size) grid.
 
     ``paired`` needs one row per boulder matched between the producer and a human tracer.
     Selection uses the **model's** aspect/size (see module docstring); the human columns are only
     ever the comparison.
+
+    ⚠ **What "matched" means upstream, because it is looser than it sounds.**
+    ``data/sam2_validation/run_t35_val.py:107`` pairs a detection to a human polygon by **centroid
+    proximity alone** — greedy nearest within ``max(0.75 * h_dpx, 6.0)`` px, one-to-one, with **no
+    overlap, size or shape test**. So nothing structurally prevents a fragment pairing with a large
+    human polygon.
+
+    Measured, it mostly holds: **99.6%** of pairs agree in diameter within 2x (80.5% within 25%), and
+    the median ratio is **1.119** — SAM reads ~12% larger, rising to **1.21** below 5 px and falling
+    to **1.00** above 20 px. But the 0.4% that fail are **catastrophic per pair**: median |Δangle|
+    **40.8°** against 5.92° overall. Medians absorb that, so filtering moves the surface by only
+    ~0.3° and leaves the aspect trend identical — which is why ``max_size_ratio`` defaults to ``None``
+    (comparable with the archive) rather than being imposed.
+
+    ``max_size_ratio=2.0`` drops pairs whose ``model/human`` diameter ratio falls outside
+    ``[1/2, 2]``. Use it when a *per-boulder* statistic is wanted rather than a median, where a 0.4%
+    tail at 40° does matter.
     """
     need = [model_angle, human_angle, aspect_col, dpx_col]
     d = paired.dropna(subset=need)
+    if max_size_ratio is not None and human_dpx_col in d:
+        r = d[dpx_col] / d[human_dpx_col]
+        d = d[(r >= 1.0 / max_size_ratio) & (r <= max_size_ratio)]
     med = _empty(dpx_cuts, aspect_cuts)
     cnt = _empty(dpx_cuts, aspect_cuts)
     dang = axial_abs_delta(d[model_angle].to_numpy(), d[human_angle].to_numpy())
