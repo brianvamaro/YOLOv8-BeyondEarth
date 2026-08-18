@@ -6,11 +6,15 @@
 # rastertools_BOULDERING and shptools_BOULDERING. So this is a separate env at a separate path --
 # it deliberately does NOT touch the training venv, which is a known-good artifact.
 #
-# WHY EVERY VERSION IS PINNED. This env exists to answer whether the pipeline is stack-neutral
-# (scripts/review/measure_stack_parity.py). That question is only answerable if the libraries are
-# held fixed, so the one remaining difference is the hardware and its cuDNN kernels. Pinning is
-# therefore the experiment, not fussiness: a difference found here is attributable, and a
-# difference found against a freely-resolved env would not be.
+# WHY VERSIONS ARE PINNED. This env exists to answer whether the pipeline is stack-neutral
+# (scripts/review/measure_stack_parity.py), and that is only answerable if the libraries are held
+# fixed, so the remaining difference is the hardware and its cuDNN kernels. Pinning is the experiment,
+# not fussiness.
+#
+# One pin could NOT be matched: torch. This cluster's wheel ceiling is 2.6.0 against the laptop's
+# 2.11.0 -- see the long note at the torch install below for the measurement and for what it costs the
+# experiment. Everything else on this list is the laptop's exact version, so torch is the single known
+# library difference rather than one of many, which is what keeps the result interpretable.
 #
 # The pins are the laptop's installed versions as of 2026-08-17, and every one satisfies the bounds
 # `pyproject.toml` declares (queue item 8 / a4a24da). Note especially opencv: the cap is
@@ -42,25 +46,34 @@ source "$ENV_DIR/bin/activate"
 python -m pip install --upgrade pip wheel
 
 # --- torch first, so ultralytics cannot pull a different version underneath it ---
-# From PLAIN PyPI, not download.pytorch.org. An earlier draft used `--index-url .../whl/cu128` to match
-# the laptop's `2.11.0+cu128` build string exactly, and it failed outright on the dev node:
-#   ERROR: Could not find a version that satisfies the requirement torch==2.11.0 (from versions: none)
-# PyPI itself works there (pip had just downloaded from files.pythonhosted.org), so that index is
-# either unreachable from the compute nodes or does not serve this platform. Either way, PyPI is the
-# path `setup_sherlock_env.sh` already uses for the working training env, whose own comment records
-# why: the default index ships a CUDA wheel that bundles its own CUDA runtime, so no system CUDA
-# module is needed. Copy the artifact with evidence behind it.
 #
-# Consequence to accept, not hide: the resulting build string may read `2.11.0` where the laptop reads
-# `2.11.0+cu128`. The torch *version* still matches, which is what pins the operator semantics, and
-# `presets.code_identity()` stamps whatever it actually is into the parity artifact -- so
-# `--mode compare` lists it under `stack_differences` and any residual is attributed rather than
-# assumed away. Override with TORCH_INDEX if a matching CUDA index turns out to be reachable.
-if [ -n "${TORCH_INDEX:-}" ]; then
-    pip install --only-binary=:all: --index-url "$TORCH_INDEX" "torch==2.11.0" "torchvision==0.26.0"
-else
-    pip install --only-binary=:all: "torch==2.11.0" "torchvision==0.26.0"
-fi
+# THIS CLUSTER CANNOT RUN THE LAPTOP'S TORCH, so exact library parity is off the table. Measured on a
+# dev node, 2026-08-18, `pip install torch==2.11.0` reports:
+#   (from versions: 2.2.0, 2.2.1, 2.2.2, 2.3.0, 2.3.1, 2.4.0, 2.4.1, 2.5.0, 2.5.1, 2.6.0)
+# 2.6.0 is the ceiling. That is the signature of an older glibc: torch moved to `manylinux_2_28`
+# wheels at ~2.7, so anything newer is filtered as incompatible and only a source build would bridge
+# it -- which `--only-binary` correctly forbids. Two earlier drafts failed here, first pointing at
+# download.pytorch.org/whl/cu128 (not reachable from the compute nodes; PyPI is) and then asking PyPI
+# for 2.11.0 (does not exist for this platform).
+#
+# 2.6.0 is also almost certainly what the *training* env resolved to, since
+# `setup_sherlock_env.sh` installs ultralytics unpinned and lets the resolver choose -- and the H
+# retrain ran on it. So this is the proven configuration, not a guess. It satisfies
+# `pyproject.toml`'s `torch>=2.2.0,<3`, so no declared bound is breached.
+#
+# WHAT THIS COSTS THE EXPERIMENT, stated plainly: a laptop-vs-Sherlock difference now has two possible
+# causes, the GPU and a five-minor-version torch gap, so a *failure* would not be attributable on its
+# own. That is why the parity doc registers a 2x2 decomposition to run only if needed: install torch
+# 2.6.0 in a throwaway env on the laptop, and laptop-2.11 vs laptop-2.6 isolates torch while
+# laptop-2.6 vs sherlock-2.6 isolates hardware. Cheap, because it is all on the crop. A *pass* needs no
+# decomposition and is in fact a stronger result, since parity would hold across both variables at once.
+#
+# torchvision 0.21.0 is the release paired with torch 2.6.0; mismatching that pair is the next thing
+# that breaks. TORCH_VERSION / TORCHVISION_VERSION override, and code_identity() records what actually
+# got installed, so `--mode compare` lists it under `stack_differences` either way.
+TORCH_VERSION="${TORCH_VERSION:-2.6.0}"
+TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.21.0}"
+pip install --only-binary=:all: "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
 
 # --- the rest of the stack, at the laptop's exact versions ---
 # --only-binary forbids source builds (old glibc, no system OpenBLAS/GDAL). rasterio and geopandas
@@ -94,6 +107,10 @@ pip install --only-binary=:all: \
 
 # --- Smoke test: every import on the predict path, plus CUDA, plus the identity this env will
 # stamp into the parity artifact. If this passes, the parity run cannot fail on environment. ---
+# glibc is the reason torch is capped at 2.6.0 here, so record it rather than leave it to be
+# rediscovered the next time someone wonders why a newer wheel will not install.
+echo "glibc: $(ldd --version | head -1)"
+
 python - <<'PY'
 import sys, pathlib
 repo = pathlib.Path.home() / "BoulderNet" / "YOLOv8-BeyondEarth"
