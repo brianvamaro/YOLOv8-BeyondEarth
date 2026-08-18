@@ -1,9 +1,16 @@
-# Scripts that run on Linux must keep LF endings in the WORKING COPY, not just in the blob.
+# Keep LF in the WORKING COPY, not just in the blob.
 #
-# core.autocrlf=true on this machine, so without this a checkout rewrites these files to CRLF and a
-# tarball built from the working tree ships them to Sherlock with \r line endings. bash then fails on
-# the first line it reads -- `$'\r': command not found`, or a silently mangled `set -euo pipefail` --
-# which is a confusing failure to debug from a SLURM log. The blobs are already LF; this pins the
-# checkout to match.
+# core.autocrlf=true on this machine, so without these a checkout rewrites files to CRLF. Two things
+# break when that happens:
+#
+#  - Shell scripts shipped to Sherlock become unreadable to bash -- `$'\r': command not found`, or a
+#    silently mangled `set -euo pipefail`, which is a miserable failure to attribute from a SLURM log.
+#  - Byte-level cross-platform comparison of sources stops working. `presets.source_digest` normalises
+#    line endings precisely so a Windows and a Linux checkout of identical code agree, but the ad-hoc
+#    `find | xargs cat | sha256sum` check used to verify a cluster deployment does not, and it
+#    disagreed for exactly this reason on 2026-08-18.
+#
+# The blobs are already LF; this pins the checkout to match.
 *.sh      text eol=lf
 *.sbatch  text eol=lf
+*.py      text eol=lf
