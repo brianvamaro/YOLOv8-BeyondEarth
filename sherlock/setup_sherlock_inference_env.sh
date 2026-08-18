@@ -41,11 +41,26 @@ ENV_DIR="${ENV_DIR:-/home/groups/mlapotre/bamaro/envs/bouldernet-infer}"
 source "$ENV_DIR/bin/activate"
 python -m pip install --upgrade pip wheel
 
-# --- torch first, from the CUDA index, so ultralytics cannot pull a different build ---
-# The laptop runs 2.11.0+cu128. cu128 wheels are forward-compatible with Ampere/Hopper, so the same
-# build runs on a 3090 / A100 / H100. Matching it removes torch as a variable.
-pip install --only-binary=:all: --index-url https://download.pytorch.org/whl/cu128 \
-    "torch==2.11.0" "torchvision==0.26.0"
+# --- torch first, so ultralytics cannot pull a different version underneath it ---
+# From PLAIN PyPI, not download.pytorch.org. An earlier draft used `--index-url .../whl/cu128` to match
+# the laptop's `2.11.0+cu128` build string exactly, and it failed outright on the dev node:
+#   ERROR: Could not find a version that satisfies the requirement torch==2.11.0 (from versions: none)
+# PyPI itself works there (pip had just downloaded from files.pythonhosted.org), so that index is
+# either unreachable from the compute nodes or does not serve this platform. Either way, PyPI is the
+# path `setup_sherlock_env.sh` already uses for the working training env, whose own comment records
+# why: the default index ships a CUDA wheel that bundles its own CUDA runtime, so no system CUDA
+# module is needed. Copy the artifact with evidence behind it.
+#
+# Consequence to accept, not hide: the resulting build string may read `2.11.0` where the laptop reads
+# `2.11.0+cu128`. The torch *version* still matches, which is what pins the operator semantics, and
+# `presets.code_identity()` stamps whatever it actually is into the parity artifact -- so
+# `--mode compare` lists it under `stack_differences` and any residual is attributed rather than
+# assumed away. Override with TORCH_INDEX if a matching CUDA index turns out to be reachable.
+if [ -n "${TORCH_INDEX:-}" ]; then
+    pip install --only-binary=:all: --index-url "$TORCH_INDEX" "torch==2.11.0" "torchvision==0.26.0"
+else
+    pip install --only-binary=:all: "torch==2.11.0" "torchvision==0.26.0"
+fi
 
 # --- the rest of the stack, at the laptop's exact versions ---
 # --only-binary forbids source builds (old glibc, no system OpenBLAS/GDAL). rasterio and geopandas
