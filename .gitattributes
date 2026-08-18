@@ -1,0 +1,9 @@
+# Scripts that run on Linux must keep LF endings in the WORKING COPY, not just in the blob.
+#
+# core.autocrlf=true on this machine, so without this a checkout rewrites these files to CRLF and a
+# tarball built from the working tree ships them to Sherlock with \r line endings. bash then fails on
+# the first line it reads -- `$'\r': command not found`, or a silently mangled `set -euo pipefail` --
+# which is a confusing failure to debug from a SLURM log. The blobs are already LF; this pins the
+# checkout to match.
+*.sh      text eol=lf
+*.sbatch  text eol=lf
