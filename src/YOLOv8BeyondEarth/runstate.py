@@ -180,9 +180,31 @@ class _Stage:
 def stage_key(**parts):
     """A cache key over *everything* that defines a stage's output.
 
-    Always includes the code SHA and dirty flag: the old keys omitted code, model and source, so a
-    changed tracer or a changed checkpoint silently reused the previous answer.
+    Always includes a digest of the package source: the old keys omitted code, model and source, so a
+    changed tracer or a changed checkpoint silently reused the previous answer. It identifies the code
+    by content rather than by git commit -- see the comment in the body for why HEAD was wrong in two
+    directions, and for what the digest does not cover.
     """
     code = presets.code_identity()
-    payload = {"code_sha": code.get("git_sha"), "code_dirty": code.get("git_dirty"), **parts}
+    # The code slot is the **content digest of the package**, not the repo HEAD. HEAD identifies which
+    # commit you are on rather than what code will run, and it failed in both directions:
+    #
+    #  - Over-sensitive. Committing anything -- a doc fix, a test, a cluster script -- moves HEAD and
+    #    rekeys every arm, forcing a re-run with no inference code changed. Measured 2026-08-18: the
+    #    banked NAC arms went stale after six commits, none of which touched the predict path, and a
+    #    HiRISE campaign would have lost ~4.5 h the same way.
+    #  - Under-specific. On a dirty tree HEAD names a commit the files no longer match. `code_dirty`
+    #    said "something differs" without saying what, so a *second, different* uncommitted edit kept
+    #    `(HEAD, True)` unchanged and the stage was skipped -- the silent reuse this key exists to stop.
+    #
+    # A content digest fixes both, and works identically where git is absent or too old (Sherlock's
+    # tree is an extracted tarball, and el7's git 1.8.3 predates `git -C`). `code_dirty` is dropped as
+    # redundant: hashing the bytes subsumes it. The git SHA remains a fallback for an unreadable tree,
+    # and both stay in the manifest for reading.
+    #
+    # Known limit, stated rather than implied: the digest covers `src/YOLOv8BeyondEarth`, so a caller
+    # outside the package -- `scripts/run_multiscale_arms.py` itself -- is not in the key. Most of what
+    # that script contributes is already keyed explicitly (conf, slice_size, imgsz, preset, max_det),
+    # but not all of it.
+    payload = {"code_source": code.get("source_sha256") or code.get("git_sha"), **parts}
     return presets.config_hash(payload, length=16)

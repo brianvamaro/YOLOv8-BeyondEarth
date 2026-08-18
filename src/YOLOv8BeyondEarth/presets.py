@@ -190,11 +190,43 @@ def file_identity(path):
     return out
 
 
+def source_digest(root=None):
+    """sha256 over the package's own ``.py`` sources, so provenance survives a missing git.
+
+    :func:`code_identity` records a git SHA, and there are two situations where that is empty or
+    misleading — both of them live. A deployment that is not a checkout has no SHA at all: the
+    Sherlock tree is an extracted tarball, and even a real checkout there fails because el7 ships git
+    1.8.3, which predates ``git -C`` (measured 2026-08-18: ``git_sha: None`` with exit 129). And a
+    *dirty* tree reports a SHA naming a commit the files no longer match. In both cases the manifest
+    could not answer "what code made me", which is the question it exists to answer.
+
+    Line endings are normalised before hashing. A Windows checkout under ``core.autocrlf`` and a Linux
+    checkout of the same commit hold different bytes and identical code, so a digest that called those
+    two different would be useless for the cross-platform comparison this is for. Each file's path is
+    hashed alongside its contents, so a rename, an addition or a deletion moves the digest.
+
+    Scope is the **package**, not the repo: ``scripts/`` and ``tests/`` are not covered, because this
+    is the identity of the code that produced a result, and results come from the package.
+    """
+    root = Path(root) if root else Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    for p in sorted(root.rglob("*.py"), key=lambda q: q.relative_to(root).as_posix()):
+        h.update(p.relative_to(root).as_posix().encode())
+        h.update(b"\0")
+        h.update(p.read_bytes().replace(b"\r\n", b"\n"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def code_identity():
     """Git SHA and dirty state of the package, plus the interpreter and key package versions."""
     repo = Path(__file__).resolve().parents[2]
     info = {"python": sys.version.split()[0], "platform": platform.platform(),
             "host": socket.gethostname()}
+    try:
+        info["source_sha256"] = source_digest()
+    except Exception as exc:                                    # unreadable tree: record, do not fail
+        info["source_error"] = str(exc)
     try:
         info["git_sha"] = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],

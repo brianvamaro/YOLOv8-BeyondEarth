@@ -298,3 +298,96 @@ def test_the_full_arm_set_is_not_refused(tmp_path, monkeypatch):
         out_dir=str(tmp_path / "out"), conf=0.10, inference_size=1024, device="cpu",
         on_conflict="error", on_max_det="error", max_det=None, no_fuse=False)
     r.orchestrate(args)     # all stages COMPLETE -> returns at the fuse skip, never reaches the guard
+
+
+# --- the code slot is content, not a commit -------------------------------------------------------
+#
+# `stage_key` used to fold in the repo HEAD, which identified which commit you were on rather than
+# what code would run, and it failed in both directions. Measured 2026-08-18: six commits that never
+# touched the predict path invalidated the banked NAC arms; and on a dirty tree a *second, different*
+# uncommitted edit left `(HEAD, True)` unchanged, so the stage was skipped and a stale answer reused.
+
+def test_moving_head_does_not_rekey_when_the_package_is_unchanged(monkeypatch):
+    """A doc or test commit must not invalidate hours of banked arms."""
+    from YOLOv8BeyondEarth import presets as P
+
+    def ident(sha):
+        return {"git_sha": sha, "git_dirty": False, "source_sha256": "same-content-digest"}
+
+    monkeypatch.setattr(P, "code_identity", lambda: ident("commit-one"))
+    before = stage_key(raster="scene.tif", slice_size=256)
+    monkeypatch.setattr(P, "code_identity", lambda: ident("commit-two"))
+    assert stage_key(raster="scene.tif", slice_size=256) == before
+
+
+def test_changed_package_content_does_rekey(monkeypatch):
+    """The protection G3-08 asked for has to survive the change: different code, different key."""
+    from YOLOv8BeyondEarth import presets as P
+    monkeypatch.setattr(P, "code_identity",
+                        lambda: {"git_sha": "same", "source_sha256": "digest-a"})
+    a = stage_key(raster="scene.tif", slice_size=256)
+    monkeypatch.setattr(P, "code_identity",
+                        lambda: {"git_sha": "same", "source_sha256": "digest-b"})
+    assert stage_key(raster="scene.tif", slice_size=256) != a
+
+
+def test_two_different_dirty_edits_are_distinguishable(monkeypatch):
+    """The old hole: identical (HEAD, dirty=True) for two genuinely different working trees."""
+    from YOLOv8BeyondEarth import presets as P
+    keys = set()
+    for digest in ("edit-one", "edit-two"):
+        monkeypatch.setattr(P, "code_identity",
+                            lambda d=digest: {"git_sha": "H", "git_dirty": True,
+                                              "source_sha256": d})
+        keys.add(stage_key(raster="scene.tif"))
+    assert len(keys) == 2
+
+
+def test_a_missing_source_digest_falls_back_to_the_git_sha(monkeypatch):
+    """An unreadable tree must still key on something, not collapse to None for every stage."""
+    from YOLOv8BeyondEarth import presets as P
+    monkeypatch.setattr(P, "code_identity", lambda: {"git_sha": "abc", "source_error": "boom"})
+    a = stage_key(raster="scene.tif")
+    monkeypatch.setattr(P, "code_identity", lambda: {"git_sha": "def", "source_error": "boom"})
+    assert stage_key(raster="scene.tif") != a
+
+
+# --- source_digest itself -------------------------------------------------------------------------
+
+def test_source_digest_is_deterministic_and_content_sensitive(tmp_path):
+    from YOLOv8BeyondEarth.presets import source_digest
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "a.py").write_bytes(b"x = 1\n")
+    (pkg / "sub" / "b.py").write_bytes(b"y = 2\n")
+    first = source_digest(pkg)
+    assert first == source_digest(pkg)                       # deterministic
+    (pkg / "sub" / "b.py").write_bytes(b"y = 3\n")
+    assert source_digest(pkg) != first                       # content change registers
+    assert len(first) == 64
+
+
+def test_source_digest_ignores_line_endings_but_not_renames(tmp_path):
+    """CRLF vs LF is not a code difference; a rename is.
+
+    Without normalisation a Windows checkout under core.autocrlf and a Linux checkout of the same
+    commit would disagree, which would defeat the cross-platform comparison this digest is for.
+    """
+    from YOLOv8BeyondEarth.presets import source_digest
+    lf, crlf = tmp_path / "lf", tmp_path / "crlf"
+    lf.mkdir(); crlf.mkdir()
+    (lf / "a.py").write_bytes(b"x = 1\ny = 2\n")
+    (crlf / "a.py").write_bytes(b"x = 1\r\ny = 2\r\n")
+    assert source_digest(lf) == source_digest(crlf)
+
+    renamed = tmp_path / "renamed"
+    renamed.mkdir()
+    (renamed / "b.py").write_bytes(b"x = 1\ny = 2\n")
+    assert source_digest(renamed) != source_digest(lf)
+
+
+def test_source_digest_of_the_real_package_is_recorded_in_code_identity():
+    from YOLOv8BeyondEarth import presets as P
+    info = P.code_identity()
+    assert len(info.get("source_sha256", "")) == 64
+    assert info["source_sha256"] == P.source_digest()

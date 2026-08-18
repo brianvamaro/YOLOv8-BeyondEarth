@@ -17,6 +17,22 @@ from a mixture of old and new arms.
 
     # one arm, in its own process (what --raster above spawns for you)
     conda run -n bouldernet python scripts/run_multiscale_arms.py --arm 256:1 ...
+
+Three modes, and the third exists because resume is deliberately machine-local:
+
+* default — run any arm that is not already complete, then fuse.
+* ``--no-fuse`` — run the arms and stop, for a ladder that cannot be completed here.
+* ``--fuse-only`` — fuse the layers already on disk, computing nothing. The default mode can only
+  fuse arms *it* produced, since an arm's ledger entry is keyed on this machine's code identity; a
+  layer computed elsewhere never matches and would be silently recomputed here, which on a
+  heterogeneous ladder means either recomputing the 512 arm where it does not fit or relocating the
+  load-bearing arms to the other stack. ``--fuse-only`` validates coherence from each layer's
+  manifest instead and records per-arm provenance in the fused one. It is also the cheap way to
+  compare fusion choices — re-fusing is ~112 s against arms that cost hours.
+
+    # assemble a ladder whose 512 arm was produced on a larger GPU
+    conda run -n bouldernet python scripts/run_multiscale_arms.py --fuse-only \
+        --raster ... --out-dir data/fullscene
 """
 from __future__ import annotations
 
@@ -30,7 +46,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from YOLOv8BeyondEarth import presets                                   # noqa: E402
-from YOLOv8BeyondEarth.runstate import COMPLETE, StageLedger, stage_key  # noqa: E402
+from YOLOv8BeyondEarth.runstate import (COMPLETE, StageLedger, file_digest,  # noqa: E402
+                                        stage_key)
 
 
 def parse_arm(text):
@@ -102,6 +119,164 @@ def run_one_arm(args):
                       "truncation": dict(gdf.attrs.get("truncation", {}))}))
 
 
+def require_production_arm_set(arms):
+    """Refuse an arm set that is not production's, because the output claims to be production.
+
+    The fused path and its manifest both say `goal3_production`, and neither encodes the arm set. A
+    subset fuse would therefore claim the shipped three-arm rule while an arm's contribution is simply
+    absent -- the 512 arm's large-boulder net, which is ~3% of large HiRISE humans and the only reason
+    that arm exists. Refuse rather than relabel; `--no-fuse` banks a partial ladder instead.
+    """
+    want = {normalise_arm(x) for x in presets.GOAL3_PRODUCTION["scales"]}
+    have = {normalise_arm(a) for a in arms}
+    if have != want:
+        raise SystemExit(
+            f"refusing to fuse: production fusion is {sorted(want)}, this run has {sorted(have)}. "
+            f"The fused output is named and manifested as goal3_production, so fusing a subset "
+            f"would misrepresent it. Pass --no-fuse to keep the arm layers, or run the full set.")
+
+
+#: Config keys that must agree across arms or the fused catalog is incoherent. Everything else is
+#: allowed to differ and is *recorded* -- `slice_size`/`sr_factor` differ by definition, `max_det` and
+#: `batch_size` are sized per machine, and `model_path` is a path so it differs across platforms while
+#: the weights digest (checked separately, and authoritative) does not.
+FUSE_MUST_MATCH = ("confidence_threshold", "inference_size", "min_area_threshold", "downscale_pred",
+                   "postprocess", "postprocess_match_threshold", "postprocess_class_agnostic",
+                   "contour_method", "overlap_height_ratio", "overlap_width_ratio", "mask_tag",
+                   "remask_fn", "inference_contract_version")
+
+
+def fuse_only(args):
+    """Fuse arm layers that already exist on disk, computing nothing.
+
+    Why this exists. `orchestrate` can only fuse arms it produced itself: an arm's ledger entry is
+    keyed on the machine's own code identity, so a layer computed elsewhere never matches and the
+    runner recomputes it. On a heterogeneous ladder that is not merely wasteful, it is wrong in a way
+    nothing reports -- fuse on the laptop and it tries to recompute the 512 arm that does not fit
+    there; fuse on the cluster and it recomputes the 256 and SR arms, silently moving the
+    load-bearing arms onto the other stack, which is exactly what the 2026-08-04 "a larger GPU, not a
+    different pipeline" decision was protecting.
+
+    So this path ignores arm ledger entries entirely and validates from the **manifests** each layer
+    already carries. That is a better provenance record than the ledger for this purpose: it states
+    what produced each layer rather than whether this machine produced it. Differences that do not
+    threaten coherence -- per-machine `max_det`, host, torch build, code digest -- are permitted and
+    written into the fused manifest's `provenance` block, so a mixed-stack catalog says so out loud
+    instead of looking single-sourced.
+
+    It is also the cheap way to answer questions that only concern fusion: re-fusing costs ~112 s
+    against arms that cost hours, so the open "SR arm default-on vs opt-in" decision is a couple of
+    runs of this rather than a re-run of the ladder.
+    """
+    import geopandas as gpd
+    from rastertools_BOULDERING import metadata as raster_metadata
+    from YOLOv8BeyondEarth.fusion import fuse_predictions
+    from YOLOv8BeyondEarth.polygon import outlines_to_shp
+
+    require_production_arm_set(args.arms)
+    out_dir = Path(args.out_dir)
+    if not Path(args.raster).exists():
+        raise SystemExit(f"--raster {args.raster} must be present: fusion needs its native "
+                         f"resolution to interpret the DIoU threshold in metres.")
+
+    # 1. every layer and every manifest must be there. A layer with no manifest cannot say what
+    #    produced it, and B2's lesson is that the honest answer then is to refuse, not to assume.
+    layers, manifests = {}, {}
+    for arm in args.arms:
+        layer = arm_layer_path(out_dir, args.raster, *parse_arm(arm), args.conf,
+                               args.inference_size, presets.GOAL1_PRODUCTION["overlap_height_ratio"])
+        mpath = presets.manifest_path(layer)
+        if not layer.exists():
+            raise SystemExit(f"missing arm layer: {layer}\nRun that arm, or copy it in from the "
+                             f"machine that produced it.")
+        if not mpath.exists():
+            raise SystemExit(f"missing manifest for {layer.name}: {mpath.name}\nWithout it this "
+                             f"layer cannot state what produced it, so it will not be fused.")
+        layers[arm] = layer
+        manifests[arm] = json.loads(mpath.read_text())
+
+    # 2. the inputs must be the same raster and the same weights, by digest rather than by path.
+    ref = args.arms[0]
+    for field in ("raster", "weights"):
+        digests = {arm: (m.get("inputs", {}).get(field) or {}).get("sha256")
+                   for arm, m in manifests.items()}
+        if len(set(digests.values())) > 1:
+            raise SystemExit(f"refusing to fuse: arms disagree on {field} sha256 -> {digests}")
+        if digests[ref] is None:
+            raise SystemExit(f"refusing to fuse: no {field} sha256 recorded in the manifests, so "
+                             f"the arms cannot be shown to share an input.")
+
+    # 3. surface every config difference in one pass; fail on the ones that break coherence.
+    keys = sorted({k for m in manifests.values() for k in m.get("config", {})})
+    differing = {k: {arm: manifests[arm].get("config", {}).get(k) for arm in args.arms}
+                 for k in keys
+                 if len({json.dumps(manifests[a].get("config", {}).get(k), sort_keys=True)
+                         for a in args.arms}) > 1}
+    fatal = {k: v for k, v in differing.items() if k in FUSE_MUST_MATCH}
+    if fatal:
+        raise SystemExit("refusing to fuse: arms disagree on configuration that must match:\n"
+                         + "\n".join(f"  {k}: {v}" for k, v in fatal.items()))
+
+    # 4. provenance, per arm, including whichever stack produced it.
+    provenance = {}
+    for arm in args.arms:
+        code = manifests[arm].get("code", {})
+        cfg = manifests[arm].get("config", {})
+        provenance[arm] = {
+            "layer": layers[arm].name,
+            "layer_sha256": file_digest(layers[arm]),
+            "written_utc": manifests[arm].get("written_utc"),
+            "max_det": cfg.get("max_det"),
+            "batch_size": cfg.get("batch_size"),
+            "host": code.get("host"), "platform": code.get("platform"),
+            "torch": code.get("torch"), "python": code.get("python"),
+            "code_source_sha256": code.get("source_sha256"), "git_sha": code.get("git_sha"),
+        }
+    stacks = {(p["host"], p["torch"], p["code_source_sha256"]) for p in provenance.values()}
+    heterogeneous = len(stacks) > 1
+
+    print(f"fusing {len(args.arms)} arms from disk, computing nothing:")
+    for arm in args.arms:
+        p = provenance[arm]
+        print(f"  {arm:8} {p['layer']}  host={p['host']} torch={p['torch']} max_det={p['max_det']}")
+    if differing:
+        print("permitted per-arm differences (recorded in the fused manifest): "
+              f"{', '.join(sorted(differing))}")
+    if heterogeneous:
+        print("NOTE: this is a MIXED-STACK fuse -- arms were produced on different stacks. That is "
+              "recorded in the manifest as provenance.heterogeneous=true. Whether it is acceptable "
+              "is a science question (see the stack-parity check), not one this script can settle.")
+
+    # 5. the ledger keys on the *layer digests*, so re-fusing is skippable and no arm entry is needed.
+    ledger = StageLedger(out_dir / "run_ledger.jsonl")
+    fuse_key = stage_key(arm_layers=sorted(p["layer_sha256"] for p in provenance.values()),
+                         preset="goal3_production", mode="fuse_only")
+    fused_path = out_dir / f"{Path(args.raster).stem}-predictions-fused-production-mask.gpkg"
+    state, detail = ledger.status("fuse", fuse_key)
+    if state == COMPLETE:
+        print(f"[skip] fuse: {detail}")
+        return
+    print(f"[run ] fuse: {state} ({detail})")
+
+    cfg = presets.GOAL3_PRODUCTION
+    with ledger.stage("fuse", fuse_key, artifacts=[fused_path]):
+        per_scale = {parse_arm(a): gpd.read_file(p) for a, p in layers.items()}
+        fused, audit = fuse_predictions(
+            per_scale, rule=cfg["rule"], bands=cfg["bands"], engulf_thr=cfg["engulf_thr"],
+            metric=cfg["metric"], cross_arm_only=cfg["cross_arm_only"],
+            native_res=raster_metadata.get_resolution(args.raster)[0])
+        outlines_to_shp(fused, fused_path)
+        audit.to_csv(fused_path.with_suffix("").as_posix() + "-audit.csv", index=False)
+        presets.write_manifest(
+            fused_path, config={"preset": "goal3_production", **cfg},
+            inputs={"raster": manifests[ref]["inputs"]["raster"],
+                    "weights": manifests[ref]["inputs"]["weights"]},
+            outputs={"n_fused": int(len(fused)), "n_suppressed": int(len(audit))},
+            provenance={"mode": "fuse_only", "heterogeneous": heterogeneous, "arms": provenance,
+                        "permitted_differences": differing})
+    print(f"wrote {fused_path}  ({len(fused)} fused, {len(audit)} suppressed)")
+
+
 def orchestrate(args):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,18 +322,7 @@ def orchestrate(args):
         print(f"[skip] fuse: --no-fuse ({len(arm_keys)} arm layer(s) written, nothing fused)")
         return
 
-    # The fused path and its manifest both say "production", and production fusion is the three-arm
-    # rule in `GOAL3_PRODUCTION["scales"]`. Fusing a subset would write a catalog that claims the
-    # shipped rule while an arm's contribution is simply absent -- the large-boulder net the 512 arm
-    # exists to provide. Refuse rather than relabel; `--no-fuse` is the supported way to bank a
-    # partial ladder (the 512 arm is deferred to a larger GPU, see `effective_max_det`).
-    want = {normalise_arm(x) for x in presets.GOAL3_PRODUCTION["scales"]}
-    have = {normalise_arm(a) for a in args.arms}
-    if have != want:
-        raise SystemExit(
-            f"refusing to fuse: production fusion is {sorted(want)}, this run has {sorted(have)}. "
-            f"The fused output is named and manifested as goal3_production, so fusing a subset "
-            f"would misrepresent it. Pass --no-fuse to keep the arm layers, or run the full set.")
+    require_production_arm_set(args.arms)
 
     arm_deps = {arm: ledger.dependency_value(f"arm:{arm}", key) for arm, key in arm_keys.items()}
     fuse_key = stage_key(arms=sorted(arm_deps.values()), preset="goal3_production")
@@ -199,6 +363,12 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--arms", nargs="+", default=["512", "256", "256:2"])
     ap.add_argument("--arm", default=None, help="internal: run this single arm and exit")
+    ap.add_argument("--fuse-only", action="store_true",
+                    help="fuse the arm layers already on disk and compute nothing. The way to "
+                         "assemble a ladder whose arms were produced on different machines, and the "
+                         "cheap way to compare fusion choices (~112 s vs hours for the arms). "
+                         "Validates coherence from each layer's manifest rather than from this "
+                         "machine's ledger, and records per-arm provenance in the fused manifest.")
     ap.add_argument("--no-fuse", action="store_true",
                     help="run the arms and stop. For a partial ladder: the fused output is named "
                          "and manifested as goal3_production, so fusing an incomplete arm set is "
@@ -217,7 +387,14 @@ def main():
                          "deferred to a larger GPU — raise it there with this flag, which also "
                          "enters the stage key so the two runs cannot satisfy each other's ledger.")
     args = ap.parse_args()
-    run_one_arm(args) if args.arm else orchestrate(args)
+    if args.fuse_only and args.no_fuse:
+        ap.error("--fuse-only and --no-fuse are contradictory")
+    if args.arm:
+        run_one_arm(args)
+    elif args.fuse_only:
+        fuse_only(args)
+    else:
+        orchestrate(args)
 
 
 if __name__ == "__main__":
