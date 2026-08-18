@@ -75,35 +75,84 @@ TORCH_VERSION="${TORCH_VERSION:-2.6.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.21.0}"
 pip install --only-binary=:all: "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
 
-# --- the rest of the stack, at the laptop's exact versions ---
-# --only-binary forbids source builds (old glibc, no system OpenBLAS/GDAL). rasterio and geopandas
-# ship manylinux wheels that bundle their own GDAL/PROJ, so no GDAL module is needed.
-pip install --only-binary=:all: \
-    "ultralytics==8.4.75" \
-    "sahi==0.12.1" \
-    "numpy==2.2.6" \
-    "scipy==1.15.3" \
-    "shapely==2.1.2" \
-    "scikit-image==0.25.2" \
-    "rasterio==1.4.4" \
-    "geopandas==1.1.3" \
-    "pyogrio==0.12.1" \
-    "pandas==2.3.3" \
-    "pillow==12.2.0" \
-    "lsnms==0.4.5"
+# --- the rest of the stack: the laptop's exact version where a wheel exists here, else the bound ---
+#
+# `--only-binary` forbids source builds (old glibc, no system OpenBLAS/GDAL), and that same old glibc
+# means some of the laptop's exact versions simply have no wheel for this platform. Measured: rasterio
+# stops at **1.4.3** against the laptop's 1.4.4, the same way torch stops at 2.6.0.
+#
+# Discovering those one per run wasted several rounds, so this tries the exact pin and falls back to
+# the bound `pyproject.toml` declares -- the project's own statement of what is safe, and every bound
+# was verified to admit the working environment (queue item 8). Each fallback is announced, collected,
+# and summarised at the end, so ONE run tells us everything that had to move. `code_identity()` then
+# stamps the versions actually installed into the parity artifact, and `--mode compare` lists them
+# under `stack_differences`, so nothing here is silent.
+#
+# pyogrio and pillow are deliberately NOT pinned: neither is declared in pyproject, both arrive as
+# dependencies (of geopandas and torchvision), and pinning them only adds failure modes.
+RELAXED=()
 
-# HEADLESS OpenCV at the laptop's exact version. ultralytics depends on `opencv-python`, whose native
-# lib needs libGL.so.1 (absent on Sherlock's headless nodes). Uninstall the GUI build first -- the two
-# conflict if both are installed.
+pin_install() {           # pin_install <exact spec> <declared bound>
+    local exact="$1" bound="$2" pkg got
+    pkg="${exact%%==*}"
+    if pip install --only-binary=:all: "$exact" >/dev/null 2>&1; then
+        echo "  pinned    $exact"
+    elif pip install --only-binary=:all: "$bound"; then
+        got="$(pip show "$pkg" 2>/dev/null | awk '/^Version:/{print $2}')"
+        echo "  RELAXED   $pkg: wanted ${exact#*==}, no wheel here -> installed $got (bound $bound)"
+        RELAXED+=("$pkg: wanted ${exact#*==}, got $got")
+    else
+        echo "  FAILED    $pkg: neither $exact nor $bound is installable" >&2
+        return 1
+    fi
+}
+
+echo "installing the geo/ML stack (exact pin where available, declared bound otherwise):"
+pin_install "ultralytics==8.4.75"   "ultralytics>=8.1.15,<9"
+pin_install "sahi==0.12.1"          "sahi>=0.12.1,<0.13"
+pin_install "numpy==2.2.6"          "numpy>=1.24.4,<3"
+pin_install "scipy==1.15.3"         "scipy>=1.10.0,<2"
+pin_install "shapely==2.1.2"        "Shapely>=2.0.3,<3"
+pin_install "scikit-image==0.25.2"  "scikit-image>=0.22.0,<0.26"
+pin_install "rasterio==1.4.4"       "rasterio>=1.3.9,<2"
+pin_install "geopandas==1.1.3"      "geopandas>=0.14.1,<2"
+pin_install "pandas==2.3.3"         "pandas>=2.2.1,<3"
+pin_install "lsnms==0.4.5"          "lsnms>=0.4.4,<0.5"
+
+# HEADLESS OpenCV. ultralytics depends on `opencv-python`, whose native lib needs libGL.so.1 (absent on
+# headless nodes). Uninstall the GUI build first -- the two conflict if both are installed. The cap
+# matters here more than anywhere: `cv2.resize(..., INTER_AREA)` is on the production mask-downscale
+# path and OpenCV 5 would be selected without it.
 pip uninstall -y opencv-python opencv-contrib-python >/dev/null 2>&1 || true
-pip install --only-binary=:all: "opencv-python-headless==4.13.0.92"
+pin_install "opencv-python-headless==4.13.0.92" "opencv-python-headless>=4.7.0.72,<5"
 
 # --- the two BOULDERING helpers live on test.pypi (CLAUDE.md), so that index is required. The
-# extra-index keeps their ordinary dependencies resolving from real PyPI. ---
-pip install --only-binary=:all: \
-    --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple \
-    "rastertools_BOULDERING==1.0.0" "shptools_BOULDERING==0.0.5"
+# extra-index keeps their ordinary dependencies resolving from real PyPI. Neither is version-pinned in
+# pyproject, so the fallback here is simply "unpinned" rather than a declared bound. ---
+TESTPYPI=(--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple)
+if pip install --only-binary=:all: "${TESTPYPI[@]}" \
+        "rastertools_BOULDERING==1.0.0" "shptools_BOULDERING==0.0.5" >/dev/null 2>&1; then
+    echo "  pinned    rastertools_BOULDERING==1.0.0, shptools_BOULDERING==0.0.5"
+else
+    pip install --only-binary=:all: "${TESTPYPI[@]}" rastertools_BOULDERING shptools_BOULDERING
+    for pkg in rastertools_BOULDERING shptools_BOULDERING; do
+        got="$(pip show "$pkg" 2>/dev/null | awk '/^Version:/{print $2}')"
+        echo "  RELAXED   $pkg: exact pin unavailable -> installed $got"
+        RELAXED+=("$pkg: got $got")
+    done
+fi
+
+# --- say plainly what could not be matched, so it is read now rather than found in the artifact ---
+echo
+if [ ${#RELAXED[@]} -eq 0 ]; then
+    echo "All non-torch pins matched the laptop exactly. torch is the only library difference."
+else
+    echo "RELAXED PINS (${#RELAXED[@]}) -- these differ from the laptop, on top of torch:"
+    printf '  - %s\n' "${RELAXED[@]}"
+    echo "Expected and recorded: code_identity() stamps the real versions into the parity artifact and"
+    echo "--mode compare lists them under stack_differences. More differences weaken ATTRIBUTION of a"
+    echo "failure, not the validity of a pass."
+fi
 
 # --- Smoke test: every import on the predict path, plus CUDA, plus the identity this env will
 # stamp into the parity artifact. If this passes, the parity run cannot fail on environment. ---
