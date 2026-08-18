@@ -41,7 +41,7 @@ explicitly in step 3.)
 
 ## Step 2 — build the env (in a GPU dev session, which has internet + CUDA)
 ```bash
-sh_dev -p gpu -G 1 -t 1:00:00
+sh_dev -p gpu -g 1 -t 1:00:00
 cd ~/BoulderNet
 bash YOLOv8-BeyondEarth/sherlock/setup_sherlock_env.sh   # venv + ultralytics==8.4.75, prints CUDA + both YOLO26 heads
 ```

@@ -20,7 +20,7 @@
 # not in the resize kernel, and the GUI build cannot import on a headless node (libGL.so.1).
 #
 #   Run INSIDE a dev session -- BATCH NODES ARE OFFLINE, so pip must run here, not in the job:
-#     sh_dev -p gpu -G 1 -t 1:00:00
+#     sh_dev -p gpu -g 1 -c 4 -m 16000 -t 2:00:00
 #     bash YOLOv8-BeyondEarth/sherlock/setup_sherlock_inference_env.sh
 set -euo pipefail
 

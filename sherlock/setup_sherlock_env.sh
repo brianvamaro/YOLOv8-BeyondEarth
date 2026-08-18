@@ -3,7 +3,7 @@
 # GPU build: the yolo26m retrain runs on the `gpu` partition. No conda (discouraged on Sherlock);
 # venv on $GROUP_HOME per the hirise2ctx convention. Idempotent.
 #   Run INSIDE a GPU session so torch sees CUDA during the smoke test:
-#     sh_dev -p gpu -G 1 -t 1:00:00
+#     sh_dev -p gpu -g 1 -t 1:00:00
 #     bash YOLOv8-BeyondEarth/sherlock/setup_sherlock_env.sh
 set -euo pipefail
 

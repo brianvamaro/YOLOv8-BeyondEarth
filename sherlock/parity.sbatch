@@ -1,13 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=bnet-parity
 #SBATCH --partition=gpu
-#SBATCH --gpus=1
+#SBATCH --gres=gpu:1
 #SBATCH --constraint=GPU_MEM:24GB
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=1:00:00
-#SBATCH --output=/home/users/%u/BoulderNet/logs/parity-%j.out
-#SBATCH --error=/home/users/%u/BoulderNet/logs/parity-%j.err
+#SBATCH --output=logs/parity-%j.out
+#SBATCH --error=logs/parity-%j.out
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=bamaro@stanford.edu
+#
+# Every directive above is copied from `train_h.sbatch`, which has actually run on this cluster --
+# including `--gres=gpu:1` rather than `--gpus=1`, and the RELATIVE log path. Relative means the log
+# lands in the submit directory, so submit from ~/BoulderNet (as the training flow does:
+# `sbatch YOLOv8-BeyondEarth/sherlock/parity.sbatch`) and `logs/` resolves to ~/BoulderNet/logs.
 #
 # The Sherlock half of the stack-parity check (scripts/review/measure_stack_parity.py).
 #
@@ -28,7 +35,7 @@
 #        data/weights/yolov8-m-boulder-detection-tmp.pt    (55 MB)
 #      Both are gitignored, so the code tarball does NOT contain them.
 #   3. Build the env once, in a dev session, because BATCH NODES ARE OFFLINE:
-#        sh_dev -p gpu -G 1 -t 1:00:00
+#        sh_dev -p gpu -g 1 -c 4 -m 16000 -t 2:00:00
 #        bash YOLOv8-BeyondEarth/sherlock/setup_sherlock_inference_env.sh
 #
 # A 24 GB card is ample for the crop. The eventual real 512-arm scene run needs ~13 GiB at
