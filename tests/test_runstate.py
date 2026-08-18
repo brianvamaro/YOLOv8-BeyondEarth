@@ -5,6 +5,8 @@ between writing the layer and writing its timing JSON leaves an artifact that lo
 record that is missing — which is how AP ended up with 280 done-markers and 223 timing entries.
 """
 import json
+import pathlib
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -222,3 +224,77 @@ def test_full_scene_in_memory_run_is_refused_with_the_alternative_named(tmp_path
 def test_the_default_limit_admits_a_crop_and_refuses_a_scene():
     assert P.MAX_IN_MEMORY_PX > 4_200_000            # the tracked 2048x2048 dev crop
     assert P.MAX_IN_MEMORY_PX < 1_932_385_780        # the HiRISE scene
+
+
+# --- partial ladders must not be fused under a production name --------------------------------------
+#
+# The 512 arm is deferred to a larger GPU (its densest HiRISE slices spill even at batch 1 on the
+# 8 GiB laptop card), so the laptop runs `{256, 256:2}`. The fused output is named
+# `-fused-production-mask.gpkg` and manifested `preset=goal3_production`, neither of which encodes
+# the arm set -- so a subset fuse would claim the shipped three-arm rule while the large-boulder net
+# is absent. That is silent, and it is the failure class this review keeps finding.
+
+def _runner():
+    import importlib.util
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "run_multiscale_arms.py"
+    spec = importlib.util.spec_from_file_location("run_multiscale_arms", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["run_multiscale_arms"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_normalise_arm_puts_strings_ints_and_pairs_in_one_form():
+    r = _runner()
+    assert r.normalise_arm("256") == (256, 1)
+    assert r.normalise_arm("256:2") == (256, 2)
+    assert r.normalise_arm(512) == (512, 1)          # a preset `scales` entry
+    assert r.normalise_arm((256, 2)) == (256, 2)
+    assert r.normalise_arm([256, 2]) == (256, 2)     # json round-trips the tuple to a list
+
+
+def test_the_production_arm_set_is_exactly_what_the_fuse_will_accept():
+    """If GOAL3_PRODUCTION's scales change, this is the test that notices the guard went stale."""
+    r = _runner()
+    from YOLOv8BeyondEarth import presets
+    assert {r.normalise_arm(x) for x in presets.GOAL3_PRODUCTION["scales"]} == {
+        (512, 1), (256, 1), (256, 2)}
+
+
+def test_fusing_a_subset_of_the_production_arms_is_refused(tmp_path, monkeypatch):
+    r = _runner()
+    monkeypatch.setattr(r, "run_one_arm", lambda args: None)
+    # every arm already complete, so the run reaches the fuse decision without touching a GPU
+    monkeypatch.setattr(r.StageLedger, "status", lambda self, *a, **k: (COMPLETE, "skip"))
+    monkeypatch.setattr(r.presets, "file_identity", lambda p: {"sha256": "x"})
+    args = SimpleNamespace(
+        arms=["256", "256:2"], arm=None, raster=str(tmp_path / "s.tif"), weights="w.pt",
+        out_dir=str(tmp_path / "out"), conf=0.10, inference_size=1024, device="cpu",
+        on_conflict="error", on_max_det="error", max_det=None, no_fuse=False)
+    with pytest.raises(SystemExit, match="refusing to fuse"):
+        r.orchestrate(args)
+
+
+def test_no_fuse_returns_before_the_fuse_and_says_so(tmp_path, monkeypatch, capsys):
+    r = _runner()
+    monkeypatch.setattr(r.StageLedger, "status", lambda self, *a, **k: (COMPLETE, "skip"))
+    monkeypatch.setattr(r.presets, "file_identity", lambda p: {"sha256": "x"})
+    args = SimpleNamespace(
+        arms=["256", "256:2"], arm=None, raster=str(tmp_path / "s.tif"), weights="w.pt",
+        out_dir=str(tmp_path / "out"), conf=0.10, inference_size=1024, device="cpu",
+        on_conflict="error", on_max_det="error", max_det=None, no_fuse=True)
+    r.orchestrate(args)                                     # no SystemExit, no fuse
+    assert "--no-fuse" in capsys.readouterr().out
+    assert not list(pathlib.Path(args.out_dir).glob("*fused*"))
+
+
+def test_the_full_arm_set_is_not_refused(tmp_path, monkeypatch):
+    """The guard must not block the real ladder -- it fails past the check, not at it."""
+    r = _runner()
+    monkeypatch.setattr(r.StageLedger, "status", lambda self, *a, **k: (COMPLETE, "skip"))
+    monkeypatch.setattr(r.presets, "file_identity", lambda p: {"sha256": "x"})
+    args = SimpleNamespace(
+        arms=["512", "256", "256:2"], arm=None, raster=str(tmp_path / "s.tif"), weights="w.pt",
+        out_dir=str(tmp_path / "out"), conf=0.10, inference_size=1024, device="cpu",
+        on_conflict="error", on_max_det="error", max_det=None, no_fuse=False)
+    r.orchestrate(args)     # all stages COMPLETE -> returns at the fuse skip, never reaches the guard

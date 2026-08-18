@@ -39,6 +39,20 @@ def parse_arm(text):
     return int(slice_size), int(sr or 1)
 
 
+def normalise_arm(value):
+    """``"256:2"`` / ``(256, 2)`` / ``256`` -> ``(256, 2)``.
+
+    ``--arms`` carries strings and ``GOAL3_PRODUCTION["scales"]`` carries ints and pairs, so the two
+    cannot be compared until both are put in the same form.
+    """
+    if isinstance(value, str):
+        return parse_arm(value)
+    if isinstance(value, (list, tuple)):
+        slice_size, sr_factor = (list(value) + [1])[:2]
+        return int(slice_size), int(sr_factor)
+    return int(value), 1
+
+
 def arm_layer_path(out_dir, raster, slice_size, sr_factor, conf, imgsz, overlap, ext=".gpkg"):
     ss = str(slice_size) if sr_factor == 1 else f"{slice_size}sr{sr_factor}"
     stem = (f"{Path(raster).stem}-predictions-ct-{int(conf * 100):03d}-ss-{ss}"
@@ -129,6 +143,23 @@ def orchestrate(args):
     # Depend on each arm's key *and* the artifact digest its ledger entry recorded, not on the key
     # alone: the key is a hash of the configuration, so an arm re-executed with unchanged config
     # keeps it and the fuse would skip while its input had been regenerated underneath it.
+    if args.no_fuse:
+        print(f"[skip] fuse: --no-fuse ({len(arm_keys)} arm layer(s) written, nothing fused)")
+        return
+
+    # The fused path and its manifest both say "production", and production fusion is the three-arm
+    # rule in `GOAL3_PRODUCTION["scales"]`. Fusing a subset would write a catalog that claims the
+    # shipped rule while an arm's contribution is simply absent -- the large-boulder net the 512 arm
+    # exists to provide. Refuse rather than relabel; `--no-fuse` is the supported way to bank a
+    # partial ladder (the 512 arm is deferred to a larger GPU, see `effective_max_det`).
+    want = {normalise_arm(x) for x in presets.GOAL3_PRODUCTION["scales"]}
+    have = {normalise_arm(a) for a in args.arms}
+    if have != want:
+        raise SystemExit(
+            f"refusing to fuse: production fusion is {sorted(want)}, this run has {sorted(have)}. "
+            f"The fused output is named and manifested as goal3_production, so fusing a subset "
+            f"would misrepresent it. Pass --no-fuse to keep the arm layers, or run the full set.")
+
     arm_deps = {arm: ledger.dependency_value(f"arm:{arm}", key) for arm, key in arm_keys.items()}
     fuse_key = stage_key(arms=sorted(arm_deps.values()), preset="goal3_production")
     fused_path = out_dir / f"{Path(args.raster).stem}-predictions-fused-production-mask.gpkg"
@@ -168,6 +199,10 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--arms", nargs="+", default=["512", "256", "256:2"])
     ap.add_argument("--arm", default=None, help="internal: run this single arm and exit")
+    ap.add_argument("--no-fuse", action="store_true",
+                    help="run the arms and stop. For a partial ladder: the fused output is named "
+                         "and manifested as goal3_production, so fusing an incomplete arm set is "
+                         "refused rather than relabelled.")
     ap.add_argument("--conf", type=float, default=presets.GOAL1_PRODUCTION["confidence_threshold"])
     ap.add_argument("--inference-size", type=int,
                     default=presets.GOAL1_PRODUCTION["inference_size"])
