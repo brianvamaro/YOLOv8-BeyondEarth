@@ -38,9 +38,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+# Fragmentation, not demand, is what kills scene-scale arms. Both OOMs measured 2026-08-18/19 report a
+# large *reserved but unallocated* pool: on the 24 GiB 3090 the 512 arm died asking for 2.40 GiB with
+# 7.23 GiB allocated and **14.15 GiB reserved-unallocated**, i.e. the caching allocator could not find a
+# contiguous block among its fragments. `max_det` in the high hundreds makes per-slice mask tensors
+# vary enormously in size, and a few thousand slices of that shreds the pool. `expandable_segments`
+# lets the allocator grow segments instead of hoarding fixed-size blocks, which is exactly the case
+# torch's own error message recommends it for.
+#
+# It is numerically inert -- a virtual-memory strategy, not a computation change -- so no geometry or
+# orientation gate has to be re-cleared for it. Set before torch is imported anywhere (every torch
+# import in this file is lazy, inside a function, so module scope is early enough), and via setdefault
+# so an explicit environment value still wins.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))

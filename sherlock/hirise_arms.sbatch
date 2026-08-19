@@ -66,7 +66,13 @@ ml "$PYMODULE"
 source "$ENV_DIR/bin/activate"
 cd "$REPO"
 
+# The 512 arm died on the 3090 asking for 2.40 GiB with 14.15 GiB *reserved but unallocated* -- allocator
+# fragmentation, not demand, over ~1,500 slices of highly variable mask size. The runner also sets this
+# via setdefault; exported here too so it is visible in the job record rather than buried in code.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 echo "host $(hostname)  job ${SLURM_JOB_ID:-none}"
+echo "PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
 nvidia-smi --query-gpu=name,memory.total,enforced.power.limit --format=csv || true
 echo "mem requested: ${SLURM_MEM_PER_NODE:-?} MB   cpus: ${SLURM_CPUS_PER_TASK:-?}"
 
