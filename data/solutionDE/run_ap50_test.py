@@ -35,6 +35,7 @@
 #     frozen catalogs the correction moves the headline pair 0.4803/0.4848 -> 0.5659/0.5695: the
 #     direction survives, the margin narrows from +0.0045 to +0.0036. Both are computed now, with the
 #     prediction-only variant kept and labelled so the published numbers stay reproducible.
+import argparse
 import hashlib
 import json
 import sys
@@ -50,8 +51,7 @@ DATA = Path(r"c:\Users\brian\Documents\PhD\BoulderNet\data_prieur\boulder2024\te
 BASE = Path(r"c:\Users\brian\Documents\PhD\BoulderNet\YOLOv8-BeyondEarth\data")
 WEIGHTS = BASE / "weights" / "yolov8-m-boulder-detection-tmp.pt"
 OUT = BASE / "solutionDE" / "ap50"
-TILE_DIR = OUT / "tiles"
-PRED_DIR = OUT / "preds"
+TILE_DIR = OUT / "tiles"     # regenerable input cache, shared across operating points
 PAD = 512          # tile canvas: 500-px tiles zero-padded so slice grids are exact
 RES = 1.0          # dummy m/px: native px == map units everywhere
 LADDER = (512, 256, (256, 2))
@@ -62,6 +62,29 @@ WINNER = dict(rule="bands", bands={256: (0, np.inf)}, engulf_thr=0.7)  # 256pref
 #: semantics — the correct quantity, G3-04) and prediction-only gating (what the published table
 #: measured, kept so those numbers stay reproducible and the delta stays visible).
 SIZE_FLOORS = (4, 5)
+
+
+def _cli():
+    """`--conf` exists so the **test** split can answer the 0.10-vs-0.25 question.
+
+    The operating point was chosen on *validation* tiles, and G5-04 found the splits share source
+    prefixes with training, so the test split is the one check that has not been spent. Two runs of
+    this script at the two confidences are that check.
+
+    Every output is scoped by the confidence, which is not tidiness: the pre-existing
+    `ap50_results.json`, `fused_catalog.gpkg` and `baseline_catalog.gpkg` are the **only** record of
+    the published table (the per-tile cache under `preds/` was deleted 2026-08-21 as stale), so a
+    second run must not be able to overwrite them. A conf-scoped `preds-ct-XXX/` also keeps the
+    identity marker from doing the right thing for the wrong reason -- it would correctly *refuse*
+    a 0.10 marker on a 0.25 run, but only after recomputing every tile into the same directory.
+    """
+    ap = argparse.ArgumentParser(description="Test-split AP50 for the fused ladder vs the 256 baseline.")
+    ap.add_argument("--conf", type=float, default=0.10,
+                    help="confidence threshold actually passed to ultralytics (X-01). Default 0.10, "
+                         "the declared operating point.")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="score only the first N tiles (smoke test; never for a published number)")
+    return ap.parse_args()
 
 
 def run_identity(conf, ladder, winner, weights):
@@ -152,20 +175,27 @@ if __name__ == "__main__":
     from YOLOv8BeyondEarth.predict import get_multiscale_prediction
     from YOLOv8BeyondEarth.ap_eval import catalog_ap, load_yolo_seg_labels, size_gated
 
+    args = _cli()
+    CONF = float(args.conf)
+    CT = int(round(CONF * 100))
+    PRED_DIR = OUT / f"preds-ct-{CT:03d}"
     for d in (TILE_DIR, PRED_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
     model = AutoDetectionModel.from_pretrained(
         model_type="yolov8", model_path=str(WEIGHTS), device="cuda:0",
-        image_size=1024, confidence_threshold=0.1)
+        image_size=1024, confidence_threshold=CONF)
 
     pngs = sorted(DATA.glob("images/*.png"))
-    print(f"{len(pngs)} test tiles", flush=True)
+    if args.limit:
+        pngs = pngs[:args.limit]
+        print(f"SMOKE TEST: {len(pngs)} of 280 tiles -- not a publishable number", flush=True)
+    print(f"{len(pngs)} test tiles at conf {CONF}", flush=True)
 
     scales_str = "-".join(str(s) if isinstance(s, int) else f"{s[0]}sr{s[1]}" for s in LADDER)
     rule_str = f"{WINNER['rule']}-engulf{int(round(WINNER['engulf_thr'] * 100)):02d}"
 
-    identity = run_identity(0.1, LADDER, WINNER, WEIGHTS)
+    identity = run_identity(CONF, LADDER, WINNER, WEIGHTS)
     tile_meta, failures, wall = {}, [], {"total_s": 0.0}
     fused_frames, base_frames = [], []
     t_all = time.time()
@@ -175,7 +205,10 @@ if __name__ == "__main__":
         if not tif.exists():
             materialize_tile(png, tif)
         fused_gpkg = PRED_DIR / f"{stem}-predictions-fused-{rule_str}-{scales_str}-mask.gpkg"
-        base_gpkg = PRED_DIR / (f"{stem}-predictions-ct-010-ss-256-is-1024-ov-020"
+        # derived, not hardcoded: `get_multiscale_prediction` bakes the confidence into the
+        # filename, so a hardcoded `ct-010` would make resume look for the wrong file at any other
+        # operating point -- and `_resume` would then read it as a lost write.
+        base_gpkg = PRED_DIR / (f"{stem}-predictions-ct-{CT:03d}-ss-256-is-1024-ov-020"
                                 "-downscaled-mask-nms.gpkg")
         # An identity-carrying marker, not a touch-file. pyogrio cannot write an empty layer, so
         # "no file" is ambiguous between a genuinely empty result and a write that never happened —
@@ -193,11 +226,22 @@ if __name__ == "__main__":
                 t0 = time.time()
                 fused, audit, per_scale = get_multiscale_prediction(
                     tif, model, scales=LADDER, output_dir=PRED_DIR, output_format="gpkg",
-                    confidence_threshold=0.1, inference_size=1024,
+                    confidence_threshold=CONF, inference_size=1024,
                     overlap_height_ratio=0.2, overlap_width_ratio=0.2,
                     downscale_pred=True, **WINNER)
                 wall[stem] = round(time.time() - t0, 2)
                 base = per_scale[256]
+                # G3-09 stopped `get_multiscale_prediction` writing per-arm layers ("anything that
+                # consumed them must read the fused layer or run the arms explicitly"), and this
+                # script was never updated. The fresh path is fine — it uses the in-memory
+                # `per_scale[256]` — but resume then looks for a baseline layer that nothing ever
+                # wrote and `_resume` correctly reports it as a lost write, so **every** resumed
+                # tile failed. Persist the baseline here, since this script is the consumer that
+                # needs it. `outlines_to_shp` is the same writer the pipeline uses, so the read-back
+                # frame matches what the fresh path scored.
+                if len(base):
+                    from YOLOv8BeyondEarth.polygon import outlines_to_shp
+                    outlines_to_shp(base, base_gpkg)
                 # Written after the layers, so a crash mid-write leaves no verified-looking marker.
                 done_marker.write_text(json.dumps(
                     {"identity": identity, "n_fused": int(len(fused)), "n_base": int(len(base)),
@@ -250,8 +294,8 @@ if __name__ == "__main__":
             f"{failures[0] if failures else None}")
     fused_cat = pd.concat(fused_frames, ignore_index=True)
     base_cat = pd.concat(base_frames, ignore_index=True)
-    gpd.GeoDataFrame(fused_cat).to_file(OUT / "fused_catalog.gpkg")
-    gpd.GeoDataFrame(base_cat).to_file(OUT / "baseline_catalog.gpkg")
+    gpd.GeoDataFrame(fused_cat).to_file(OUT / f"fused_catalog-ct-{CT:03d}.gpkg")
+    gpd.GeoDataFrame(base_cat).to_file(OUT / f"baseline_catalog-ct-{CT:03d}.gpkg")
 
     # truths in the same padded map frame as the predictions
     from rasterio.transform import from_origin
@@ -265,7 +309,7 @@ if __name__ == "__main__":
             if txt.exists() else []
 
     results = {"n_tiles": len(pngs), "n_failures": len(failures), "failures": failures,
-               "wall": wall,
+               "conf": CONF, "identity": identity, "wall": wall,
                "anchors": {"amaro2026_test_ap50": 0.58, "prieur2023_test_ap50": 0.52,
                            "note": "published numbers, different evaluator — context only"}}
     for name, cat in (("baseline_256", base_cat), ("fused_256pref_engulf", fused_cat)):
@@ -289,20 +333,33 @@ if __name__ == "__main__":
 
     # The pre-registered gate, evaluated explicitly rather than left to a reader comparing two
     # printouts — and on the G3-04-correct quantity.
+    #
+    # `catalog_ap` returns a **dict** (ap plus the counts behind it), not a float. This block still
+    # subtracted the two dicts, which raised `TypeError` — so this script has not reached its own
+    # gate since that return type changed, and the last numbers it wrote predate the change. Take
+    # `["ap"]` for the arithmetic and keep the full dicts, since the counts are what say whether a
+    # margin is a real difference or two tiles' worth of noise.
+    def _ap(entry):
+        return entry["ap"] if isinstance(entry, dict) else entry
+
+    base_ap = _ap(results["baseline_256"]["ap50_mask_ge5px"])
+    fused_ap = _ap(results["fused_256pref_engulf"]["ap50_mask_ge5px"])
     results["pre_registered_gate"] = {
         "statement": "fused >= baseline on the labeled size range (>= 5 px)",
         "metric": "ap50_mask_ge5px (size_range applied to truth and predictions)",
+        "baseline_ap": base_ap,
+        "fused_ap": fused_ap,
+        "margin": fused_ap - base_ap,
+        "passes": fused_ap >= base_ap,
         "baseline": results["baseline_256"]["ap50_mask_ge5px"],
         "fused": results["fused_256pref_engulf"]["ap50_mask_ge5px"],
-        "margin": (results["fused_256pref_engulf"]["ap50_mask_ge5px"]
-                   - results["baseline_256"]["ap50_mask_ge5px"]),
-        "passes": (results["fused_256pref_engulf"]["ap50_mask_ge5px"]
-                   >= results["baseline_256"]["ap50_mask_ge5px"]),
         "note": "Development numbers (G3-11): all six candidate rules were built and scored on "
                 "this population. n_failures must be 0 for this gate to mean anything.",
         "n_failures": len(failures),
     }
     print("gate", json.dumps(results["pre_registered_gate"], indent=2), flush=True)
 
-    (OUT / "ap50_results.json").write_text(json.dumps(results, indent=2))
-    print("written", OUT / "ap50_results.json", flush=True)
+    out_json = OUT / f"ap50_results-ct-{CT:03d}.json"
+    assert out_json.name != "ap50_results.json", "must not overwrite the published table"
+    out_json.write_text(json.dumps(results, indent=2))
+    print("written", out_json, flush=True)
