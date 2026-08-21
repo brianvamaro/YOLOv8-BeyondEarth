@@ -1,0 +1,184 @@
+{
+ "question": "does the TEST split confirm conf 0.10 over 0.25?",
+ "verdict": "The AP preference replicates and is not a leakage artifact. It does NOT establish 0.10 as better on a balanced criterion: F1 favours 0.25 by 0.087-0.098 at every size floor and for both catalogs, because 0.10 buys 4.3-6.1 recall points and pays 11.1-14.2 precision points. Both readings are real and they answer different questions; the original decision was explicitly recall-first, so the operating point stands -- but it should be stated as a recall purchase at a known precision cost, not as an unconditional win.",
+ "metric_caveat": "AP integrates over the ranked detection list, so a lower threshold extends the PR curve rightward and can only add area. Both the validation decision and this confirmation share that bias.",
+ "n_tiles": 280,
+ "max_det": 1100,
+ "identity": {
+  "conf_010": {
+   "conf": 0.1,
+   "weights": {
+    "path": "c:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/weights/yolov8-m-boulder-detection-tmp.pt",
+    "bytes": 54934731,
+    "mtime": "2024-03-15T10:02:47+00:00",
+    "sha256": "2e0ca4726772d7b1685c80e9c4c1ab39732d6afbf16c17791a28fdfee5890529"
+   },
+   "preset": "goal1_production+ladder",
+   "preset_version": 2,
+   "inference_contract_version": 3,
+   "arm_config_hash": "3bfa57f4",
+   "pad": 512,
+   "res": 1.0,
+   "code": {
+    "git_sha": "d2f635c058724f6aaa197c50d735f96f34f953c2",
+    "git_dirty": true
+   }
+  },
+  "conf_025": {
+   "conf": 0.25,
+   "weights": {
+    "path": "c:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/weights/yolov8-m-boulder-detection-tmp.pt",
+    "bytes": 54934731,
+    "mtime": "2024-03-15T10:02:47+00:00",
+    "sha256": "2e0ca4726772d7b1685c80e9c4c1ab39732d6afbf16c17791a28fdfee5890529"
+   },
+   "preset": "goal1_production+ladder",
+   "preset_version": 2,
+   "inference_contract_version": 3,
+   "arm_config_hash": "b1dfd0b0",
+   "pad": 512,
+   "res": 1.0,
+   "code": {
+    "git_sha": "d2f635c058724f6aaa197c50d735f96f34f953c2",
+    "git_dirty": true
+   }
+  }
+ },
+ "rows": [
+  {
+   "metric": "ap50_mask",
+   "catalog": "baseline_256",
+   "n_gt_counted": 8990,
+   "n_pred_010": 17687,
+   "n_pred_025": 11442,
+   "ap_010": 0.5263212998588443,
+   "ap_025": 0.5015396929443267,
+   "d_ap": 0.024781606914517695,
+   "recall_010": 0.6826473859844271,
+   "recall_025": 0.6221357063403782,
+   "d_recall": 0.06051167964404891,
+   "precision_010": 0.3469780064454119,
+   "precision_025": 0.4888131445551477,
+   "d_precision": -0.1418351381097358,
+   "f1_010": 0.46009671252389694,
+   "f1_025": 0.5474745497259201,
+   "d_f1": -0.08737783720202319
+  },
+  {
+   "metric": "ap50_mask",
+   "catalog": "fused_256pref_engulf",
+   "n_gt_counted": 8990,
+   "n_pred_010": 25650,
+   "n_pred_025": 16471,
+   "ap_010": 0.5049143380596701,
+   "ap_025": 0.47817973406040115,
+   "d_ap": 0.02673460399926897,
+   "recall_010": 0.6941045606229144,
+   "recall_025": 0.6484983314794216,
+   "d_recall": 0.04560622914349277,
+   "precision_010": 0.2432748538011696,
+   "precision_025": 0.353955436828365,
+   "d_precision": -0.11068058302719541,
+   "f1_010": 0.3602771362586605,
+   "f1_025": 0.45795530419072306,
+   "d_f1": -0.09767816793206258
+  },
+  {
+   "metric": "ap50_mask_ge4px",
+   "catalog": "baseline_256",
+   "n_gt_counted": 8164,
+   "n_pred_010": 17687,
+   "n_pred_025": 11442,
+   "ap_010": 0.5545768056076005,
+   "ap_025": 0.5292823516856869,
+   "d_ap": 0.02529445392191354,
+   "recall_010": 0.7193777560019599,
+   "recall_025": 0.6592356687898089,
+   "d_recall": 0.060142087212150974,
+   "precision_010": 0.3403256649475575,
+   "precision_025": 0.4804928131416838,
+   "d_precision": -0.1401671481941263,
+   "f1_010": 0.46205892765823536,
+   "f1_025": 0.5558481797056545,
+   "d_f1": -0.09378925204741911
+  },
+  {
+   "metric": "ap50_mask_ge4px",
+   "catalog": "fused_256pref_engulf",
+   "n_gt_counted": 8164,
+   "n_pred_010": 25650,
+   "n_pred_025": 16471,
+   "ap_010": 0.5505780219252315,
+   "ap_025": 0.5259936751954319,
+   "d_ap": 0.02458434672979959,
+   "recall_010": 0.7310142087212151,
+   "recall_025": 0.6858157765801078,
+   "d_recall": 0.0451984321411073,
+   "precision_010": 0.2843800628990756,
+   "precision_025": 0.40030027883034247,
+   "d_precision": -0.11592021593126689,
+   "f1_010": 0.4094682675814751,
+   "f1_025": 0.505530224369103,
+   "d_f1": -0.09606195678762791
+  },
+  {
+   "metric": "ap50_mask_ge5px",
+   "catalog": "baseline_256",
+   "n_gt_counted": 6086,
+   "n_pred_010": 17687,
+   "n_pred_025": 11442,
+   "ap_010": 0.6106073552299788,
+   "ap_025": 0.5863930445370741,
+   "d_ap": 0.024214310692904695,
+   "recall_010": 0.7803154781465659,
+   "recall_025": 0.7200131449227736,
+   "d_recall": 0.060302333223792304,
+   "precision_010": 0.3543500970004477,
+   "precision_025": 0.4785410068799825,
+   "d_precision": -0.12419090987953485,
+   "f1_010": 0.48737684729064035,
+   "f1_025": 0.5749524371842812,
+   "d_f1": -0.08757558989364089
+  },
+  {
+   "metric": "ap50_mask_ge5px",
+   "catalog": "fused_256pref_engulf",
+   "n_gt_counted": 6086,
+   "n_pred_010": 25650,
+   "n_pred_025": 16471,
+   "ap_010": 0.6127308778386423,
+   "ap_025": 0.5974340377087879,
+   "d_ap": 0.015296840129854439,
+   "recall_010": 0.793789023989484,
+   "recall_025": 0.7505750903713441,
+   "d_recall": 0.043213933618139966,
+   "precision_010": 0.32294939501303566,
+   "precision_025": 0.43796740172579096,
+   "d_precision": -0.1150180067127553,
+   "f1_010": 0.4591114278926111,
+   "f1_025": 0.5531605715669653,
+   "d_f1": -0.09404914367435419
+  }
+ ],
+ "replication": {
+  "validation_delta": 0.023658402985544003,
+  "validation_lo": 0.02034950456573759,
+  "validation_hi": 0.029649356078964406,
+  "validation_n_images": 200.0,
+  "validation_caveat": "boulder2024 splits share source prefixes (G5-04), so absolute precision/recall are optimistic; the 0.10-vs-0.25 contrast is not",
+  "test_delta_baseline_ap50_mask": 0.024781606914517695,
+  "inside_validation_ci": true
+ },
+ "fused_vs_baseline_gate": {
+  "0.10": {
+   "passes": true,
+   "margin": 0.002123522608663553
+  },
+  "0.25": {
+   "passes": true,
+   "margin": 0.011040993171713809
+  }
+ },
+ "note_on_fusion": "The fused>=baseline gate passes at both points and by a LARGER margin at 0.25 (+0.01104) than at 0.10 (+0.00212): at the looser threshold the baseline's own low-score tail already recovers much of what the extra arms would contribute.",
+ "note_on_x01": "Independent confirmation of X-01's magnitude on a third population: the 256 baseline returns 17,687 detections at 0.10 against 11,442 at 0.25, +54.6%, against the ~+55% pinned on four full-scene arms across two scenes."
+}

@@ -255,3 +255,85 @@ def test_wrapper_256pref_engulf(tmp_path, monkeypatch):
     assert eng.iloc[0].keeper_scale_key == "512"
     out = tmp_path / "scene-predictions-fused-bands-engulf70-512-256-256sr2-mask.gpkg"
     assert out.exists()
+
+
+def _sparse_scale_outputs(non_empty_arms):
+    """Only the named arms return anything — the sparse-tile case."""
+    def fake(slice_size, sr_factor):
+        if (slice_size, sr_factor) not in non_empty_arms:
+            return gpd.GeoDataFrame({"score": [], "category_id": [], "category_name": [],
+                                     "is_within_slice": []}, geometry=[])
+        return gpd.GeoDataFrame({"score": [0.6], "category_id": 0, "category_name": "boulder",
+                                 "is_within_slice": True},
+                                geometry=[shapely.box(0, 0, 6, 6)])
+    return fake
+
+
+def test_single_non_empty_arm_is_not_a_crash(tmp_path, monkeypatch):
+    """A sparse tile where only one arm found anything must not take the run down.
+
+    At a strict confidence an arm can legitimately return zero detections. `pool_predictions` then
+    never sees that arm, and `rule="bands"` refuses because its band key matches nothing — a guard
+    that is right about key-spelling bugs but cannot tell one from an empty tile. Measured on the
+    boulder2024 test split at conf 0.25: 2 of 280 tiles returned detections from the SR arm alone.
+    Fusing one arm against nothing is the identity, so the catalog is that arm.
+    """
+    make = _sparse_scale_outputs({(256, 2)})
+
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        g = make(slice_size, sr_factor)
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+
+    with pytest.warns(RuntimeWarning, match="nothing to fuse"):
+        fused, audit, per_scale = P.get_multiscale_prediction(
+            tmp_path / "sparse.tif", None, output_dir=tmp_path)
+
+    assert len(fused) == 1                      # the SR arm's single detection, kept
+    assert len(audit) == 0                      # nothing was contested, so nothing was suppressed
+    assert fused.scale_key.tolist() == ["(256, 2)"]
+    assert {"scale_key", "slice_size", "sr_factor", "footprint"} <= set(fused.columns)
+    assert len(per_scale[256]) == 0 and len(per_scale[512]) == 0
+
+
+def test_all_arms_empty_gives_an_empty_catalog(tmp_path, monkeypatch):
+    """A tile with no detections at all is an empty catalog, not an exception."""
+    make = _sparse_scale_outputs(set())
+
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        g = make(slice_size, sr_factor)
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+
+    fused, audit, per_scale = P.get_multiscale_prediction(
+        tmp_path / "blank.tif", None, output_dir=tmp_path)
+    assert len(fused) == 0 and len(audit) == 0
+
+
+def test_two_non_empty_arms_still_fuse_normally(tmp_path, monkeypatch):
+    """The contrast: with two arms in play the fusion rule runs, so the skip above is narrow.
+
+    If this ever stops suppressing, the empty-arm shortcut has widened into the fusion path and the
+    `{256}`-preferred rule is no longer being applied.
+    """
+    make = _sparse_scale_outputs({(256, 1), (256, 2)})
+
+    def fake_gsp(in_raster, detection_model, slice_size, sr_factor, output_dir, output_format,
+                 save_prenms, save_bbox, postprocess, **kwargs):
+        g = make(slice_size, sr_factor)
+        return g, g
+
+    monkeypatch.setattr(P, "get_sliced_prediction", fake_gsp)
+    monkeypatch.setattr(P.raster_metadata, "get_resolution", lambda p: (1.0, 1.0))
+
+    fused, audit, per_scale = P.get_multiscale_prediction(
+        tmp_path / "two.tif", None, output_dir=tmp_path)
+    assert len(fused) == 1                       # the same boulder from both arms, deduped
+    assert len(audit) == 1
+    assert fused.scale_key.tolist() == ["256"]   # production's rule hands it to the 256 arm

@@ -1267,7 +1267,8 @@ def get_multiscale_prediction(in_raster,
     Returns ``(fused, audit, per_scale)`` — the fused GeoDataFrame (provenance columns
     included), the audit DataFrame, and the raw ``{scale: gdf_nms}`` dict for validation work.
     """
-    from YOLOv8BeyondEarth.fusion import fuse_predictions, DEFAULT_CLUSTER_THR
+    from YOLOv8BeyondEarth.fusion import (fuse_predictions, pool_predictions, _empty_audit,
+                                          DEFAULT_CLUSTER_THR)
 
     # Explicit arguments win; anything left unset comes from the preset, and from the generic
     # fallback if there is no preset.
@@ -1326,10 +1327,33 @@ def get_multiscale_prediction(in_raster,
 
     thr = DEFAULT_CLUSTER_THR if fuse_cfg["cluster_thr"] is None else fuse_cfg["cluster_thr"]
     native_res = raster_metadata.get_resolution(in_raster)[0]
-    fused, audit = fuse_predictions(per_scale, cluster_thr=thr, metric=fuse_cfg["metric"],
-                                    rule=fuse_cfg["rule"], bands=fuse_cfg["bands"],
-                                    native_res=native_res, engulf_thr=fuse_cfg["engulf_thr"],
-                                    cross_arm_only=fuse_cfg["cross_arm_only"])
+    # Fusing one arm against nothing is the identity, so skip it — and skipping is not an
+    # optimisation, it is the only correct behaviour. On a sparse input at a strict confidence an arm
+    # can legitimately return **zero** detections; `pool_predictions` then never sees that arm, and
+    # `rule="bands"` refuses because its band key matches no arm in the pool. That guard is right (a
+    # band naming an absent arm is normally a key-spelling bug, and its failure mode is a silent
+    # degradation to `scale_aware`) but it cannot tell a spelling bug from an empty tile, so a
+    # legitimately sparse tile crashed the run. Measured 2026-08-21 on the boulder2024 test split at
+    # conf 0.25: 2 of 280 tiles returned detections from the SR arm alone.
+    #
+    # Deliberately narrow: only the fewer-than-two-non-empty case is handled, because that is the
+    # one with no decision in it. If the banded arm is empty while two or more others are not, there
+    # is a real contest and no rule to settle it, so that still raises rather than being guessed.
+    present = {k: g for k, g in per_scale.items() if g is not None}
+    non_empty = {k: g for k, g in present.items() if len(g)}
+    if len(non_empty) < 2:
+        fused = pool_predictions(non_empty if non_empty else present)
+        audit = _empty_audit()
+        if non_empty:
+            warnings.warn(
+                f"only {list(non_empty)} produced detections, so there was nothing to fuse and the "
+                f"fused catalog is that arm alone. Per-arm counts: "
+                f"{ {str(k): len(v) for k, v in present.items()} }", RuntimeWarning)
+    else:
+        fused, audit = fuse_predictions(non_empty, cluster_thr=thr, metric=fuse_cfg["metric"],
+                                        rule=fuse_cfg["rule"], bands=fuse_cfg["bands"],
+                                        native_res=native_res, engulf_thr=fuse_cfg["engulf_thr"],
+                                        cross_arm_only=fuse_cfg["cross_arm_only"])
 
     outlines_to_shp(fused, out_mask)
     audit.to_csv(out_mask.with_suffix("").as_posix() + "-audit.csv", index=False)

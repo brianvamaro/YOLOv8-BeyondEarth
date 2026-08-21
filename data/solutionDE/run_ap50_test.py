@@ -82,12 +82,18 @@ def _cli():
     ap.add_argument("--conf", type=float, default=0.10,
                     help="confidence threshold actually passed to ultralytics (X-01). Default 0.10, "
                          "the declared operating point.")
+    ap.add_argument("--max-det", type=int, default=1100,
+                    help="per-slice detection cap (X-06). The preset's 600 is sized for the 256 arm "
+                         "and is MEASURED truncating this population: on southdeadman_2920 the 512 "
+                         "arm returns 694 in its single slice at conf 0.10, so 600 cut it by 13.5% "
+                         "and the run's own guard raised. 1100 clears it with headroom and matches "
+                         "the value the NAC 512 arm ships at.")
     ap.add_argument("--limit", type=int, default=None,
                     help="score only the first N tiles (smoke test; never for a published number)")
     return ap.parse_args()
 
 
-def run_identity(conf, ladder, winner, weights):
+def run_identity(conf, ladder, winner, weights, max_det=None):
     """Everything that determines a tile's cached prediction, so resume can be *verified*.
 
     Mirrors `scripts/review/measure_operating_point.py`'s B2 sidecar. The point is not to be clever:
@@ -96,7 +102,10 @@ def run_identity(conf, ladder, winner, weights):
     """
     from YOLOv8BeyondEarth import presets
     from YOLOv8BeyondEarth.predict import INFERENCE_CONTRACT_VERSION
-    arm = {**presets.resolve("goal1_production", confidence_threshold=float(conf)),
+    overrides = {"confidence_threshold": float(conf)}
+    if max_det is not None:
+        overrides["max_det"] = int(max_det)
+    arm = {**presets.resolve("goal1_production", **overrides),
            "ladder": [list(s) if isinstance(s, tuple) else s for s in ladder],
            "fusion": {k: (str(v) if k == "bands" else v) for k, v in winner.items()}}
     code = presets.code_identity()
@@ -178,7 +187,10 @@ if __name__ == "__main__":
     args = _cli()
     CONF = float(args.conf)
     CT = int(round(CONF * 100))
-    PRED_DIR = OUT / f"preds-ct-{CT:03d}"
+    MAX_DET = int(args.max_det)
+    # `max_det` is in the identity, so the cache cannot satisfy a run configured for a different cap
+    # (X-06 made it result-defining). It is also in the directory name, so the two never mix on disk.
+    PRED_DIR = OUT / f"preds-ct-{CT:03d}-md-{MAX_DET}"
     for d in (TILE_DIR, PRED_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -190,12 +202,12 @@ if __name__ == "__main__":
     if args.limit:
         pngs = pngs[:args.limit]
         print(f"SMOKE TEST: {len(pngs)} of 280 tiles -- not a publishable number", flush=True)
-    print(f"{len(pngs)} test tiles at conf {CONF}", flush=True)
+    print(f"{len(pngs)} test tiles at conf {CONF}, max_det {MAX_DET}", flush=True)
 
     scales_str = "-".join(str(s) if isinstance(s, int) else f"{s[0]}sr{s[1]}" for s in LADDER)
     rule_str = f"{WINNER['rule']}-engulf{int(round(WINNER['engulf_thr'] * 100)):02d}"
 
-    identity = run_identity(CONF, LADDER, WINNER, WEIGHTS)
+    identity = run_identity(CONF, LADDER, WINNER, WEIGHTS, max_det=MAX_DET)
     tile_meta, failures, wall = {}, [], {"total_s": 0.0}
     fused_frames, base_frames = [], []
     t_all = time.time()
@@ -228,7 +240,7 @@ if __name__ == "__main__":
                     tif, model, scales=LADDER, output_dir=PRED_DIR, output_format="gpkg",
                     confidence_threshold=CONF, inference_size=1024,
                     overlap_height_ratio=0.2, overlap_width_ratio=0.2,
-                    downscale_pred=True, **WINNER)
+                    downscale_pred=True, max_det=MAX_DET, **WINNER)
                 wall[stem] = round(time.time() - t0, 2)
                 base = per_scale[256]
                 # G3-09 stopped `get_multiscale_prediction` writing per-arm layers ("anything that
@@ -294,8 +306,8 @@ if __name__ == "__main__":
             f"{failures[0] if failures else None}")
     fused_cat = pd.concat(fused_frames, ignore_index=True)
     base_cat = pd.concat(base_frames, ignore_index=True)
-    gpd.GeoDataFrame(fused_cat).to_file(OUT / f"fused_catalog-ct-{CT:03d}.gpkg")
-    gpd.GeoDataFrame(base_cat).to_file(OUT / f"baseline_catalog-ct-{CT:03d}.gpkg")
+    gpd.GeoDataFrame(fused_cat).to_file(OUT / f"fused_catalog-ct-{CT:03d}-md-{MAX_DET}.gpkg")
+    gpd.GeoDataFrame(base_cat).to_file(OUT / f"baseline_catalog-ct-{CT:03d}-md-{MAX_DET}.gpkg")
 
     # truths in the same padded map frame as the predictions
     from rasterio.transform import from_origin
@@ -309,7 +321,7 @@ if __name__ == "__main__":
             if txt.exists() else []
 
     results = {"n_tiles": len(pngs), "n_failures": len(failures), "failures": failures,
-               "conf": CONF, "identity": identity, "wall": wall,
+               "conf": CONF, "max_det": MAX_DET, "identity": identity, "wall": wall,
                "anchors": {"amaro2026_test_ap50": 0.58, "prieur2023_test_ap50": 0.52,
                            "note": "published numbers, different evaluator — context only"}}
     for name, cat in (("baseline_256", base_cat), ("fused_256pref_engulf", fused_cat)):
@@ -359,7 +371,7 @@ if __name__ == "__main__":
     }
     print("gate", json.dumps(results["pre_registered_gate"], indent=2), flush=True)
 
-    out_json = OUT / f"ap50_results-ct-{CT:03d}.json"
+    out_json = OUT / f"ap50_results-ct-{CT:03d}-md-{MAX_DET}.json"
     assert out_json.name != "ap50_results.json", "must not overwrite the published table"
     out_json.write_text(json.dumps(results, indent=2))
     print("written", out_json, flush=True)
