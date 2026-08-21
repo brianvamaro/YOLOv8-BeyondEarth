@@ -1,0 +1,147 @@
+{
+ "since": "2026-08-04",
+ "n_drivers_considered": 95,
+ "n_tracked_but_never_modified": 78,
+ "tolerance_hours": 24.0,
+ "counts": {
+  "STALE": 3,
+  "NO OUTPUTS FOUND": 1,
+  "same-day": 6,
+  "ok": 2
+ },
+ "rows": [
+  {
+   "driver": "data/solutionDE/run_goal3_ladder.py",
+   "last_fix": "2026-08-10",
+   "last_fix_subject": "One ladder runner, so the H-seg x G matched control is matched by construction",
+   "newest_output": "2026-07-10",
+   "output": "data/solutionDE/goal3_timings.json",
+   "n_declared": 4,
+   "n_prefixes": 0,
+   "matched_by": "exact",
+   "verdict": "STALE"
+  },
+  {
+   "driver": "data/solutionDE/run_hseg_ladder.py",
+   "last_fix": "2026-08-10",
+   "last_fix_subject": "One ladder runner, so the H-seg x G matched control is matched by construction",
+   "newest_output": "2026-07-11",
+   "output": "data/solutionDE/hseg_timings.json",
+   "n_declared": 4,
+   "n_prefixes": 0,
+   "matched_by": "exact",
+   "verdict": "STALE"
+  },
+  {
+   "driver": "scripts/review/probe_max_det.py",
+   "last_fix": "2026-08-05",
+   "last_fix_subject": "B1+B2: a mean pushed through the truncation nonlinearity, and a catalog cache that could not say what it was",
+   "newest_output": "2026-08-04",
+   "output": "data/review/max_det_probe-hirise-ss256-topslices.json",
+   "n_declared": 2,
+   "n_prefixes": 1,
+   "matched_by": "prefix",
+   "verdict": "STALE"
+  },
+  {
+   "driver": "scripts/review/measure_operating_point.py",
+   "last_fix": "2026-08-06",
+   "last_fix_subject": "Implement the review queue: X-06 in the validation path, the restated fabric gate, and the three re-run blockers",
+   "newest_output": null,
+   "output": null,
+   "n_declared": 1,
+   "n_prefixes": 1,
+   "matched_by": null,
+   "verdict": "NO OUTPUTS FOUND"
+  },
+  {
+   "driver": "data/solutionDE/analyze_hseg_acceptance.py",
+   "last_fix": "2026-08-10",
+   "last_fix_subject": "Make the H-seg acceptance harness able to score H-seg x G, and stop it re-deriving output filenames",
+   "newest_output": "2026-08-10",
+   "output": "data/solutionDE/hseg_acceptance_summary.json",
+   "n_declared": 4,
+   "n_prefixes": 0,
+   "matched_by": "exact",
+   "verdict": "same-day"
+  },
+  {
+   "driver": "data/solutionDE/run_ap50_test.py",
+   "last_fix": "2026-08-21",
+   "last_fix_subject": "A sparse tile must not crash a ladder, and the test split can now be asked the question",
+   "newest_output": "2026-08-21",
+   "output": "data/solutionDE/ap50/baseline_catalog-ct-025-md-1100.gpkg",
+   "n_declared": 2,
+   "n_prefixes": 2,
+   "matched_by": "prefix",
+   "verdict": "same-day"
+  },
+  {
+   "driver": "data/solutionDE/tune_hseg_conf.py",
+   "last_fix": "2026-08-11",
+   "last_fix_subject": "Step 0 answered: production meets H-seg at conf ~0.188, and H-seg's edge dies by 8 px",
+   "newest_output": "2026-08-12",
+   "output": "data/solutionDE/hseg_conf_sweep.json",
+   "n_declared": 2,
+   "n_prefixes": 0,
+   "matched_by": "exact",
+   "verdict": "same-day"
+  },
+  {
+   "driver": "scripts/review/audit_headline_numbers.py",
+   "last_fix": "2026-08-07",
+   "last_fix_subject": "Close pass 9's carry-forward list: fig06's population, and a provenance check that now fails",
+   "newest_output": "2026-08-07",
+   "output": "data/review/control_site_null.json",
+   "n_declared": 2,
+   "n_prefixes": 0,
+   "matched_by": "exact",
+   "verdict": "same-day"
+  },
+  {
+   "driver": "scripts/review/measure_control_site_null.py",
+   "last_fix": "2026-08-07",
+   "last_fix_subject": "Pass 9: fix the guard I broke this morning, and the withdrawn bar in its own evidence artifact",
+   "newest_output": "2026-08-07",
+   "output": "data/review/control_site_null.json",
+   "n_declared": 3,
+   "n_prefixes": 0,
+   "matched_by": "exact",
+   "verdict": "same-day"
+  },
+  {
+   "driver": "scripts/solutionH/run_obb_orientation.py",
+   "last_fix": "2026-08-09",
+   "last_fix_subject": "Record edge_dropped from the OBB readout, which df.attrs loses at to_csv",
+   "newest_output": "2026-08-10",
+   "output": "data/solutionH/obb_examples_rot_de.npz",
+   "n_declared": 5,
+   "n_prefixes": 5,
+   "matched_by": "prefix",
+   "verdict": "same-day"
+  },
+  {
+   "driver": "scripts/run_multiscale_arms.py",
+   "last_fix": "2026-08-19",
+   "last_fix_subject": "Both OOMs were allocator fragmentation, not demand",
+   "newest_output": "2026-08-21",
+   "output": "data/solutionDE/ap50/preds-ct-025-md-1100/M123852771_01783_image-predictions-fused-bands-engulf70-512-256-256sr2-mask-audit.csv",
+   "n_declared": 1,
+   "n_prefixes": 0,
+   "matched_by": "exact",
+   "verdict": "ok"
+  },
+  {
+   "driver": "scripts/summary/make_summary_figs.py",
+   "last_fix": "2026-08-07",
+   "last_fix_subject": "Close pass 9's carry-forward list: fig06's population, and a provenance check that now fails",
+   "newest_output": "2026-08-21",
+   "output": "data/solutionDE/ap50/preds-ct-025-md-1100/stonegarden_2962_image-predictions-ct-025-ss-256-is-1024-ov-020-downscaled-mask-nms.gpkg",
+   "n_declared": 38,
+   "n_prefixes": 2,
+   "matched_by": "exact",
+   "verdict": "ok"
+  }
+ ],
+ "caveat": "code side = last commit (authoritative); artifact side = mtime, which a copy can move forward. STALE is the reliable verdict; ok is the weaker one."
+}
