@@ -21,10 +21,32 @@ beside it as the empirical floor.
 
 Two scope notes, both deliberate:
 
-* **Densities from this sample are lower bounds** (X-06): the run that produced the CSV did not
-  pass `max_det`, so ultralytics' 300 applied. It does not plausibly move these statistics — the
-  cap keeps the top N by confidence and this cut is the high-confidence >= 8 px / >= 4 m tail — but
-  no boulders/km2 is quoted here, and `orientation_validation` now passes and records the cap.
+* ⚠ **RETRACTED 2026-08-23: the cap DOES move these statistics, and this null is PROVISIONAL.**
+  This block used to read "it does not plausibly move these statistics — the cap keeps the top N by
+  confidence and this cut is the high-confidence >= 8 px / >= 4 m tail". That was reasoning, not a
+  measurement, and re-scanning two of the five sites at `max_det=1100` refuted it:
+  `ESP_076499_1160` went n 1,673 -> 3,132 and **R 0.4429 -> 0.3890** (`ESP_030222_1220` moved only
+  +0.005, so the effect is site-dependent, not universal).
+
+  It is **not** dilution by smaller/noisier objects: re-weighting the larger sample to the old
+  size x aspect composition gives R = 0.3876 against 0.3890 unweighted, so composition explains
+  **2.6%** of the drop; R falls *within* fixed dpx and aspect bands; and the added rows are less
+  aligned at the *same* size and elongation (R = 0.3380). The mechanism is that `max_det` keeps the
+  top N **by confidence** and higher-confidence detections are more aligned than lower-confidence
+  ones at equal size and shape, so **truncation inflates measured anisotropy**. Any catalog produced
+  with a binding cap has inflated apparent fabric.
+
+  Consequences, all live: the site that *set* the gate (`ESP_076499_1160`, R 0.4429) has fallen, and
+  the maximum now sits on `TRA_000828_2495` (0.4399) which is **un-re-scanned**, smallest-n (271) and
+  widest-CI of the five. And **0 of the 11 candidate scenes record `max_det` either** — both sides of
+  the comparison are inflated by the same mechanism, which partially self-corrects only insofar as
+  they are equally truncated, and truncation scales with density (541 to 153,869 detections across
+  those scenes). Densities remain lower bounds and on the densest ground are not reachable by raising
+  the cap at all: 124 of 153 tiles still bound at 1,100 on `ESP_030222_1220`.
+
+  **So: do not quote this null or the gate derived from it as settled.** Fixing it needs the controls
+  *and* the candidates re-measured consistently — see `code_review_backlog.md` §"The control-site
+  null is provisional".
 * **The cut is fig09's own** (`aspect > 1.35`, `dpx_sam >= 8`, `dm_sam >= 4 m`), so the R here is
   directly comparable to the peaks and `f_lower` already published from the same figure. The
   producer-conditioning defect fig09 has does **not** apply to the SAM row read on its own terms,
@@ -176,9 +198,16 @@ def main():
             "A scalar R cannot separate a fabric aligned with the artifact axis from one orthogonal "
             "to it, and this null is Mars-only at incidence 44.8-63.4 deg.",
         ],
-        note=("Densities from this sample are X-06 lower bounds (max_det unpassed on the "
-              "2026-07-27 run); no density is quoted here. Angle statistics on this >=8 px / "
-              ">=4 m tail are the high-confidence end and are not plausibly moved by the cap."))
+        note=("PROVISIONAL — DO NOT QUOTE AS SETTLED (2026-08-23). Densities from this sample are "
+              "X-06 lower bounds (max_det unpassed on the 2026-07-27 run) and no density is quoted "
+              "here. The previous claim that angle statistics are 'not plausibly moved by the cap' "
+              "is RETRACTED: re-scanning ESP_076499_1160 at max_det=1100 moved R 0.4429 -> 0.3890 "
+              "on n 1,673 -> 3,132, and it is not compositional (re-weighting to the old size x "
+              "aspect mix explains 2.6%). max_det keeps the top N by CONFIDENCE and higher-"
+              "confidence detections are more aligned at equal size and shape, so truncation "
+              "INFLATES anisotropy. Only 2 of 5 control sites are re-scanned and 0 of 11 candidate "
+              "scenes are, so both sides of the gate comparison are inflated. See "
+              "docs/code_review_backlog.md."))
 
     out = dict(source=str(CSV.relative_to(ROOT)), sample="equal-area, 10 km2/scene, shuffled tiles",
                seed=SEED, n_boot=N_BOOT, sites=rows, summary=summary,

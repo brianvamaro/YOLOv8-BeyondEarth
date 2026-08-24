@@ -92,36 +92,36 @@
    "km2_valid": 10.03,
    "n_tiles": 151,
    "own_aspect": {
-    "n": 2388,
-    "R": 0.1955,
-    "R_null_mean": 0.0181,
-    "R_null_p95": 0.0354,
-    "R_over_null": 10.78,
-    "rayleigh_p": 2.397780602054428e-40,
+    "n": 4243,
+    "R": 0.2007,
+    "R_null_mean": 0.0136,
+    "R_null_p95": 0.0266,
+    "R_over_null": 14.75,
+    "rayleigh_p": 6.094402710046585e-75,
     "R_ci": [
-     0.1629,
-     0.2315
+     0.1787,
+     0.2224
     ],
-    "peak": 82.4,
-    "f_lower": 0.573,
-    "grid": 0.286,
-    "diag": 0.192
+    "peak": 80.8,
+    "f_lower": 0.594,
+    "grid": 0.282,
+    "diag": 0.19
    },
    "no_aspect_cut": {
-    "n": 8010,
-    "R": 0.1204,
-    "R_null_mean": 0.0099,
-    "R_null_p95": 0.0193,
-    "R_over_null": 12.16,
-    "rayleigh_p": 3.593084186592402e-51,
+    "n": 12293,
+    "R": 0.1324,
+    "R_null_mean": 0.008,
+    "R_null_p95": 0.0156,
+    "R_over_null": 16.57,
+    "rayleigh_p": 2.2291225340523144e-94,
     "R_ci": [
-     0.1032,
-     0.1386
+     0.12,
+     0.1457
     ],
-    "peak": 82.2,
-    "f_lower": 0.545,
-    "grid": 0.253,
-    "diag": 0.216
+    "peak": 80.2,
+    "f_lower": 0.561,
+    "grid": 0.252,
+    "diag": 0.212
    }
   },
   {
@@ -139,8 +139,8 @@
     "R_over_null": 8.17,
     "rayleigh_p": 1.6962496991730456e-23,
     "R_ci": [
-     0.3717,
-     0.5152
+     0.3689,
+     0.5131
     ],
     "peak": 17.3,
     "f_lower": 0.756,
@@ -155,8 +155,8 @@
     "R_over_null": 8.59,
     "rayleigh_p": 6.392318408594864e-26,
     "R_ci": [
-     0.2727,
-     0.3841
+     0.2735,
+     0.3832
     ],
     "peak": 18.1,
     "f_lower": 0.706,
@@ -170,38 +170,38 @@
    "incidence": 63.388,
    "sun_axis": 129.9,
    "km2_valid": 10.03,
-   "n_tiles": 104,
+   "n_tiles": 106,
    "own_aspect": {
-    "n": 1673,
-    "R": 0.4429,
-    "R_null_mean": 0.0217,
-    "R_null_p95": 0.0423,
-    "R_over_null": 20.44,
-    "rayleigh_p": 2.871641700590138e-143,
+    "n": 3132,
+    "R": 0.389,
+    "R_null_mean": 0.0158,
+    "R_null_p95": 0.0309,
+    "R_over_null": 24.56,
+    "rayleigh_p": 1.6304484644046968e-206,
     "R_ci": [
-     0.4079,
-     0.4784
+     0.3649,
+     0.4133
     ],
-    "peak": 87.3,
-    "f_lower": 0.633,
-    "grid": 0.344,
-    "diag": 0.129
+    "peak": 85.0,
+    "f_lower": 0.643,
+    "grid": 0.315,
+    "diag": 0.155
    },
    "no_aspect_cut": {
-    "n": 5107,
-    "R": 0.313,
-    "R_null_mean": 0.0124,
-    "R_null_p95": 0.0242,
-    "R_over_null": 25.24,
-    "rayleigh_p": 4.920921810732743e-218,
+    "n": 8450,
+    "R": 0.2833,
+    "R_null_mean": 0.0096,
+    "R_null_p95": 0.0188,
+    "R_over_null": 29.38,
+    "rayleigh_p": 3.542400703632976e-295,
     "R_ci": [
-     0.2912,
-     0.335
+     0.2661,
+     0.3012
     ],
-    "peak": 86.4,
-    "f_lower": 0.581,
-    "grid": 0.287,
-    "diag": 0.186
+    "peak": 84.8,
+    "f_lower": 0.596,
+    "grid": 0.276,
+    "diag": 0.196
    }
   }
  ],
@@ -211,55 +211,55 @@
   "producer": "sam256 (angle_sam) \u2014 the Goal-4 production masker",
   "n_range": [
    271,
-   2388
+   4243
   ],
   "R_range": [
-   0.1955,
-   0.4429
+   0.2007,
+   0.4399
   ],
   "R_median": 0.2965,
   "R_null_mean_range": [
-   0.0181,
+   0.0136,
    0.0538
   ],
   "R_over_null_range": [
    8.17,
-   20.44
+   24.56
   ],
   "max_rayleigh_p": 1.6962496991730456e-23,
   "peak_range": [
    17.3,
-   87.3
+   85.0
   ],
   "f_lower_range": [
-   0.573,
+   0.583,
    0.756
   ],
   "gate_form": "R_candidate > max(R_control_max_upper95, sqrt(-ln(0.05)/n_candidate))",
-  "R_control_max_upper95": 0.5152,
-  "R_control_max_point_estimate": 0.4429,
+  "R_control_max_upper95": 0.5131,
+  "R_control_max_point_estimate": 0.4399,
   "gate_form_caveats": [
    "sqrt(-ln(0.05)/n) exceeds the absolute term only for n < 16, so for any realistic candidate this is a FLAT bar with a small-n guard, not a bar that scales with n.",
    "R_control_max is strongly conditional on the aspect cut (0.330/0.443/0.509/0.539/0.642 at aspect 1.0/1.35/1.5/1.7/2.0), so candidate and null MUST be read at one stated cut.",
    "A map is thousands of cells. Applied per cell at alpha=0.05 this gate manufactures fabric; it needs FDR control, a minimum effective n, and a tiling-preserving permutation null before any map cell may be claimed. See goal4_global_maps_plan.md gate 4 and backlog item G4-07.",
    "A scalar R cannot separate a fabric aligned with the artifact axis from one orthogonal to it, and this null is Mars-only at incidence 44.8-63.4 deg."
   ],
-  "note": "Densities from this sample are X-06 lower bounds (max_det unpassed on the 2026-07-27 run); no density is quoted here. Angle statistics on this >=8 px / >=4 m tail are the high-confidence end and are not plausibly moved by the cap."
+  "note": "PROVISIONAL \u2014 DO NOT QUOTE AS SETTLED (2026-08-23). Densities from this sample are X-06 lower bounds (max_det unpassed on the 2026-07-27 run) and no density is quoted here. The previous claim that angle statistics are 'not plausibly moved by the cap' is RETRACTED: re-scanning ESP_076499_1160 at max_det=1100 moved R 0.4429 -> 0.3890 on n 1,673 -> 3,132, and it is not compositional (re-weighting to the old size x aspect mix explains 2.6%). max_det keeps the top N by CONFIDENCE and higher-confidence detections are more aligned at equal size and shape, so truncation INFLATES anisotropy. Only 2 of 5 control sites are re-scanned and 0 of 11 candidate scenes are, so both sides of the gate comparison are inflated. See docs/code_review_backlog.md."
  },
  "null_verification": {
   "8": {
-   "mc_mean_R": 0.3178,
+   "mc_mean_R": 0.3177,
    "formula_mean_R": 0.3133,
-   "mc_p95_R": 0.6,
+   "mc_p95_R": 0.5989,
    "formula_p95_R": 0.6119,
-   "mc_frac_above_formula_p95": 0.0442
+   "mc_frac_above_formula_p95": 0.0434
   },
   "100": {
    "mc_mean_R": 0.0882,
    "formula_mean_R": 0.0886,
    "mc_p95_R": 0.1729,
    "formula_p95_R": 0.1731,
-   "mc_frac_above_formula_p95": 0.0496
+   "mc_frac_above_formula_p95": 0.0497
   },
   "1000": {
    "mc_mean_R": 0.0277,

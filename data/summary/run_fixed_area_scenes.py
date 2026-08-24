@@ -300,6 +300,34 @@ def dry_run(groups, target_km2):
           f"(previous pass's s/tile; dense scenes cost more per tile)")
 
 
+def archive_scene_outputs(csv, mj):
+    """Move an existing per-scene CSV+JSON aside before a re-scan overwrites them (the A-2 pattern).
+
+    The five control-site outputs are the **only** record of the sample behind the published
+    control-site null (R 0.196-0.443, f_lower 0.573-0.756, grid 0.255-0.344) and of every
+    ``per_km2_*`` figure quoted from it. A re-scan writes to the same paths, so without this the
+    re-run destroys the thing a reader would want to compare it against -- and the numbers it
+    replaces are cited in CLAUDE.md and in the Goal-4 gate.
+
+    Idempotent by timestamp, and never overwrites an existing archive.
+    """
+    import shutil
+    moved = []
+    for path in (csv, mj):
+        if not path.exists():
+            continue
+        dst = path.parent / "_archive" / f"{path.stem}__{time.strftime('%Y%m%dT%H%M%S')}{path.suffix}"
+        if dst.exists():
+            raise FileExistsError(f"{dst} exists; refusing to overwrite an archive")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dst)
+        moved.append(dst.name)
+    if moved:
+        print(f"[archive] copied {', '.join(moved)} to _archive/ before re-scanning (A-2)",
+              flush=True)
+    return moved
+
+
 def main():
     args = sys.argv[1:]
     target = next((float(a.split("=")[1]) for a in args if a.startswith("--target-km2=")),
@@ -307,6 +335,15 @@ def main():
     grp_arg = next((a.split("=")[1] for a in args if a.startswith("--group=")), "hirise,controls")
     groups = [g.strip() for g in grp_arg.split(",")]
     only = next((set(a.split("=")[1].split(",")) for a in args if a.startswith("--scenes=")), None)
+    # `--max-det` because the module constant may not clear this arm: TILE=512 whole-tile slices are
+    # what X-06 measured returning up to 1013 on dense HiRISE terrain, so 600 is a hope, not a bound.
+    # Whatever is used lands in the meta together with `max_det_returned`, so one run answers both
+    # "is this measurement truncated?" and "would 600 have been enough?".
+    global MAX_DET
+    MAX_DET = next((int(a.split("=")[1]) for a in args if a.startswith("--max-det=")), MAX_DET)
+    # A re-scan at the same target is skipped by default (the resume path). `--force` re-measures,
+    # archiving whatever is there first.
+    force = "--force" in args
     if "--dry-run" in args:
         dry_run(groups, target)
         return
@@ -323,8 +360,16 @@ def main():
             mj = OUT / f"{grp}__{obsid}.json"
             if csv.exists() and mj.exists() \
                     and json.loads(mj.read_text()).get("target_km2") == target:
-                print(f"[{obsid}] already done at {target:g} km² — skipping", flush=True)
-                continue
+                if not force:
+                    prior = json.loads(mj.read_text())
+                    # Say when the cached result is the capped run, rather than reporting "done" for
+                    # a measurement whose densities are lower bounds (X-06).
+                    note = ("" if "max_det" in prior else
+                            "  (no max_det recorded => the capped 2026-07-27 run, so its per_km2_* "
+                            "are LOWER BOUNDS; pass --force to re-measure)")
+                    print(f"[{obsid}] already done at {target:g} km² — skipping{note}", flush=True)
+                    continue
+                archive_scene_outputs(csv, mj)
             tif_path = resolve(rel, obsid)
             if tif_path is None:
                 print(f"[{obsid}] MISSING TIF ({rel}) — skipped, recorded", flush=True)
