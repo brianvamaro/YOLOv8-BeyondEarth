@@ -87,7 +87,19 @@ def run_scene(scene, out_root, *, rule, overwrite, compare_to=None, fetch="yes")
 
 
 def prepare(lbl, out_tif, *, rule, overwrite, sources=None, compare_to=None):
-    rec = pds_prep.prepare_scene(lbl, out_tif, rule=rule, overwrite=overwrite, sources=sources)
+    """Convert (or reuse a finished conversion), then optionally compare against a reference.
+
+    Resumable: the sidecar is written last, so raster + sidecar means a finished conversion and is
+    reused unless ``--overwrite``. A raster without one is an interrupted run and is redone. An
+    interrupted ``--compare-to`` therefore only repeats the comparison.
+    """
+    out_tif = Path(out_tif) if out_tif else Path(lbl).with_suffix(".tif")
+    side = out_tif.with_name(out_tif.stem + ".prep.json")
+    if out_tif.exists() and side.exists() and not overwrite:
+        print(f"[reuse] {out_tif.name}: converted earlier (its sidecar exists)")
+        rec = json.loads(side.read_text())
+    else:
+        rec = pds_prep.prepare_scene(lbl, out_tif, rule=rule, overwrite=True, sources=sources)
     if compare_to:
         cmp = pds_prep.compare_rasters(compare_to, out_tif)
         rec["reference_comparison"] = cmp
