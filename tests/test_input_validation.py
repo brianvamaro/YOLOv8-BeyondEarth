@@ -141,7 +141,7 @@ def test_batch_result_count_mismatch_raises(raster, model, tmp_path, monkeypatch
         def __len__(self):
             return 3
 
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices())
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices())
     model.model = lambda images, **kw: [_result([])]          # 1 result for 3 slices
     with pytest.raises(ValueError, match="results for"):
         P.get_sliced_prediction(raster, model, output_dir=tmp_path, slice_size=SLICE,
@@ -201,7 +201,7 @@ def test_discard_tally_is_attached_to_the_result(raster, model, tmp_path, monkey
         def __len__(self):
             return 1
 
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices())
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices())
     model.model = lambda images, **kw: [_result([(5, 5, 6, 6, 0.8, 0),      # dropped: 4 px
                                                  (25, 25, 45, 45, 0.7, 0)])]
     gdf, gdf_nms = P.get_sliced_prediction(raster, model, output_dir=tmp_path, slice_size=SLICE,
@@ -223,7 +223,7 @@ def test_systematic_unexpected_failure_warns(model, raster, tmp_path, monkeypatc
     def boom(mask):
         raise ValueError("synthetic tracer failure")
 
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices())
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices())
     monkeypatch.setattr(P, "binary_mask_to_polygon", boom)
     model.model = lambda images, **kw: [_result([(10, 10, 30, 30, 0.8, 0)] * 5)]
 
@@ -283,7 +283,7 @@ def test_intentional_drops_do_not_warn(model, raster, tmp_path, monkeypatch):
         def __len__(self):
             return 1
 
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices())
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices())
     model.model = lambda images, **kw: [_result([(5, 5, 6, 6, 0.8, 0)] * 20)]
 
     with warnings.catch_warnings(record=True) as caught:

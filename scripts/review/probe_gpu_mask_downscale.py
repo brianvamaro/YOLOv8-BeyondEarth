@@ -48,16 +48,14 @@ def main():
     import torch
     import torch.nn.functional as F
     from sahi import AutoDetectionModel
-    from sahi.slicing import slice_image
 
     from YOLOv8BeyondEarth import presets
     from YOLOv8BeyondEarth.polygon import binary_mask_to_polygon
-    from YOLOv8BeyondEarth.predict import _ensure_png, _to_bgr
+    from YOLOv8BeyondEarth.predict import _WindowedSlices, _to_bgr
 
     imgsz = presets.GOAL1_PRODUCTION["inference_size"]
     conf = presets.GOAL1_PRODUCTION["confidence_threshold"]
     raster = Path(args.raster)
-    png = _ensure_png(raster, presets.file_identity(raster))
 
     model = AutoDetectionModel.from_pretrained(
         model_type="ultralytics", model_path=args.weights, device=args.device,
@@ -66,9 +64,11 @@ def main():
     summary = {"raster": raster.name, "inference_size": imgsz, "arms": {}}
     for slice_size in args.slice_sizes:
         factor = imgsz // slice_size
-        sliced = slice_image(image=str(png), slice_height=slice_size, slice_width=slice_size,
-                             overlap_height_ratio=0.2, overlap_width_ratio=0.2, out_ext=".png")
-        images = list(sliced.images)[:args.max_slices]
+        # the production slice source (lever N2): same grid and pixels as the old PNG + sahi path
+        sliced = _WindowedSlices(raster, slice_size, 0.2, 0.2)
+        n = len(sliced) if args.max_slices is None else min(len(sliced), args.max_slices)
+        images = [sliced.images[i] for i in range(n)]
+        sliced.close()
 
         n_masks = n_value_identical = n_polygon_identical = n_polygons = 0
         max_abs_diff = 0.0

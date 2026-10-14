@@ -136,7 +136,11 @@ def instrument(watch):
     predict._result_to_df = watch.wrap("_result_to_df (per slice, total)", predict._result_to_df)
     predict.add_geometries = watch.wrap("add_geometries", polygon.add_geometries)
     polygon.write_vector = watch.wrap("write_vector (+readback)", polygon.write_vector)
-    predict._ensure_png = watch.wrap("_ensure_png (TIFF->PNG)", predict._ensure_png)
+    # lever N2 removed the whole-raster TIFF->PNG step; what replaced it is a per-window read and a
+    # streamed footprint hull, timed here instead
+    predict._WindowedSlices.read = watch.wrap("window read (per slice)", predict._WindowedSlices.read)
+    predict.coverage.valid_convex_hull = watch.wrap("valid_convex_hull (footprint)",
+                                                    predict.coverage.valid_convex_hull)
     presets.file_identity = watch.wrap("file_identity (sha256)", presets.file_identity)
     predict.presets = presets
 

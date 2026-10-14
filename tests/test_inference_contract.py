@@ -90,7 +90,7 @@ def raster_128(tmp_path):
 
 
 def _run(raster, per_slice, shifts, conf, monkeypatch, **kw):
-    monkeypatch.setattr(P, "slice_image",
+    monkeypatch.setattr(P, "_slice_raster",
                         lambda **_: _FakeSlices(len(per_slice), shifts))
     model = _fake_model(per_slice, conf)
     opts = dict(confidence_threshold=conf, output_dir=raster.parent, slice_size=SLICE,

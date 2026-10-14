@@ -1,5 +1,4 @@
 import contextlib
-import json
 import logging
 import os
 import shutil
@@ -11,21 +10,24 @@ import cv2
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import rasterio
 import torch
 
 from concurrent.futures import ThreadPoolExecutor
 
-from YOLOv8BeyondEarth import presets
+from YOLOv8BeyondEarth import coverage, presets
+from YOLOv8BeyondEarth.runstate import peak_rss_bytes
 from YOLOv8BeyondEarth.polygon import (binary_mask_to_polygon, binary_mask_to_polygon_cv,
                                        shift_polygon, mask_support_area, rescale_pixel_coords,
                                        add_geometries, bboxes_to_shp, outlines_to_shp)
 from lsnms import nms
 
-from sahi.slicing import slice_image
+from rasterio.windows import Window
+from sahi.slicing import get_slice_bboxes
 from tqdm import tqdm
 from pathlib import Path
 
-from rastertools_BOULDERING import raster, convert as raster_convert, metadata as raster_metadata
+from rastertools_BOULDERING import metadata as raster_metadata
 from shptools_BOULDERING import shp
 
 #from torchvision.ops import (nms as nms_torch, batched_nms as batched_nms_torch)
@@ -288,6 +290,17 @@ def _validate_prediction_args(*, in_raster, detection_model, confidence_threshol
         raise ValueError("in_raster is required")
     if not Path(in_raster).exists():
         raise FileNotFoundError(f"in_raster does not exist: {in_raster}")
+    # The weights were trained on single-band 8-bit imagery. A 10-bit PDS product used to pass
+    # straight through: the PNG hop wrote it as a 16-bit PNG and PIL's RGB conversion saturated
+    # every DN above 255, so the model saw mostly white with no error (measured 2026-10-14). Convert
+    # first, e.g. with YOLOv8BeyondEarth.pds_prep for HiRISE RDRs.
+    with rasterio.open(in_raster) as src:
+        if src.count != 1 or src.dtypes[0] != "uint8":
+            raise ValueError(
+                f"{Path(in_raster).name} has {src.count} band(s) of {src.dtypes[0]}; the detector "
+                "needs a single-band uint8 raster. Convert it first (for a PDS HiRISE RDR, "
+                "YOLOv8BeyondEarth.pds_prep / scripts/prep_pds_scene.py) -- a silent bit-depth "
+                "or band change would redefine every detection.")
     if detection_model is None:
         raise ValueError("detection_model is required")
     for attr in ("model", "device", "category_mapping"):
@@ -295,43 +308,125 @@ def _validate_prediction_args(*, in_raster, detection_model, confidence_threshol
             raise TypeError(f"detection_model is missing .{attr} — expected a sahi DetectionModel")
 
 
-def _ensure_png(in_raster, raster_identity):
-    """Convert the raster to 8-bit PNG once, reusing an earlier conversion of the same bytes.
+class _WindowedSlices:
+    """A raster's slice grid, each slice read from the file only when it is asked for (lever N2).
 
-    ``tiff_to_png`` reads the whole TIFF and re-encodes it on every call, then overwrites the same
-    output path — so a multiscale run redid the identical conversion once per arm, and two runs on
-    different rasters with the same stem would clobber each other's PNG (review item G1-07). A
-    sidecar records which source produced the PNG; the conversion is skipped when it still matches.
+    This replaces ``_ensure_png`` + ``sahi.slicing.slice_image``, which between them held the whole
+    scene in memory three times over. The TIFF was read whole and re-encoded as a PNG beside the
+    raster (doubling staging disk), only so that PIL could reopen it, and ``slice_image`` then decoded
+    it through ``convert("RGB")``: **10.0 bytes per scene pixel at its peak** and 3 resident for the
+    entire run (measured, ``data/review/n2_memory.json``), i.e. ~70 GB and ~21 GB at the 7 Gpx a
+    0.25 m/px HiRISE scene can reach. Now the raster's only footprint is GDAL's block cache.
+
+    Identical to that path by construction, not by tolerance:
+
+    - the grid is :func:`sahi.slicing.get_slice_bboxes`, the function ``slice_image`` itself calls,
+      with the same arguments, so windows and ``starting_pixels`` cannot differ;
+    - the pixels are the band replicated to three channels, which is exactly what ``convert("RGB")``
+      of an 8-bit greyscale PNG yields (PNG is lossless). The old ``tiff_to_png`` only ever accepted
+      single-band 8-bit input, which :func:`_validate_prediction_args` now enforces up front.
+
+    ``tests/test_windowed_slices.py`` checks both against sahi on a real raster. The batch loop (and
+    the test suites' stand-ins for this object) use only ``len()``, ``starting_pixels[i]`` and
+    ``images[i]``.
     """
-    out_png = in_raster.with_name(in_raster.stem + ".png")
-    stamp = out_png.with_name(out_png.name + ".source.json")
-    key = {"sha256": raster_identity.get("sha256"), "bytes": raster_identity.get("bytes"),
-           "path": raster_identity.get("path")}
-    if out_png.exists() and stamp.exists():
-        try:
-            if json.loads(stamp.read_text()) == key:
-                logger.debug("reusing %s (source unchanged)", out_png.name)
-                return out_png
-        except (OSError, json.JSONDecodeError):
-            pass
-    raster_convert.tiff_to_png(in_raster, out_png)   # only work with 8bit
-    try:
-        stamp.write_text(json.dumps(key))
-    except OSError:                                  # read-only data dir: just skip the cache
-        logger.debug("could not write %s; PNG will be reconverted next run", stamp.name)
-    return out_png
+
+    class _Images:
+        def __init__(self, parent):
+            self._parent = parent
+
+        def __len__(self):
+            return len(self._parent)
+
+        def __getitem__(self, i):
+            return self._parent.read(i)
+
+    def __init__(self, in_raster, slice_size, overlap_height_ratio, overlap_width_ratio):
+        self._src = rasterio.open(in_raster)
+        self.bboxes = get_slice_bboxes(image_height=self._src.height, image_width=self._src.width,
+                                       slice_height=slice_size, slice_width=slice_size,
+                                       overlap_height_ratio=overlap_height_ratio,
+                                       overlap_width_ratio=overlap_width_ratio)
+        self.starting_pixels = [[b[0], b[1]] for b in self.bboxes]
+        self.images = self._Images(self)
+
+    def __len__(self):
+        return len(self.bboxes)
+
+    def read(self, i):
+        x0, y0, x1, y1 = self.bboxes[i]
+        band = self._src.read(1, window=Window(x0, y0, x1 - x0, y1 - y0))
+        return np.repeat(band[:, :, None], 3, axis=2)
+
+    def close(self):
+        self._src.close()
+
+
+def _slice_raster(in_raster, slice_size, overlap_height_ratio, overlap_width_ratio):
+    """The slice source :func:`get_sliced_prediction` iterates. A seam, so tests can substitute one."""
+    return _WindowedSlices(in_raster, slice_size, overlap_height_ratio, overlap_width_ratio)
+
+
+def _kept_batches(slices, batch_size, skip_fill, counts, progress=None):
+    """Group slices into model batches, dropping every slice that is entirely fill (lever N1).
+
+    Map-projected HiRISE is ~46% fill (``ESP_017355_2260_RED``: 54.4% valid), and every fill slice
+    used to cost a full yolov8m forward pass. "Entirely fill" is ``max() == 0``, not "contains fill":
+    a slice straddling the data edge is inferred as before. And not a variance test: real deep shadow
+    can be 0 DN, but a whole slice of it cannot hide a boulder from a test that looks at every pixel.
+
+    Dropping them removes nothing. Every fill slice is the same all-zero input, and the production
+    weights return **no detection at any score >= 0.001** on it, for the 256, 512 and SR (128 -> 256)
+    slice shapes alike (measured 2026-10-14).
+
+    **Every kept slice runs at the batch size it ran at before**, which is what makes N1 byte-identical
+    rather than nearly so. Which slices share a batch does not move a result (27 re-grouped batches of
+    8 came out byte-identical), but the batch *size* does: without this, N1's one short batch landed on
+    real data and moved 99 of 5,518 rows by up to 1.1e-4 in score, 3 of them in geometry (measured,
+    every one of them in that batch; cf. G1-02's batch 1 vs 8). So kept slices from the grid's regular
+    stretch are batched ``batch_size`` at a time, the last such batch padded with fill if short, and
+    those from the grid's own final partial batch keep that batch's size, padded the same way. With
+    nothing skipped this is exactly the old batching. The pads are fill, so they yield nothing.
+
+    Yields ``(grid_indices, images)``; ``images[len(grid_indices):]`` are the pads.
+    """
+    n = len(slices)
+    tail_start = n - n % batch_size          # the grid's final partial batch, if it has one
+    idx, images = [], []
+
+    def padded(want):
+        return idx, images + [np.zeros_like(images[-1])] * (want - len(images))
+
+    for i in range(n):
+        if i == tail_start and idx:          # close the regular stretch at its full size
+            yield padded(batch_size)
+            idx, images = [], []
+        image = slices.images[i]
+        if progress is not None:
+            progress.update(1)
+        if skip_fill and image.max() == 0:
+            counts["skipped_fill"] = counts.get("skipped_fill", 0) + 1
+            continue
+        idx.append(i)
+        images.append(image)
+        if i < tail_start and len(idx) == batch_size:
+            yield idx, images
+            idx, images = [], []
+    if idx:
+        yield padded(batch_size if idx[0] < tail_start else n - tail_start)
 
 
 def _to_bgr(image):
     """RGB -> BGR for the ultralytics numpy path, matching ``sahi``'s own model wrapper.
 
-    ``sahi.slicing.slice_image`` reads through PIL and hands back **RGB** arrays, while
-    ultralytics treats a numpy input as **BGR** (the ``cv2.imread`` convention) — which is why
-    ``sahi``'s ``UltralyticsDetectionModel`` flips before calling the model. This pipeline called
-    the model directly and skipped that flip. For the single-band rasters it runs on the PNG is
-    grayscale-replicated (R == G == B), so the flip is a no-op and no saved result changes; it
-    matters only if a true colour product is ever fed in. ``np.ascontiguousarray`` because the
-    reversed view has a negative stride.
+    Slices are **RGB** arrays (``sahi.slicing.slice_image`` handed them back that way, and
+    :class:`_WindowedSlices` reproduces it), while ultralytics treats a numpy input as **BGR** (the
+    ``cv2.imread`` convention) — which is why ``sahi``'s ``UltralyticsDetectionModel`` flips before
+    calling the model. This pipeline called the model directly and skipped that flip. The input is
+    single-band (enforced in :func:`_validate_prediction_args`), so every slice is greyscale-
+    replicated (R == G == B), the flip is a no-op and no saved result changes; it would matter only if
+    a true colour product were ever fed in. ``np.ascontiguousarray`` because the reversed view has a
+    negative stride.
     """
     arr = np.asarray(image)
     if arr.ndim != 3 or arr.shape[2] != 3:
@@ -712,6 +807,7 @@ def get_sliced_prediction(in_raster,
                           remask_fn=None,
                           mask_tag: str = None,
                           sr_factor: int = 1,
+                          skip_fill_slices: bool = True,
                           on_conflict: str = "error"):
     """
     Function for slice image + get predicion for each slice + combine predictions in full image.
@@ -740,7 +836,10 @@ def get_sliced_prediction(in_raster,
             Whether the model produces masks. Must be ``True`` unless ``remask_fn`` is given
             (the polygon pipeline needs a mask source) — ``False`` without a ``remask_fn``
             raises ``NotImplementedError``.
-        interim_dir: str or Path()
+        interim_file_name, interim_dir:
+            No longer supported, and passing either raises. They asked ``sahi.slicing.slice_image``
+            to write every slice as a PNG; slices are now read from the raster on demand (lever N2),
+            and nothing in the repository used them.
         slice_size: int
             Height and width of each slice. Defaults to ``256``.
         inference_size: int
@@ -825,6 +924,13 @@ def get_sliced_prediction(in_raster,
             footprint" at the trained 4× internal resize. ``slice_size`` must be divisible by
             ``sr_factor``. Output filenames carry ``-ss-256sr2-``. Default ``1`` = bit-identical
             native path.
+        skip_fill_slices: bool
+            Lever N1: do not run the model on slices that are entirely fill (``max() == 0``, tested
+            on the native window, before any SR upsample). Default ``True``. It changes no
+            detection, because the weights return nothing for an all-zero slice at any score
+            >= 0.001 (see :func:`_kept_batches`), so it is not part of the resolved configuration.
+            The manifest records ``n_slices_skipped_fill`` beside ``n_slices``. ``False`` runs every
+            slice, which exists for the identity check that established this.
 
     Returns:
         ``(gdf, gdf_nms)`` — a tuple of GeoDataFrames: all kept detections and the post-NMS
@@ -877,6 +983,9 @@ def get_sliced_prediction(in_raster,
             "pipeline is polygon-based, and without masks every detection would be silently dropped "
             "by the area gate. Use a -seg model, or supply remask_fn (e.g. sam2_remasker) to build "
             "masks from the boxes.")
+    if interim_dir is not None or interim_file_name is not None:
+        raise ValueError("interim_dir / interim_file_name (saving every slice as a PNG) are no longer "
+                         "supported: slices are read from the raster on demand (lever N2)")
 
     sr_factor = int(sr_factor)
     native_slice = slice_size // sr_factor   # window on the native grid; == slice_size when sr=1
@@ -925,26 +1034,19 @@ def get_sliced_prediction(in_raster,
                                   resolved_config, on_conflict)
 
     raster_identity = presets.file_identity(in_raster)
-    out_png = _ensure_png(in_raster, raster_identity)
 
     # set model's confidence_threshold and inference size
     detection_model.image_size = inference_size
     detection_model.confidence_threshold = confidence_threshold
 
-    slice_image_result = slice_image(
-        image=out_png.as_posix(),  # need to be path to
-        output_file_name=interim_file_name,  # ADDED OUTPUT FILE NAME TO (OPTIONALLY) SAVE SLICES
-        output_dir=interim_dir,  # ADDED INTERIM DIRECTORY TO (OPTIONALLY) SAVE SLICES
-        slice_height=native_slice,
-        slice_width=native_slice,
-        overlap_height_ratio=overlap_height_ratio,
-        overlap_width_ratio=overlap_width_ratio,
-        out_ext=".png",  # FORMAT OF (OPTIONALLY) SAVED SLICES
-    )
-
-    num_slices = len(slice_image_result)
-    shift_amounts = slice_image_result.starting_pixels
-    slice_images = slice_image_result.images
+    # Windows are read from the raster as the loop reaches them -- no PNG copy, no whole-scene array
+    # (lever N2; see _WindowedSlices for why this is the same pixels on the same grid).
+    slices = _slice_raster(in_raster=in_raster, slice_size=native_slice,
+                           overlap_height_ratio=overlap_height_ratio,
+                           overlap_width_ratio=overlap_width_ratio)
+    num_slices = len(slices)
+    shift_amounts = slices.starting_pixels
+    slice_counts = {}                        # N1: how many slices were skipped as entirely fill
     frames = []
     # The mask->polygon post-processing is CPU-bound and embarrassingly parallel per detection;
     # run it across a thread pool (find_contours / cv2 / numpy release the GIL). Output order is
@@ -955,10 +1057,10 @@ def get_sliced_prediction(in_raster,
     try:
         # perform sliced prediction in batches (batched GPU inference instead of one slice at a
         # time). Per-slice geometry is unchanged; only the model call is grouped.
-        with _watch_nms_time_limit() as nms_timeouts:
+        with _watch_nms_time_limit() as nms_timeouts, tqdm(total=num_slices, unit="slice") as bar:
             seen_timeouts = 0
-            for start in tqdm(range(0, num_slices, batch_size), total=(num_slices + batch_size - 1) // batch_size):
-                batch_images = list(slice_images[start:start + batch_size])
+            for batch_idx, batch_images in _kept_batches(slices, batch_size, skip_fill_slices,
+                                                         slice_counts, progress=bar):
                 if sr_factor > 1:
                     # Streamed SR: upscale each native slice to slice_size (SR px) just before
                     # inference — same Lanczos kernel as the whole-crop SR rasters it must be
@@ -976,15 +1078,18 @@ def get_sliced_prediction(in_raster,
                     raise ValueError(f"model returned {len(prediction_results)} results for "
                                      f"{len(batch_images)} slices — results would be paired with the "
                                      "wrong shift_amounts")
+                # drop the fill pads that keep this batch at its original size (_kept_batches)
+                prediction_results = prediction_results[:len(batch_idx)]
                 # Before any per-detection work: did the model's own output get cut off? Checked
                 # here so a scene arm fails in its first minutes rather than after hours (X-06).
                 total_timeouts = nms_timeouts()
                 _note_slice_truncation(prediction_results, max_det, truncation, on_max_det,
-                                       first_slice=start,
+                                       first_slice=batch_idx[0],
                                        new_timeouts=total_timeouts - seen_timeouts)
                 seen_timeouts = total_timeouts
                 for j, prediction_result in enumerate(prediction_results):
-                    df = _result_to_df(prediction_result, detection_model, has_mask, shift_amounts[start + j],
+                    df = _result_to_df(prediction_result, detection_model, has_mask,
+                                       shift_amounts[batch_idx[j]],
                                        slice_size, min_area_threshold, downscale_pred, contour_method,
                                        executor=executor, remask_fn=remask_fn, image=batch_images[j],
                                        coord_scale=1.0 / sr_factor, stats=discarded,
@@ -994,6 +1099,8 @@ def get_sliced_prediction(in_raster,
     finally:
         if executor is not None:
             executor.shutdown()
+        if hasattr(slices, "close"):
+            slices.close()
 
     if len(frames) == 0:
         df_all = pd.DataFrame(columns=_DETECTION_COLUMNS)
@@ -1007,15 +1114,23 @@ def get_sliced_prediction(in_raster,
     # ~/tmp/true-footprint.shp shared by every process on the machine, so two concurrent scenes --
     # exactly what Goal 1 proposes and Goal 4 requires -- would overwrite each other's footprint
     # and cross-contaminate their edge classification with no error at all.
+    #
+    # The footprint is the convex hull of the valid pixels: what rastertools' `true_footprint`
+    # returned, now streamed in row blocks (coverage.valid_convex_hull). `true_footprint` read the
+    # whole raster and built an int64 copy of its validity mask -- ~10 bytes per scene pixel at its
+    # peak, at the end of the run, on top of everything else (lever N2). Same polygon.
     tmp_dir = Path(tempfile.mkdtemp(prefix="bouldernet-run-"))
+    gdf_line_buffer = None
     try:
-        gdf_true_footprint = raster.true_footprint(in_raster, tmp_dir / "true-footprint.shp")
         in_res = raster_metadata.get_resolution(in_raster)[0]
         in_meta = raster_metadata.get_profile(in_raster)
-        gpd.GeoDataFrame(geometry=gdf_true_footprint.geometry.boundary.values, crs=in_meta["crs"].to_wkt()).to_file(
-            tmp_dir / "true-footprint-as-a-line.shp")
-        gdf_line_buffer = shp.buffer(tmp_dir / "true-footprint-as-a-line.shp", native_slice * 0.10 * in_res,
-                                     (tmp_dir / "footprint-buffer.shp"))
+        hull = coverage.valid_convex_hull(in_raster)
+        if not hull.is_empty:                # an all-fill raster has no footprint and no detections
+            gpd.GeoDataFrame(geometry=[hull.boundary], crs=in_meta["crs"].to_wkt()).to_file(
+                tmp_dir / "true-footprint-as-a-line.shp")
+            gdf_line_buffer = shp.buffer(tmp_dir / "true-footprint-as-a-line.shp",
+                                         native_slice * 0.10 * in_res,
+                                         (tmp_dir / "footprint-buffer.shp"))
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -1025,11 +1140,12 @@ def get_sliced_prediction(in_raster,
     # boulders. The buffer was round-tripped through a shapefile whose .prj uses the ESRI-WKT
     # dialect of the same projection; normalize its CRS to the boulders' (identical grid) to
     # avoid a spurious CRS-mismatch and keep the join on one coordinate system.
-    gdf_line_buffer = gdf_line_buffer.set_crs(gdf.crs, allow_override=True)
-    edge_idx = gpd.sjoin(gdf[["geometry"]], gdf_line_buffer[["geometry"]],
-                         predicate="intersects", how="inner").index.unique()
     gdf["is_at_edge"] = False
-    gdf.loc[edge_idx, "is_at_edge"] = True
+    if gdf_line_buffer is not None:
+        gdf_line_buffer = gdf_line_buffer.set_crs(gdf.crs, allow_override=True)
+        edge_idx = gpd.sjoin(gdf[["geometry"]], gdf_line_buffer[["geometry"]],
+                             predicate="intersects", how="inner").index.unique()
+        gdf.loc[edge_idx, "is_at_edge"] = True
 
     # keep edge predictions close to the edge of the footprint of the raster, but otherwise remove edge predictions
     n_before_edge = len(gdf)
@@ -1045,6 +1161,8 @@ def get_sliced_prediction(in_raster,
 
     # output paths and the conflict check were resolved before inference ran
     gdf.attrs["resolved_config"] = resolved_config
+    gdf.attrs["slices"] = {"n_slices": int(num_slices),
+                           "n_slices_skipped_fill": int(slice_counts.get("skipped_fill", 0))}
 
     # The pre-NMS files are intermediate, and bbox files aren't needed by many workflows.
     # Gate both so a dense full-image run can avoid writing ~1e6-feature layers it won't use.
@@ -1075,7 +1193,13 @@ def get_sliced_prediction(in_raster,
             fallbacks=gdf.attrs.get("fallbacks", {}),
             truncation=gdf.attrs.get("truncation", {}),
             wall_seconds=round(time.perf_counter() - started, 3),
-            n_slices=int(num_slices))
+            n_slices=int(num_slices),
+            # Lever N1. `n_slices` keeps its meaning (the whole grid) so per-slice coefficients stay
+            # comparable across manifests; the model ran on n_slices - n_slices_skipped_fill.
+            n_slices_skipped_fill=int(slice_counts.get("skipped_fill", 0)),
+            skip_fill_slices=bool(skip_fill_slices),
+            # the process's peak so far; one subprocess per arm makes it the arm's (lever N2)
+            peak_rss_bytes=peak_rss_bytes())
         return gdf, gdf_nms
 
     if postprocess:

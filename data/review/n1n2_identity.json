@@ -1,0 +1,261 @@
+{
+  "raster": "C:/Users/brian/AppData/Local/Temp/claude/c--Users-brian-Documents-PhD-BoulderNet/fe143dde-5375-415f-8953-7eaa64d35d5d/scratchpad/n1n2_crop/ESP_028537_2270_crop.tif",
+  "old_src": "C:/Users/brian/AppData/Local/Temp/claude/c--Users-brian-Documents-PhD-BoulderNet/fe143dde-5375-415f-8953-7eaa64d35d5d/scratchpad/old_code/src",
+  "max_det": 1100,
+  "runs": [
+    {
+      "variant": "old",
+      "arm": "256",
+      "src": "C:\\Users\\brian\\AppData\\Local\\Temp\\claude\\c--Users-brian-Documents-PhD-BoulderNet\\fe143dde-5375-415f-8953-7eaa64d35d5d\\scratchpad\\old_code\\src",
+      "wall_seconds": 23.35,
+      "n_nms": 5518,
+      "slices": null,
+      "truncation": {},
+      "peak_rss_bytes": 2047672320,
+      "peak_cuda_bytes": 2446510080,
+      "batch_size": 8
+    },
+    {
+      "variant": "new_all",
+      "arm": "256",
+      "src": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\YOLOv8-BeyondEarth\\src",
+      "wall_seconds": 23.77,
+      "n_nms": 5518,
+      "slices": {
+        "n_slices": 400,
+        "n_slices_skipped_fill": 0
+      },
+      "truncation": {},
+      "peak_rss_bytes": 1947955200,
+      "peak_cuda_bytes": 2446510080,
+      "batch_size": 8
+    },
+    {
+      "variant": "new_skip",
+      "arm": "256",
+      "src": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\YOLOv8-BeyondEarth\\src",
+      "wall_seconds": 17.33,
+      "n_nms": 5518,
+      "slices": {
+        "n_slices": 400,
+        "n_slices_skipped_fill": 180
+      },
+      "truncation": {},
+      "peak_rss_bytes": 1948237824,
+      "peak_cuda_bytes": 2518873088,
+      "batch_size": 8
+    },
+    {
+      "variant": "old",
+      "arm": "512",
+      "src": "C:\\Users\\brian\\AppData\\Local\\Temp\\claude\\c--Users-brian-Documents-PhD-BoulderNet\\fe143dde-5375-415f-8953-7eaa64d35d5d\\scratchpad\\old_code\\src",
+      "wall_seconds": 14.91,
+      "n_nms": 4092,
+      "slices": null,
+      "truncation": {},
+      "peak_rss_bytes": 3163623424,
+      "peak_cuda_bytes": 1911394816,
+      "batch_size": 2
+    },
+    {
+      "variant": "new_all",
+      "arm": "512",
+      "src": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\YOLOv8-BeyondEarth\\src",
+      "wall_seconds": 14.33,
+      "n_nms": 4092,
+      "slices": {
+        "n_slices": 100,
+        "n_slices_skipped_fill": 0
+      },
+      "truncation": {},
+      "peak_rss_bytes": 3076313088,
+      "peak_cuda_bytes": 1911394816,
+      "batch_size": 2
+    },
+    {
+      "variant": "new_skip",
+      "arm": "512",
+      "src": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\YOLOv8-BeyondEarth\\src",
+      "wall_seconds": 13.09,
+      "n_nms": 4092,
+      "slices": {
+        "n_slices": 100,
+        "n_slices_skipped_fill": 43
+      },
+      "truncation": {},
+      "peak_rss_bytes": 3078033408,
+      "peak_cuda_bytes": 1867415552,
+      "batch_size": 2
+    },
+    {
+      "variant": "old",
+      "arm": "256:2",
+      "src": "C:\\Users\\brian\\AppData\\Local\\Temp\\claude\\c--Users-brian-Documents-PhD-BoulderNet\\fe143dde-5375-415f-8953-7eaa64d35d5d\\scratchpad\\old_code\\src",
+      "wall_seconds": 58.95,
+      "n_nms": 77,
+      "slices": null,
+      "truncation": {},
+      "peak_rss_bytes": 1995309056,
+      "peak_cuda_bytes": 1947315712,
+      "batch_size": 8
+    },
+    {
+      "variant": "new_all",
+      "arm": "256:2",
+      "src": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\YOLOv8-BeyondEarth\\src",
+      "wall_seconds": 72.68,
+      "n_nms": 77,
+      "slices": {
+        "n_slices": 1600,
+        "n_slices_skipped_fill": 0
+      },
+      "truncation": {},
+      "peak_rss_bytes": 1908883456,
+      "peak_cuda_bytes": 1947315712,
+      "batch_size": 8
+    },
+    {
+      "variant": "new_skip",
+      "arm": "256:2",
+      "src": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\YOLOv8-BeyondEarth\\src",
+      "wall_seconds": 44.13,
+      "n_nms": 77,
+      "slices": {
+        "n_slices": 1600,
+        "n_slices_skipped_fill": 746
+      },
+      "truncation": {},
+      "peak_rss_bytes": 1906868224,
+      "peak_cuda_bytes": 1946267136,
+      "batch_size": 8
+    }
+  ],
+  "comparisons": {
+    "256:old_vs_new_all": {
+      "n_a": 5518,
+      "n_b": 5518,
+      "n_matched": 5518,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 5518,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "256:new_all_vs_new_skip": {
+      "n_a": 5518,
+      "n_b": 5518,
+      "n_matched": 5518,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 5518,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "256:old_vs_new_skip": {
+      "n_a": 5518,
+      "n_b": 5518,
+      "n_matched": 5518,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 5518,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "512:old_vs_new_all": {
+      "n_a": 4092,
+      "n_b": 4092,
+      "n_matched": 4092,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 4092,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "512:new_all_vs_new_skip": {
+      "n_a": 4092,
+      "n_b": 4092,
+      "n_matched": 4092,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 4092,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "512:old_vs_new_skip": {
+      "n_a": 4092,
+      "n_b": 4092,
+      "n_matched": 4092,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 4092,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "256:2:old_vs_new_all": {
+      "n_a": 77,
+      "n_b": 77,
+      "n_matched": 77,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 77,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "256:2:new_all_vs_new_skip": {
+      "n_a": 77,
+      "n_b": 77,
+      "n_matched": 77,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 77,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    },
+    "256:2:old_vs_new_skip": {
+      "n_a": 77,
+      "n_b": 77,
+      "n_matched": 77,
+      "n_unmatched_a": 0,
+      "n_unmatched_b": 0,
+      "frac_unmatched": 0.0,
+      "n_geometry_identical": 77,
+      "frac_geometry_identical": 1.0,
+      "area_ratio_median": 1.0,
+      "area_ratio_p99": 1.0,
+      "max_abs_score_delta": 0.0,
+      "byte_identical_catalog": true
+    }
+  }
+}

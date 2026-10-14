@@ -203,7 +203,7 @@ def model():
 
 
 def _run(scene, model, out_dir, monkeypatch, **kw):
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices())
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices())
     opts = dict(output_dir=out_dir, slice_size=SLICE, save_prenms=False, save_bbox=False,
                 output_format="gpkg")
     opts.update(kw)
@@ -380,7 +380,7 @@ def test_no_shared_temporary_files_between_runs(scene, model, tmp_path, monkeypa
 def test_concurrent_runs_keep_their_own_footprints(tmp_path, monkeypatch):
     """Two scenes with *different* footprints, run at the same time, must each classify their own
     edges. With the shared path, whichever finished second decided for both."""
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices())
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices())
 
     def make_scene(name, valid_cols):
         path = tmp_path / f"{name}.tif"
@@ -407,28 +407,23 @@ def test_concurrent_runs_keep_their_own_footprints(tmp_path, monkeypatch):
     assert near_edge is True and far_from_edge is False
 
 
-def test_png_conversion_is_reused_when_the_source_is_unchanged(scene, model, tmp_path,
-                                                               monkeypatch):
-    """G1-07: tiff_to_png reread and re-encoded the whole raster on every call, so a multiscale
-    run repeated the identical conversion once per arm."""
-    calls = []
-    real = P.raster_convert.tiff_to_png
-
-    def counting(in_raster, out_png=False, **kw):
-        calls.append(in_raster)
-        return real(in_raster, out_png, **kw)
-
-    monkeypatch.setattr(P.raster_convert, "tiff_to_png", counting)
-    _run(scene, model, tmp_path / "a", monkeypatch)
-    _run(scene, model, tmp_path / "b", monkeypatch)
-    assert len(calls) == 1, "the identical conversion ran twice"
-
-    scene.write_bytes(scene.read_bytes())            # same content, new mtime -> still reused
-    _run(scene, model, tmp_path / "c", monkeypatch)
-    assert len(calls) == 1
-
-    with rio.open(scene, "w", driver="GTiff", height=128, width=128, count=1, dtype="uint8",
-                  crs="EPSG:32631", transform=from_origin(0.0, 128.0, 1.0, 1.0)) as dst:
-        dst.write(np.full((1, 128, 128), 100, dtype=np.uint8))   # different content
-    _run(scene, model, tmp_path / "d", monkeypatch)
-    assert len(calls) == 2, "a changed raster must be reconverted"
+def test_no_whole_raster_png_copy_is_made(scene, tmp_path, monkeypatch):
+    """Lever N2 supersedes G1-07. The TIFF used to be re-encoded as a whole-scene PNG beside itself
+    before the first slice was read: a full copy in memory and another on disk, per scene. G1-07
+    stopped that repeating per arm; windowed reads remove it. This runs the real slicer (no stand-in),
+    so it also shows the production path reads the raster itself."""
+    from rastertools_BOULDERING import convert
+    monkeypatch.setattr(convert, "tiff_to_png",
+                        lambda *a, **k: pytest.fail("the whole-raster TIFF->PNG copy came back"))
+    seen = []
+    m = SimpleNamespace(model=lambda images, **kw: seen.extend(images) or [_result([])
+                                                                           for _ in images],
+                        image_size=256, confidence_threshold=0.1, device="cpu",
+                        category_mapping={"0": "boulder"}, model_path=None)
+    before = {p.name for p in scene.parent.iterdir()}
+    P.get_sliced_prediction(scene, m, output_dir=tmp_path / "out", slice_size=SLICE,
+                            save_prenms=False, save_bbox=False, output_format="gpkg")
+    assert {p.name for p in scene.parent.iterdir()} - before <= {"out"}, \
+        "nothing may be written beside the raster"
+    assert len(seen) == 9                            # a 3 x 3 grid of 64-px slices over 128 px
+    assert all(img.shape == (SLICE, SLICE, 3) and (img == 200).all() for img in seen)

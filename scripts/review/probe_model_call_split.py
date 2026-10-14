@@ -52,15 +52,13 @@ def main():
     args = ap.parse_args()
 
     import torch
-    from sahi.slicing import slice_image
     from ultralytics import YOLO
 
     from YOLOv8BeyondEarth import presets
-    from YOLOv8BeyondEarth.predict import _ensure_png, _to_bgr
+    from YOLOv8BeyondEarth.predict import _WindowedSlices, _to_bgr
 
     max_det = args.max_det if args.max_det is not None else presets.GOAL1_PRODUCTION["max_det"]
     raster = Path(args.raster)
-    png = _ensure_png(raster, presets.file_identity(raster))
     model = YOLO(args.weights, task="segment")
 
     record = {"raster": raster.name, "inference_size": args.inference_size, "conf": args.conf,
@@ -70,9 +68,10 @@ def main():
               "arms": {}}
 
     for ss in args.slice_sizes:
-        sl = slice_image(image=png.as_posix(), slice_height=ss, slice_width=ss,
-                         overlap_height_ratio=0.2, overlap_width_ratio=0.2, out_ext=".png")
-        images = list(sl.images)
+        # the production slice source (lever N2): same grid and pixels as the old PNG + sahi path
+        sl = _WindowedSlices(raster, ss, 0.2, 0.2)
+        images = [sl.images[i] for i in range(len(sl))]
+        sl.close()
         batches = [images[i:i + args.batch_size]
                    for i in range(0, len(images), args.batch_size)]
 

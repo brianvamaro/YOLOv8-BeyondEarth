@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,26 @@ from . import presets
 
 #: Terminal and non-terminal stage states. Only COMPLETE means "do not recompute".
 COMPLETE, FAILED, INCOMPLETE, STALE, MISSING = "complete", "failed", "incomplete", "stale", "missing"
+
+
+def peak_rss_bytes():
+    """This process's peak resident memory so far, in bytes, or ``None`` if it cannot be read.
+
+    Linux reports ``ru_maxrss`` in KiB (macOS in bytes); Windows has no ``resource`` module, so its
+    peak working set comes from psutil. One subprocess per arm (G3-09) makes this the arm's own peak,
+    which is the number the 0.25 m/px RAM question (lever N2) needs from every scene, not a pilot.
+    """
+    try:
+        import resource
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return peak if sys.platform == "darwin" else peak * 1024
+    except ImportError:
+        pass
+    try:
+        import psutil
+        return int(getattr(psutil.Process().memory_info(), "peak_wset", 0)) or None
+    except Exception:
+        return None
 
 
 def file_digest(path, chunk=1 << 20):

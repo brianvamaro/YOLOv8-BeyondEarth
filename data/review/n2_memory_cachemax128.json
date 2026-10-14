@@ -1,0 +1,48 @@
+{
+  "raster": "C:/Users/brian/AppData/Local/Temp/claude/c--Users-brian-Documents-PhD-BoulderNet/fe143dde-5375-415f-8953-7eaa64d35d5d/scratchpad/n2mem/band.tif",
+  "pixels": 512052320,
+  "steps": {
+    "baseline": {
+      "step": "baseline",
+      "peak_bytes": 600707072,
+      "seconds": 0.0,
+      "above_baseline_bytes": 0,
+      "bytes_per_pixel": 0.0
+    },
+    "old_png": {
+      "step": "old_png",
+      "peak_bytes": 1258557440,
+      "seconds": 14.2,
+      "above_baseline_bytes": 657850368,
+      "bytes_per_pixel": 1.285
+    },
+    "old_slices": {
+      "step": "old_slices",
+      "peak_bytes": 5732941824,
+      "seconds": 5.8,
+      "above_baseline_bytes": 5132234752,
+      "bytes_per_pixel": 10.023
+    },
+    "old_footprint": {
+      "step": "old_footprint",
+      "peak_bytes": 5733261312,
+      "seconds": 12.6,
+      "above_baseline_bytes": 5132554240,
+      "bytes_per_pixel": 10.023
+    },
+    "new_slices": {
+      "step": "new_slices",
+      "peak_bytes": 750628864,
+      "seconds": 8.3,
+      "above_baseline_bytes": 149921792,
+      "bytes_per_pixel": 0.293
+    },
+    "new_footprint": {
+      "step": "new_footprint",
+      "peak_bytes": 816685056,
+      "seconds": 2.8,
+      "above_baseline_bytes": 215977984,
+      "bytes_per_pixel": 0.422
+    }
+  }
+}

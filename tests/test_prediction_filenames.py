@@ -79,7 +79,7 @@ def test_helper_names_every_layer_that_is_actually_written(scene, model, tmp_pat
     intermediate mask layer alone survived, because nothing looked at `bbox`/`mask`. Downstream
     code reads those too, so all three are pinned and the comparison is set equality.
     """
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices())
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices())
     out = tmp_path / "out"
     P.get_sliced_prediction(
         scene, model, output_dir=out, slice_size=SLICE, confidence_threshold=conf,

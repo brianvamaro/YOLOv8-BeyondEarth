@@ -92,7 +92,7 @@ def scene(tmp_path):
 
 def _centroid_of_single_detection(scene, mask, monkeypatch, tmp_path, **kw):
     image = np.full((SLICE, SLICE, 3), 200, np.uint8)
-    monkeypatch.setattr(P, "slice_image", lambda **_: _Slices(image))
+    monkeypatch.setattr(P, "_slice_raster", lambda **_: _Slices(image))
     model = SimpleNamespace(model=lambda images, **k: [_one_result(mask)], image_size=256,
                             confidence_threshold=0.1, device="cpu",
                             category_mapping={"0": "boulder"}, model_path=None)

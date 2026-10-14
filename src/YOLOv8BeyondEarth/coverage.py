@@ -89,6 +89,46 @@ def valid_footprint(raster, nodata=DEFAULT_NODATA, decimate=8, min_area_px=None)
     return gdf
 
 
+def valid_convex_hull(raster, nodata=DEFAULT_NODATA, block_rows=1024):
+    """Convex hull of the valid pixels, streamed -- the polygon ``rastertools.raster.true_footprint`` returns.
+
+    The prediction path needs this hull for its footprint-edge buffer (and *only* for that; it is not
+    an observed area, see the module docstring). ``true_footprint`` read the whole raster, built an
+    **int64** copy of the validity mask (``mask_array + 0``) and polygonised it at full resolution,
+    only to keep the hull: ~10 bytes per scene pixel at its peak, ~70 GB at the 7 Gpx a 0.25 m/px
+    HiRISE scene can reach (lever N2).
+
+    The hull of a union of pixel squares is the hull of their corners, and in each row only the outer
+    corners of the first and last valid pixel can be hull vertices. So this reads row blocks and keeps
+    those four corners per row: memory is one block, not the scene. Corner coordinates go through the
+    same affine as GDAL's polygoniser applies (``x = c + col*a``, exact for a north-up grid), and
+    GEOS's convex hull depends only on the hull's vertex set, so the polygon is the same one --
+    ``tests/test_windowed_slices.py`` compares it with ``true_footprint`` byte for byte. An all-fill
+    raster returns an empty polygon.
+    """
+    from shapely.geometry import MultiPoint, Polygon
+
+    cols, rows = [], []
+    with rasterio.open(raster) as src:
+        transform, width = src.transform, src.width
+        for r0 in range(0, src.height, block_rows):
+            h = min(block_rows, src.height - r0)
+            valid = src.read(1, window=windows.Window(0, r0, width, h)) != nodata
+            has = np.flatnonzero(valid.any(axis=1))
+            if not has.size:
+                continue
+            first = valid[has].argmax(axis=1)
+            last = width - 1 - valid[has, ::-1].argmax(axis=1)
+            r = has + r0
+            cols.append(np.concatenate([first, first, last + 1, last + 1]))
+            rows.append(np.concatenate([r, r + 1, r, r + 1]))
+    if not cols:
+        return Polygon()
+    x, y = transform * (np.concatenate(cols).astype(np.float64),
+                        np.concatenate(rows).astype(np.float64))
+    return MultiPoint(np.column_stack([x, y])).convex_hull
+
+
 def coverage_report(raster, nodata=DEFAULT_NODATA, decimate=1):
     """Everything a density denominator needs, plus the provenance to defend it.
 

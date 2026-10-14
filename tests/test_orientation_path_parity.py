@@ -188,7 +188,7 @@ def test_helper_and_public_wrapper_agree_detection_by_detection(tmp_path):
             return 4
 
     import unittest.mock as mock
-    with mock.patch.object(P, "slice_image", lambda **_: _Slices()):
+    with mock.patch.object(P, "_slice_raster", lambda **_: _Slices()):
         model = SimpleNamespace(model=_FakeSeg(tiles, imgsz), image_size=imgsz,
                                 confidence_threshold=0.1, device="cpu",
                                 category_mapping={"0": "boulder"}, model_path=None)
