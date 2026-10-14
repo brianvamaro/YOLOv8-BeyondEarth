@@ -130,8 +130,11 @@ def run_one_arm(args):
         slice_size=slice_size, sr_factor=sr_factor, inference_size=args.inference_size,
         save_bbox=False, save_prenms=False, save_nms=True, output_format="gpkg",
         on_conflict=args.on_conflict, on_max_det=args.on_max_det, **cfg)
+    from YOLOv8BeyondEarth.runstate import peak_rss_bytes
     print(json.dumps({"arm": args.arm, "n": int(len(gdf_nms if gdf_nms is not None else gdf)),
-                      "truncation": dict(gdf.attrs.get("truncation", {}))}))
+                      "truncation": dict(gdf.attrs.get("truncation", {})),
+                      "slices": gdf.attrs.get("slices"), "peak_rss_bytes": peak_rss_bytes()}),
+          flush=True)
 
 
 def require_production_arm_set(arms):
@@ -327,8 +330,20 @@ def orchestrate(args):
                "--inference-size", str(args.inference_size), "--device", args.device,
                "--max-det", str(effective_max_det(args)),
                "--on-max-det", args.on_max_det, "--on-conflict", "overwrite"]
-        with ledger.stage(f"arm:{arm}", key, artifacts=[layer], command=cmd):
-            subprocess.run(cmd, check=True)
+        with ledger.stage(f"arm:{arm}", key, artifacts=[layer], command=cmd) as st:
+            # stdout is the child's one JSON summary line (progress and logs go to stderr), so it
+            # can be captured into the ledger -- peak RSS per arm per scene is the RAM measurement
+            # lever N2 asked for -- and still echoed for the job log.
+            res = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, text=True)
+            sys.stdout.write(res.stdout)
+            summary = [ln for ln in res.stdout.splitlines() if ln.startswith("{")]
+            if summary:
+                try:
+                    child = json.loads(summary[-1])
+                    st.result.update({k: child.get(k) for k in
+                                      ("n", "truncation", "slices", "peak_rss_bytes")})
+                except json.JSONDecodeError:
+                    pass
 
     # Depend on each arm's key *and* the artifact digest its ledger entry recorded, not on the key
     # alone: the key is a hash of the configuration, so an arm re-executed with unchanged config

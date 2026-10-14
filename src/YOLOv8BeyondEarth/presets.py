@@ -34,8 +34,12 @@ import numpy as np
 #:      previously ultralytics' silent 300, which was **measured truncating real slices**.
 PRESET_VERSION = 2
 
-#: Files larger than this are fingerprinted by (size, mtime) rather than hashed in full.
-MAX_HASH_BYTES = 4 * 1024 ** 3
+#: Files larger than this are fingerprinted by (size, mtime) rather than hashed in full. Raised from
+#: 4 GiB (2026-10-14): a 0.25 m/px HiRISE scene reaches 7 Gpx, and an unhashed raster gets
+#: ``sha256: None``, which makes ``--fuse-only``'s "same raster on every arm" check compare None with
+#: None and the campaign's "ran on the prepared raster" check fall back to size and name. Hashing runs
+#: at ~1 GB/s, seconds against an arm's hours.
+MAX_HASH_BYTES = 64 * 1024 ** 3
 
 
 #: Single-scale sliced inference as Goal 1 actually benchmarked it. This is the configuration
@@ -218,25 +222,59 @@ def source_digest(root=None):
     return h.hexdigest()
 
 
-def code_identity():
-    """Git SHA and dirty state of the package, plus the interpreter and key package versions."""
-    repo = Path(__file__).resolve().parents[2]
+#: Written beside ``src/`` by ``scripts/pack_for_cluster.py`` when a tarball is built, so a deployment
+#: that is not a git checkout can still name the commit it came from.
+CODE_STAMP = "CODE_STAMP.json"
+
+
+def code_identity(repo=None):
+    """Git SHA and dirty state of the package, plus the interpreter and key package versions.
+
+    Where there is no usable checkout (the Sherlock tree is an extracted tarball) the commit comes
+    from the pack-time :data:`CODE_STAMP`, and is trusted only if the package's content digest still
+    equals the one stamped: a stamp beside edited files names a commit those files are not.
+    ``repo`` defaults to the checkout this package sits in.
+    """
+    repo = Path(repo) if repo else Path(__file__).resolve().parents[2]
     info = {"python": sys.version.split()[0], "platform": platform.platform(),
             "host": socket.gethostname()}
     try:
         info["source_sha256"] = source_digest()
     except Exception as exc:                                    # unreadable tree: record, do not fail
         info["source_error"] = str(exc)
+    if (repo / "scripts").is_dir():
+        # The package digest is what keys a stage; the drivers in scripts/ (the campaign runner among
+        # them) are not in it, so their identity is at least recorded beside the result.
+        try:
+            info["scripts_sha256"] = source_digest(repo / "scripts")
+        except Exception as exc:
+            info["scripts_error"] = str(exc)
     try:
+        # `cwd=`, not `git -C`: el7's git 1.8.3 predates `-C` (exit 129), which is why every Sherlock
+        # manifest recorded `git_sha: None` even from a real checkout.
         info["git_sha"] = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            ["git", "rev-parse", "HEAD"], cwd=repo,
             capture_output=True, text=True, timeout=10, check=True).stdout.strip()
         info["git_dirty"] = bool(subprocess.run(
-            ["git", "-C", str(repo), "status", "--porcelain"],
+            ["git", "status", "--porcelain"], cwd=repo,
             capture_output=True, text=True, timeout=10, check=True).stdout.strip())
     except Exception as exc:                                    # not a checkout, no git, ...
         info["git_sha"] = None
         info["git_error"] = str(exc)
+        stamp_path = repo / CODE_STAMP
+        if stamp_path.exists():
+            try:
+                stamp = json.loads(stamp_path.read_text())
+                info["stamp"] = stamp
+                info["stamp_matches_source"] = (
+                    stamp.get("source_sha256") is not None
+                    and stamp.get("source_sha256") == info.get("source_sha256"))
+                if info["stamp_matches_source"]:
+                    info["git_sha"] = stamp.get("git_sha")
+                    info["git_dirty"] = stamp.get("git_dirty")
+                    info["git_sha_from"] = CODE_STAMP
+            except (OSError, json.JSONDecodeError) as stamp_exc:
+                info["stamp_error"] = str(stamp_exc)
     for pkg in ("ultralytics", "sahi", "torch", "geopandas", "shapely", "rasterio", "opencv-python"):
         try:
             from importlib.metadata import version

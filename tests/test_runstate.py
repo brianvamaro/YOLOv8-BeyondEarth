@@ -391,3 +391,41 @@ def test_source_digest_of_the_real_package_is_recorded_in_code_identity():
     info = P.code_identity()
     assert len(info.get("source_sha256", "")) == 64
     assert info["source_sha256"] == P.source_digest()
+
+
+# --- a deployment that is not a checkout (the Sherlock tarball) ------------------------------------
+
+def test_git_is_asked_with_cwd_not_dash_C(monkeypatch):
+    """el7's git 1.8.3 predates `git -C` (exit 129), so every Sherlock manifest said git_sha: None."""
+    from YOLOv8BeyondEarth import presets as PR
+    seen = []
+    real = PR.subprocess.run
+
+    def spy(cmd, *a, **k):
+        seen.append((cmd, k.get("cwd")))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(PR.subprocess, "run", spy)
+    PR.code_identity()
+    git_calls = [(c, cwd) for c, cwd in seen if c and c[0] == "git"]
+    assert git_calls and all("-C" not in c and cwd is not None for c, cwd in git_calls)
+
+
+def _stamp(tmp_path, source_sha256):
+    (tmp_path / "CODE_STAMP.json").write_text(json.dumps(
+        {"git_sha": "f" * 40, "git_dirty": False, "source_sha256": source_sha256}))
+    return tmp_path
+
+
+def test_a_tarball_names_its_commit_through_the_pack_time_stamp(tmp_path):
+    from YOLOv8BeyondEarth import presets as PR
+    info = PR.code_identity(repo=_stamp(tmp_path, PR.source_digest()))   # tmp_path is no checkout
+    assert info["git_sha"] == "f" * 40 and info["git_sha_from"] == "CODE_STAMP.json"
+    assert info["stamp_matches_source"] is True
+
+
+def test_a_stamp_beside_edited_files_is_recorded_but_not_believed(tmp_path):
+    from YOLOv8BeyondEarth import presets as PR
+    info = PR.code_identity(repo=_stamp(tmp_path, "0" * 64))
+    assert info["git_sha"] is None and info["stamp_matches_source"] is False
+    assert info["stamp"]["git_sha"] == "f" * 40, "kept for the record, not promoted"
