@@ -82,9 +82,22 @@ def outputs(crop):
             crop.parent / "config3" / f"{stem}-predictions-fused-512-256-sam2-nms.gpkg")
 
 
+def output_1g(crop):
+    """Configuration "1g", the 256 arm re-masked by SAM2 (the configuration study's C1G)."""
+    return crop.parent / "config1g" / f"{crop.stem}-predictions-256-sam2-nms.gpkg"
+
+
+def config1_layer(crop):
+    """Configuration 1's catalog for this crop: the one ``-nms.gpkg`` beside it (non-recursive)."""
+    hits = sorted(crop.parent.glob(f"{crop.stem}-predictions-*-nms.gpkg"))
+    if len(hits) != 1:
+        raise FileNotFoundError(f"expected one configuration-1 layer for {crop.stem}, found {hits}")
+    return hits[0]
+
+
 def done(crop, configs):
     fused_path, sam_path = outputs(crop)
-    paths = {2: fused_path, 3: sam_path}
+    paths = {"2": fused_path, "3": sam_path, "1g": output_1g(crop)}
     return all(presets.manifest_path(paths[c]).exists() for c in configs)
 
 
@@ -119,8 +132,53 @@ def render_tile(crop, configs, device):
     from YOLOv8BeyondEarth.polygon import outlines_to_shp
 
     t0 = time.monotonic()
-    fused_path, sam_path = outputs(crop)
     rec = {"tile": crop.stem, "obs": crop.parent.name}
+    if "2" in configs or "3" in configs:
+        _render_ladder(crop, configs, device, rec)
+    if "1g" in configs and not presets.manifest_path(output_1g(crop)).exists():
+        _render_1g(crop, rec)
+    rec["seconds"] = round(time.monotonic() - t0, 1)
+    print("RESULT " + json.dumps(rec, default=str), flush=True)
+
+
+def _render_1g(crop, rec):
+    """Configuration "1g": configuration 1's 256 catalog re-masked by SAM2, exactly as configuration 3
+    re-masks configuration 2 (``remask_windows``, window 256, growth 1.0), so the two differ only by
+    the 512 arm. YOLO is not run: the input is the catalog configuration 1 already rendered."""
+    import geopandas as gpd
+    from ultralytics import SAM
+    from YOLOv8BeyondEarth import remask
+    from YOLOv8BeyondEarth.polygon import outlines_to_shp
+
+    base = config1_layer(crop)
+    catalog = gpd.read_file(base)
+    out_path = output_1g(crop)
+    t0 = time.monotonic()
+    out = remask.remask_windows(crop, catalog, SAM(str(SAM_WEIGHTS)), window_size=256,
+                                max_window_growth=1.0, progress=False)
+    sam_seconds = round(time.monotonic() - t0, 1)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    outlines_to_shp(out, out_path)
+    presets.write_manifest(
+        out_path,
+        config={"configuration": "1g", "base": base.name, "remask": "remask_windows",
+                "window_size": 256, "max_window_growth": 1.0,
+                "note": "5a entry gate 3 open: see logit_px_per_native_px per row"},
+        inputs={"crop": crop, "base": base, "sam_weights": SAM_WEIGHTS},
+        outputs={"n": int(len(out))}, sam_seconds=sam_seconds,
+        remask={k: v for k, v in out.attrs.items() if isinstance(v, (int, float, str, type(None)))})
+    rec.update(n_config1=int(len(catalog)), n_config1g=int(len(out)), n_sam_1g=out.attrs.get("n_sam"),
+               sam_seconds_1g=sam_seconds,
+               min_ratio_1g=out.attrs.get("min_logit_px_per_native_px"))
+
+
+def _render_ladder(crop, configs, device, rec):
+    """Configurations 2 and 3 for one crop (2 is built whenever 3 needs it)."""
+    import geopandas as gpd
+    from YOLOv8BeyondEarth.arm_ratification import arm_key, fuse_combo
+    from YOLOv8BeyondEarth.polygon import outlines_to_shp
+
+    fused_path, sam_path = outputs(crop)
     if presets.manifest_path(fused_path).exists():
         fused = gpd.read_file(fused_path)
         rec["truncated_arms"] = json.loads(
@@ -157,7 +215,7 @@ def render_tile(crop, configs, device):
         fused = gpd.read_file(fused_path) if fused_path.exists() else fused   # what config 3 reads
     rec["n_config2"] = int(len(fused))
 
-    if 3 in configs and not presets.manifest_path(sam_path).exists():
+    if "3" in configs and not presets.manifest_path(sam_path).exists():
         from ultralytics import SAM
         from YOLOv8BeyondEarth import remask
         out = remask.remask_windows(crop, fused, SAM(str(SAM_WEIGHTS)), window_size=256,
@@ -177,15 +235,14 @@ def render_tile(crop, configs, device):
         rec.update(n_config3=int(len(out)), n_sam=out.attrs.get("n_sam"),
                    below_unit_ratio=out.attrs.get("n_prompted_below_unit_logit_ratio"),
                    min_ratio=out.attrs.get("min_logit_px_per_native_px"))
-    rec["seconds"] = round(time.monotonic() - t0, 1)
-    print("RESULT " + json.dumps(rec, default=str), flush=True)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--obs", nargs="*", help="only these observations")
     ap.add_argument("--limit", type=int, help="at most this many tiles (smoke test)")
-    ap.add_argument("--configs", nargs="+", type=int, default=[2, 3], choices=[2, 3])
+    ap.add_argument("--configs", nargs="+", default=["2", "3"], choices=["2", "3", "1g"],
+                    help="'1g' = configuration 1's 256 catalog re-masked by SAM2 (no YOLO run)")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--tile", help=argparse.SUPPRESS)            # internal: the child
     args = ap.parse_args(argv)
@@ -206,8 +263,10 @@ def main(argv=None):
         if res.returncode == 0 and line:
             rec = json.loads(line[-1][len("RESULT "):])
             flag = f" TRUNCATED {rec['truncated_arms']}" if rec.get("truncated_arms") else ""
-            print(f"  [ok]   {crop.stem}  c2={rec['n_config2']}  c3={rec.get('n_config3', '-')}  "
-                  f"ratio>={rec.get('min_ratio', '-')}  {rec['seconds']}s{flag}", flush=True)
+            print(f"  [ok]   {crop.stem}  c2={rec.get('n_config2', '-')}  "
+                  f"c3={rec.get('n_config3', '-')}  c1g={rec.get('n_config1g', '-')}  "
+                  f"ratio>={rec.get('min_ratio', rec.get('min_ratio_1g', '-'))}  "
+                  f"{rec['seconds']}s{flag}", flush=True)
         else:
             tail = (res.stderr or "").strip().splitlines()
             oom = "out of memory" in (res.stderr or "").lower()
@@ -221,7 +280,8 @@ def main(argv=None):
     tiles = {}
     if path.exists():
         tiles = {t["tile"]: t for t in json.loads(path.read_text()).get("tiles", [])}
-    tiles.update({t["tile"]: t for t in summary})
+    for t in summary:            # merge per tile: a "1g" run must not erase the tile's 2/3 record
+        tiles[t["tile"]] = {**tiles.get(t["tile"], {}), **t}
     path.write_text(json.dumps(
         {"written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
          "tiles": [tiles[k] for k in sorted(tiles)], "code": presets.code_identity()},
