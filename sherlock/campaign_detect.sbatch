@@ -73,5 +73,6 @@ if [ -n "${DEST:-}" ]; then
     rsync -a "$OUT/$OBS/" "$DEST/$OBS/"
     (cd "$DEST/$OBS" && sha256sum -c --quiet SHA256SUMS) && echo "copied + verified -> $DEST/$OBS"
 else
-    echo "DEST unset: $OBS's catalogs are only on \$SCRATCH, which is purged on inactivity"
+    echo "DEST unset: pull $OUT/$OBS/ through the DTN now and run 'sha256sum -c SHA256SUMS' on arrival"
+    echo "  (\$SCRATCH purges on inactivity -- see sherlock/CAMPAIGN.md, 'Getting the catalogs off the cluster')"
 fi
