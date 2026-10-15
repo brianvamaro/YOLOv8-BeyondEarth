@@ -30,6 +30,12 @@ and in the run summary as a lower bound rather than passed off as a catalog. Res
 GPU; never alongside another GPU job. On a laptop, check it is on AC first: on battery it parks at
 ~8.5 W with no error.
 
+**Each tile renders in its own process.** A CUDA out-of-memory poisons the context: after it, even
+``torch.cuda.empty_cache()`` raises. So a tile that does not fit this card is recorded with its
+cause and the rest go on, rather than one dense tile ending the run. That happened 2026-10-14:
+ESP_017355_2260's 512 slices reach ~1,000 detections, which at ~5 MiB of transient mask each does
+not fit 8 GiB even at batch 1.
+
     conda run -n bouldernet --no-capture-output python -u scripts/render_rom_configs.py [--obs ESP_028537_2270] [--limit 1]
 """
 from __future__ import annotations
@@ -37,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -53,19 +60,11 @@ WEIGHTS = REPO / "data" / "weights" / "yolov8-m-boulder-detection-tmp.pt"
 SAM_WEIGHTS = REPO / "data" / "weights" / "sam2.1_b.pt"
 ARMS = ((512, 1), (256, 1))
 MAX_DET = 1100
-#: Masks are materialised at imgsz, ~5 MiB transient per detection, so a batch of dense 512 slices
-#: (~1,000 detections each on ESP_017355_2260) is ~5 GB *per slice*: batch 2 hard-OOMed the 8 GiB
-#: laptop card on that scene's second tile (2026-10-14). Batch size is recorded in every arm manifest;
-#: it moves scores at the ~1e-4 level (measured the same day), far below anything notebook 35 reads.
+#: Masks are materialised at imgsz, ~5 MiB transient per detection, so a dense 512 slice (~1,000
+#: detections on ESP_017355_2260) needs ~5 GB on its own. Batch size is recorded in every arm
+#: manifest; it moves scores at the ~1e-4 level (measured 2026-10-14), far below anything notebook
+#: 35 reads.
 BATCH = {512: 1, 256: 8}
-
-
-class ArmOutOfMemory(RuntimeError):
-    """An arm that does not fit this GPU even at batch 1 -- record the tile, do not kill the run."""
-
-
-def _is_cuda_oom(exc):
-    return "out of memory" in str(exc).lower()
 
 
 def crops(obs_filter=None):
@@ -76,6 +75,19 @@ def crops(obs_filter=None):
             yield obs_dir.name, tif
 
 
+def outputs(crop):
+    """``(config 2 fused layer, config 3 re-masked layer)`` for one crop."""
+    stem = crop.stem
+    return (crop.parent / "config2" / f"{stem}-predictions-fused-512-256-nms.gpkg",
+            crop.parent / "config3" / f"{stem}-predictions-fused-512-256-sam2-nms.gpkg")
+
+
+def done(crop, configs):
+    fused_path, sam_path = outputs(crop)
+    paths = {2: fused_path, 3: sam_path}
+    return all(presets.manifest_path(paths[c]).exists() for c in configs)
+
+
 def run_arm(model, crop, out_dir, slice_size):
     """One arm at the production preset. Returns ``(layer read back from disk, truncation)``.
 
@@ -84,25 +96,13 @@ def run_arm(model, crop, out_dir, slice_size):
     """
     import geopandas as gpd
     from YOLOv8BeyondEarth.predict import get_sliced_prediction, prediction_filenames
-    import torch
     cfg = {k: v for k, v in presets.GOAL1_PRODUCTION.items()
            if k not in ("slice_size", "sr_factor", "save_bbox", "save_prenms", "output_format",
                         "max_det", "batch_size")}
-    for batch in dict.fromkeys((BATCH[slice_size], 1)):         # once more at batch 1 on OOM
-        try:
-            _, nms = get_sliced_prediction(
-                crop, model, output_dir=out_dir, slice_size=slice_size, sr_factor=1,
-                max_det=MAX_DET, batch_size=batch, save_bbox=False, save_prenms=False,
-                save_nms=True, output_format="gpkg", on_conflict="overwrite", on_max_det="warn",
-                **cfg)
-            break
-        except Exception as exc:                                  # torch raises two OOM types
-            if not _is_cuda_oom(exc):
-                raise
-            torch.cuda.empty_cache()
-            print(f"    OOM: {crop.stem} arm {slice_size} at batch {batch}", flush=True)
-    else:
-        raise ArmOutOfMemory(f"arm {slice_size} does not fit this GPU even at batch 1")
+    _, nms = get_sliced_prediction(
+        crop, model, output_dir=out_dir, slice_size=slice_size, sr_factor=1, max_det=MAX_DET,
+        batch_size=BATCH[slice_size], save_bbox=False, save_prenms=False, save_nms=True,
+        output_format="gpkg", on_conflict="overwrite", on_max_det="warn", **cfg)
     layer = Path(out_dir) / prediction_filenames(
         crop.stem, confidence_threshold=cfg["confidence_threshold"], slice_size=slice_size,
         inference_size=cfg["inference_size"], overlap_height_ratio=cfg["overlap_height_ratio"],
@@ -112,106 +112,120 @@ def run_arm(model, crop, out_dir, slice_size):
     return gdf, dict(nms.attrs.get("truncation", {}))
 
 
+def render_tile(crop, configs, device):
+    """The child: render one crop's missing configurations, print a ``RESULT`` line, exit."""
+    import geopandas as gpd
+    from YOLOv8BeyondEarth.arm_ratification import arm_key, fuse_combo
+    from YOLOv8BeyondEarth.polygon import outlines_to_shp
+
+    t0 = time.monotonic()
+    fused_path, sam_path = outputs(crop)
+    rec = {"tile": crop.stem, "obs": crop.parent.name}
+    if presets.manifest_path(fused_path).exists():
+        fused = gpd.read_file(fused_path)
+        rec["truncated_arms"] = json.loads(
+            presets.manifest_path(fused_path).read_text()).get("truncated_arms", [])
+    else:
+        from sahi import AutoDetectionModel
+        model = AutoDetectionModel.from_pretrained(
+            model_type="ultralytics", model_path=str(WEIGHTS), device=device,
+            image_size=presets.GOAL1_PRODUCTION["inference_size"],
+            confidence_threshold=presets.GOAL1_PRODUCTION["confidence_threshold"])
+        per_arm, truncated = {}, []
+        for slice_size, sr in ARMS:
+            layer, trunc = run_arm(model, crop, fused_path.parent / "arms", slice_size)
+            if trunc:
+                truncated.append({"arm": slice_size, "truncation": trunc})
+            per_arm[arm_key(slice_size, sr)] = layer
+        nonempty = [k for k, g in per_arm.items() if len(g)]
+        if len(nonempty) >= 2:
+            fused, _ = fuse_combo(per_arm, ARMS, native_res=abs(_res(crop)))
+        else:                                   # aaf2d73: fewer than two arms found anything
+            fused = per_arm[nonempty[0]] if nonempty else per_arm[arm_key(*ARMS[1])]
+        fused_path.parent.mkdir(parents=True, exist_ok=True)
+        outlines_to_shp(fused, fused_path)
+        cfg = presets.GOAL3_PRODUCTION
+        presets.write_manifest(
+            fused_path,
+            config={"configuration": 2, "arms": [list(a) for a in ARMS], "max_det": MAX_DET,
+                    "batch_size": BATCH, "fusion": "arm_ratification.fuse_combo",
+                    **{k: cfg[k] for k in ("rule", "bands", "engulf_thr", "metric",
+                                           "cross_arm_only")}},
+            inputs={"crop": crop, "weights": WEIGHTS},
+            outputs={"n_fused": int(len(fused))}, truncated_arms=truncated)
+        rec["truncated_arms"] = truncated
+        fused = gpd.read_file(fused_path) if fused_path.exists() else fused   # what config 3 reads
+    rec["n_config2"] = int(len(fused))
+
+    if 3 in configs and not presets.manifest_path(sam_path).exists():
+        from ultralytics import SAM
+        from YOLOv8BeyondEarth import remask
+        out = remask.remask_windows(crop, fused, SAM(str(SAM_WEIGHTS)), window_size=256,
+                                    max_window_growth=1.0, progress=False)
+        sam_path.parent.mkdir(parents=True, exist_ok=True)
+        outlines_to_shp(out, sam_path)
+        presets.write_manifest(
+            sam_path,
+            config={"configuration": 3, "base": fused_path.name, "remask": "remask_windows",
+                    "window_size": 256, "max_window_growth": 1.0,
+                    "note": "5a entry gate 3 open: see logit_px_per_native_px per row"},
+            inputs={"crop": crop, "fused": fused_path, "sam_weights": SAM_WEIGHTS},
+            outputs={"n": int(len(out))},
+            remask={k: v for k, v in out.attrs.items()
+                    if isinstance(v, (int, float, str, type(None)))},
+            truncated_arms=rec["truncated_arms"])
+        rec.update(n_config3=int(len(out)), n_sam=out.attrs.get("n_sam"),
+                   below_unit_ratio=out.attrs.get("n_prompted_below_unit_logit_ratio"),
+                   min_ratio=out.attrs.get("min_logit_px_per_native_px"))
+    rec["seconds"] = round(time.monotonic() - t0, 1)
+    print("RESULT " + json.dumps(rec, default=str), flush=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--obs", nargs="*", help="only these observations")
     ap.add_argument("--limit", type=int, help="at most this many tiles (smoke test)")
     ap.add_argument("--configs", nargs="+", type=int, default=[2, 3], choices=[2, 3])
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--tile", help=argparse.SUPPRESS)            # internal: the child
     args = ap.parse_args(argv)
+    if args.tile:
+        return render_tile(Path(args.tile), args.configs, args.device)
 
-    import geopandas as gpd
-    from sahi import AutoDetectionModel
-    from YOLOv8BeyondEarth.arm_ratification import arm_key, fuse_combo
-    from YOLOv8BeyondEarth.polygon import outlines_to_shp
-
-    model = AutoDetectionModel.from_pretrained(
-        model_type="ultralytics", model_path=str(WEIGHTS), device=args.device,
-        image_size=presets.GOAL1_PRODUCTION["inference_size"],
-        confidence_threshold=presets.GOAL1_PRODUCTION["confidence_threshold"])
-    sam = None
     summary, t_all = [], time.monotonic()
     todo = list(crops(args.obs))[: args.limit]
     print(f"{len(todo)} tiles, configurations {args.configs}", flush=True)
     for obs, crop in todo:
-        stem = crop.stem
-        c2_dir, c3_dir = crop.parent / "config2", crop.parent / "config3"
-        fused_path = c2_dir / f"{stem}-predictions-fused-512-256-nms.gpkg"
-        sam_path = c3_dir / f"{stem}-predictions-fused-512-256-sam2-nms.gpkg"
-        need2 = 2 in args.configs and not presets.manifest_path(fused_path).exists()
-        need3 = 3 in args.configs and not presets.manifest_path(sam_path).exists()
-        if not (need2 or need3):
-            print(f"  [skip] {stem}", flush=True)
+        if done(crop, args.configs):
+            print(f"  [skip] {crop.stem}", flush=True)
             continue
-        t0 = time.monotonic()
-        rec = {"tile": stem, "obs": obs}
-
-        if presets.manifest_path(fused_path).exists():
-            fused = gpd.read_file(fused_path)
-            rec["truncated_arms"] = json.loads(
-                presets.manifest_path(fused_path).read_text()).get("truncated_arms", [])
+        res = subprocess.run([sys.executable, "-u", __file__, "--tile", str(crop), "--device",
+                              args.device, "--configs", *map(str, args.configs)],
+                             capture_output=True, text=True)
+        line = [x for x in res.stdout.splitlines() if x.startswith("RESULT ")]
+        if res.returncode == 0 and line:
+            rec = json.loads(line[-1][len("RESULT "):])
+            flag = f" TRUNCATED {rec['truncated_arms']}" if rec.get("truncated_arms") else ""
+            print(f"  [ok]   {crop.stem}  c2={rec['n_config2']}  c3={rec.get('n_config3', '-')}  "
+                  f"ratio>={rec.get('min_ratio', '-')}  {rec['seconds']}s{flag}", flush=True)
         else:
-            per_arm, truncated = {}, []
-            try:
-                for slice_size, sr in ARMS:
-                    layer, trunc = run_arm(model, crop, c2_dir / "arms", slice_size)
-                    if trunc:
-                        truncated.append({"arm": slice_size, "truncation": trunc})
-                    per_arm[arm_key(slice_size, sr)] = layer
-            except ArmOutOfMemory as exc:
-                rec["failed"] = f"{exc} -- render this tile on a 24 GiB card (Sherlock)"
-                summary.append(rec)
-                print(f"  [OOM]  {stem}: {exc}", flush=True)
-                continue
-            nonempty = [k for k, g in per_arm.items() if len(g)]
-            if len(nonempty) >= 2:
-                fused, _ = fuse_combo(per_arm, ARMS, native_res=abs(_res(crop)))
-            else:                               # aaf2d73: fewer than two arms found anything
-                fused = per_arm[nonempty[0]] if nonempty else per_arm[arm_key(*ARMS[1])]
-            c2_dir.mkdir(parents=True, exist_ok=True)
-            outlines_to_shp(fused, fused_path)
-            cfg = presets.GOAL3_PRODUCTION
-            presets.write_manifest(
-                fused_path,
-                config={"configuration": 2, "arms": [list(a) for a in ARMS], "max_det": MAX_DET,
-                        "batch_size": BATCH, "fusion": "arm_ratification.fuse_combo",
-                        **{k: cfg[k] for k in ("rule", "bands", "engulf_thr", "metric",
-                                               "cross_arm_only")}},
-                inputs={"crop": crop, "weights": WEIGHTS},
-                outputs={"n_fused": int(len(fused))}, truncated_arms=truncated)
-            rec["truncated_arms"] = truncated
-            fused = gpd.read_file(fused_path) if fused_path.exists() else fused   # what config 3 reads
-        rec["n_config2"] = int(len(fused))
-
-        if need3:
-            from ultralytics import SAM
-            from YOLOv8BeyondEarth import remask
-            if sam is None:
-                sam = SAM(str(SAM_WEIGHTS))
-            out = remask.remask_windows(crop, fused, sam, window_size=256, max_window_growth=1.0,
-                                        progress=False)
-            c3_dir.mkdir(parents=True, exist_ok=True)
-            outlines_to_shp(out, sam_path)
-            presets.write_manifest(
-                sam_path,
-                config={"configuration": 3, "base": fused_path.name, "remask": "remask_windows",
-                        "window_size": 256, "max_window_growth": 1.0,
-                        "note": "5a entry gate 3 open: see logit_px_per_native_px per row"},
-                inputs={"crop": crop, "fused": fused_path, "sam_weights": SAM_WEIGHTS},
-                outputs={"n": int(len(out))},
-                remask={k: v for k, v in out.attrs.items() if isinstance(v, (int, float, str, type(None)))},
-                truncated_arms=rec["truncated_arms"])
-            rec.update(n_config3=int(len(out)), n_sam=out.attrs.get("n_sam"),
-                       below_unit_ratio=out.attrs.get("n_prompted_below_unit_logit_ratio"))
-        rec["seconds"] = round(time.monotonic() - t0, 1)
+            tail = (res.stderr or "").strip().splitlines()
+            oom = "out of memory" in (res.stderr or "").lower()
+            rec = {"tile": crop.stem, "obs": obs,
+                   "failed": ("CUDA out of memory on this card: render on a 24 GiB GPU (Sherlock)"
+                              if oom else (tail[-1] if tail else f"exit {res.returncode}"))}
+            print(f"  [FAIL] {crop.stem}: {rec['failed']}", flush=True)
         summary.append(rec)
-        flag = " TRUNCATED " + str(rec["truncated_arms"]) if rec["truncated_arms"] else ""
-        print(f"  [ok]   {stem}  c2={rec['n_config2']}  c3={rec.get('n_config3', '-')}  "
-              f"sam={rec.get('n_sam', '-')} <1.0={rec.get('below_unit_ratio', '-')}  "
-              f"{rec['seconds']}s{flag}", flush=True)
-    (ROM_DIR / "render_rom_configs_summary.json").write_text(json.dumps(
-        {"written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tiles": summary,
-         "code": presets.code_identity()}, indent=2, default=str))
+    # merge with earlier runs, so a resumed run (which skips finished tiles) does not erase them
+    path = ROM_DIR / "render_rom_configs_summary.json"
+    tiles = {}
+    if path.exists():
+        tiles = {t["tile"]: t for t in json.loads(path.read_text()).get("tiles", [])}
+    tiles.update({t["tile"]: t for t in summary})
+    path.write_text(json.dumps(
+        {"written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+         "tiles": [tiles[k] for k in sorted(tiles)], "code": presets.code_identity()},
+        indent=2, default=str))
     print(f"TOTAL {time.monotonic() - t_all:.1f}s", flush=True)
 
 
