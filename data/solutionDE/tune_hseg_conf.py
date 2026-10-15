@@ -103,6 +103,7 @@ HEADLINE = "ge4px"
 #: than colliding with the batch-8 points — the ladder's manifest guard would otherwise, correctly,
 #: refuse to continue. Low-confidence points need it: max_det=600 at batch 8 OOMs an 8 GiB card.
 BATCH = None
+SHIFT = None                                  # X-07 translation, set by --pred-shift-m
 
 
 def _tag(conf):
@@ -142,6 +143,8 @@ def score_one(kind, conf, human, rom_polys, area_km2, ss=256, sr=1, floor_filter
     for tile, poly in zip(sorted(DE.glob("hirise_rom??.tif")), rom_polys):
         g = gpd.read_file(_catalog(kind, conf, tile.stem, ss, sr))
         g = g.set_crs(human.crs, allow_override=True)
+        if SHIFT:                                   # X-07: into the humans' label frame
+            g = g.set_geometry(g.geometry.translate(*SHIFT))
         parts.append(g[g.geometry.centroid.within(poly)])
     cat = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry",
                            crs=human.crs)
@@ -195,10 +198,15 @@ def main():
     p.add_argument("--filter-check", action="store_true",
                    help="also measure how far `score >= t` on the lowest run diverges from the "
                         "real run at t — the shortcut this script deliberately does not take")
+    p.add_argument("--pred-shift-m", nargs=2, type=float, metavar=("DX", "DY"),
+                   help="X-07 (2026-10-14): translate every ROM prediction into the humans' label "
+                        "frame, e.g. -0.75 0.75; writes hseg_conf_sweep-x07.* beside the originals")
     args = p.parse_args()
     args.remask, args.dir_tag = False, ""       # the sweep owns these
-    global BATCH
+    global BATCH, SHIFT
     BATCH = args.batch_size
+    SHIFT = tuple(args.pred_shift_m) if args.pred_shift_m else None
+    sfx = "-x07" if SHIFT else ""
 
     with rasterio.open(ROOT / "data" / "mars_hirise" / "raster"
                        / "ESP_017355_2260_RED.tif") as src:
@@ -233,7 +241,7 @@ def main():
         for band, m in got.items():
             rows.append(dict(arm="hseg", conf=c, band=band, **m))
     df = pd.DataFrame(rows)
-    df.to_csv(DE / "hseg_conf_sweep.csv", index=False)
+    df.to_csv(DE / f"hseg_conf_sweep{sfx}.csv", index=False)
 
     print("\n=== sweep (headline population: "
           f"{HEADLINE}, equivalent diameter >= {SIZE_FLOORS[HEADLINE]:.0f} native px) ===")
@@ -297,7 +305,7 @@ def main():
                 "n_pred_real": r["n_pred"], "n_pred_filtered": f["n_pred"],
                 "precision_real": r["precision"], "precision_filtered": f["precision"]}
 
-    (DE / "hseg_conf_sweep.json").write_text(json.dumps(answer, indent=2))
+    (DE / f"hseg_conf_sweep{sfx}.json").write_text(json.dumps(answer, indent=2))
     print(f"\nwrote hseg_conf_sweep.csv and hseg_conf_sweep.json to {DE}")
     print("NOTE this reports the curve and both crossings; freezing the number is a maintainer "
           "decision, and whichever is chosen must be stated with the criterion that produced it.")
