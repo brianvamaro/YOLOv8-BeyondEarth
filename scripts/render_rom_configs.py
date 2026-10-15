@@ -53,9 +53,19 @@ WEIGHTS = REPO / "data" / "weights" / "yolov8-m-boulder-detection-tmp.pt"
 SAM_WEIGHTS = REPO / "data" / "weights" / "sam2.1_b.pt"
 ARMS = ((512, 1), (256, 1))
 MAX_DET = 1100
-#: The 512 arm spills an 8 GiB card at batch 8 on dense ground. Batch size is recorded in every arm
-#: manifest; it moves scores at the ~1e-4 level (2026-10-14), far below anything notebook 35 reads.
-BATCH = {512: 2, 256: 8}
+#: Masks are materialised at imgsz, ~5 MiB transient per detection, so a batch of dense 512 slices
+#: (~1,000 detections each on ESP_017355_2260) is ~5 GB *per slice*: batch 2 hard-OOMed the 8 GiB
+#: laptop card on that scene's second tile (2026-10-14). Batch size is recorded in every arm manifest;
+#: it moves scores at the ~1e-4 level (measured the same day), far below anything notebook 35 reads.
+BATCH = {512: 1, 256: 8}
+
+
+class ArmOutOfMemory(RuntimeError):
+    """An arm that does not fit this GPU even at batch 1 -- record the tile, do not kill the run."""
+
+
+def _is_cuda_oom(exc):
+    return "out of memory" in str(exc).lower()
 
 
 def crops(obs_filter=None):
@@ -74,13 +84,25 @@ def run_arm(model, crop, out_dir, slice_size):
     """
     import geopandas as gpd
     from YOLOv8BeyondEarth.predict import get_sliced_prediction, prediction_filenames
+    import torch
     cfg = {k: v for k, v in presets.GOAL1_PRODUCTION.items()
            if k not in ("slice_size", "sr_factor", "save_bbox", "save_prenms", "output_format",
                         "max_det", "batch_size")}
-    _, nms = get_sliced_prediction(
-        crop, model, output_dir=out_dir, slice_size=slice_size, sr_factor=1, max_det=MAX_DET,
-        batch_size=BATCH[slice_size], save_bbox=False, save_prenms=False, save_nms=True,
-        output_format="gpkg", on_conflict="overwrite", on_max_det="warn", **cfg)
+    for batch in dict.fromkeys((BATCH[slice_size], 1)):         # once more at batch 1 on OOM
+        try:
+            _, nms = get_sliced_prediction(
+                crop, model, output_dir=out_dir, slice_size=slice_size, sr_factor=1,
+                max_det=MAX_DET, batch_size=batch, save_bbox=False, save_prenms=False,
+                save_nms=True, output_format="gpkg", on_conflict="overwrite", on_max_det="warn",
+                **cfg)
+            break
+        except Exception as exc:                                  # torch raises two OOM types
+            if not _is_cuda_oom(exc):
+                raise
+            torch.cuda.empty_cache()
+            print(f"    OOM: {crop.stem} arm {slice_size} at batch {batch}", flush=True)
+    else:
+        raise ArmOutOfMemory(f"arm {slice_size} does not fit this GPU even at batch 1")
     layer = Path(out_dir) / prediction_filenames(
         crop.stem, confidence_threshold=cfg["confidence_threshold"], slice_size=slice_size,
         inference_size=cfg["inference_size"], overlap_height_ratio=cfg["overlap_height_ratio"],
@@ -130,11 +152,17 @@ def main(argv=None):
                 presets.manifest_path(fused_path).read_text()).get("truncated_arms", [])
         else:
             per_arm, truncated = {}, []
-            for slice_size, sr in ARMS:
-                layer, trunc = run_arm(model, crop, c2_dir / "arms", slice_size)
-                if trunc:
-                    truncated.append({"arm": slice_size, "truncation": trunc})
-                per_arm[arm_key(slice_size, sr)] = layer
+            try:
+                for slice_size, sr in ARMS:
+                    layer, trunc = run_arm(model, crop, c2_dir / "arms", slice_size)
+                    if trunc:
+                        truncated.append({"arm": slice_size, "truncation": trunc})
+                    per_arm[arm_key(slice_size, sr)] = layer
+            except ArmOutOfMemory as exc:
+                rec["failed"] = f"{exc} -- render this tile on a 24 GiB card (Sherlock)"
+                summary.append(rec)
+                print(f"  [OOM]  {stem}: {exc}", flush=True)
+                continue
             nonempty = [k for k, g in per_arm.items() if len(g)]
             if len(nonempty) >= 2:
                 fused, _ = fuse_combo(per_arm, ARMS, native_res=abs(_res(crop)))
