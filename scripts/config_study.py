@@ -100,12 +100,15 @@ def _spec(base, root, sub):
                            human_shp=base.human_shp, pred_dir=pred_dir)
 
 
-def paired(le, splits, root, sub, floor, cell_m, keep=None):
-    """notebook 35's per-cell frame for one candidate at one floor and cell size."""
+def paired(le, splits, root, sub, floor, cell_m, keep=None, min_diameter_m=None):
+    """notebook 35's per-cell frame for one candidate at one score floor and cell size.
+
+    ``min_diameter_m`` is the label's size floor, applied to both sides as notebook 35 does; it
+    defaults to Stage 4's live value (``STAGE4_MIN_DIAMETER_M``, 1.4105 m)."""
+    size = le.STAGE4_MIN_DIAMETER_M if min_diameter_m is None else min_diameter_m
     with restricted(le, None if floor == FLOORS[0] else floor, keep):
-        return pd.concat([le.paired_cells(_spec(s, root, sub), cell_m, le.STAGE4_MIN_DIAMETER_M,
-                                          splits) for s in le.images().values()],
-                         ignore_index=True)
+        return pd.concat([le.paired_cells(_spec(s, root, sub), cell_m, size, splits)
+                          for s in le.images().values()], ignore_index=True)
 
 
 def tile_set(le, root, sub):
