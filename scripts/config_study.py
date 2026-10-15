@@ -307,8 +307,13 @@ def decide(args):
         table.append({"candidate": cid, "floor": f, **m, "count_ratio": float(count_ratio),
                       "mean_area_ratio": float(m["pooled_ratio"] / count_ratio),
                       "pooled_ratio_by_image": per_image})
-    win = next(r for r in table if r["candidate"] == (primary["best"] if ":" not in rec
-                                                         else rec.split(" ")[0]))
+    # the candidate actually recommended (C3's rule is a C2 rule, not a separate candidate id)
+    rec_cid = rec.split(" ")[0]
+    rec_cid = "C3" if rec_cid.startswith("C3") else rec_cid
+    win = next(r for r in table if r["candidate"] == rec_cid)
+    # ties are not transitive: the C2 rule is chosen against C2's best, so say whether the exact
+    # candidate recommended is itself tied with the overall best
+    lo, hi = primary["ratio_to_best_ci95"][rec_cid]
     compensating = (abs(np.log(win["count_ratio"])) > np.log(1.2) and
                     abs(np.log(win["mean_area_ratio"])) > np.log(1.2) and
                     np.sign(np.log(win["count_ratio"])) != np.sign(np.log(win["mean_area_ratio"])))
@@ -316,12 +321,14 @@ def decide(args):
                    "per-cell area fraction vs Prieur's human ROM mapping, notebook 35's metric",
            "label_error_sha256": sha, "primary": primary, "checks": checks,
            "checks_agree": {k: v["recommend"] == primary["recommend"] for k, v in checks.items()},
-           "recommendation": rec, "compensating_errors_flag": bool(compensating),
+           "recommendation": rec, "recommended_candidate": rec_cid,
+           "recommended_is_tied_with_best": bool(lo <= 1.0 <= hi),
+           "compensating_errors_flag": bool(compensating),
            "held_out_40m_at_primary_floor": table,
            "meta": json.loads((STUDY_DIR / "score_meta.json").read_text())}
     OUT_JSON.write_text(json.dumps(out, indent=1, default=float))
-    print(json.dumps({k: out[k] for k in ("recommendation", "checks_agree",
-                                          "compensating_errors_flag")}, indent=1))
+    print(json.dumps({k: out[k] for k in ("recommendation", "recommended_is_tied_with_best",
+                                          "checks_agree", "compensating_errors_flag")}, indent=1))
     for r in table:
         print(f"  {r['candidate']:24s} floor {r['floor']:.2f}  RMSE {r['rmse']:.4f}  pooled ratio "
               f"{r['pooled_ratio']:.3f}  spearman {r['spearman']:.3f}  ratio-to-best CI "
