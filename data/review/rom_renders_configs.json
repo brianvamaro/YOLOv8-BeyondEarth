@@ -1,0 +1,63 @@
+{
+  "written": "2026-10-14",
+  "script": "scripts/render_rom_configs.py",
+  "tiles_total": 50,
+  "config1_vs_new_256_arm_byte_identical": 48,
+  "config1_vs_new_256_arm_differ": [],
+  "logit_px_per_native_px": {
+    "n_rows": 58243,
+    "min": 0.8126984126984127,
+    "p10": 0.8533333333333334,
+    "median": 0.8767123287671232,
+    "p90": 0.9377289377289377,
+    "max": 1.0491803278688525,
+    "n_at_or_above_1": 409
+  },
+  "per_scene": {
+    "ESP_017355_2260": {
+      "tiles": 20,
+      "c1": 40733,
+      "c2": 37251,
+      "c3": 37251,
+      "c2_tiles": 18,
+      "c3_tiles": 18
+    },
+    "ESP_025650_2165": {
+      "tiles": 10,
+      "c1": 2718,
+      "c2": 4280,
+      "c3": 4280,
+      "c2_tiles": 10,
+      "c3_tiles": 10
+    },
+    "ESP_028537_2270": {
+      "tiles": 10,
+      "c1": 13079,
+      "c2": 14206,
+      "c3": 14206,
+      "c2_tiles": 10,
+      "c3_tiles": 10
+    },
+    "ESP_037018_2170": {
+      "tiles": 10,
+      "c1": 2282,
+      "c2": 2506,
+      "c3": 2506,
+      "c2_tiles": 10,
+      "c3_tiles": 10
+    }
+  },
+  "failed_on_8GiB_card": [
+    {
+      "tile": "ESP_017355_2260_rom01_t1600",
+      "obs": "ESP_017355_2260",
+      "failed": "CUDA out of memory on this card: render on a 24 GiB GPU (Sherlock)"
+    },
+    {
+      "tile": "ESP_017355_2260_rom03_t2147",
+      "obs": "ESP_017355_2260",
+      "failed": "CUDA out of memory on this card: render on a 24 GiB GPU (Sherlock)"
+    }
+  ],
+  "note": "config 2 = {512,256} via arm_ratification.fuse_combo; config 3 = remask_windows(ws=256, max_window_growth=1.0) on config 2; 5a entry gate 3 open -- the ratio above is the realised logit resolution per re-masked row"
+}
