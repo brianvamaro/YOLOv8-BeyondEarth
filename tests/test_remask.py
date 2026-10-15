@@ -461,3 +461,26 @@ def test_growth_cap_can_be_disabled(scene):
                            progress=False)
     assert "oversize_window" not in set(out.remask_note)
     assert max(shape[0] for shape, _ in sam.calls) > 2 * 64   # the old unbounded behaviour
+
+
+# --- entry gate 3: the realised logit resolution, per row (G2-10) -----------------------------------
+
+def test_each_row_records_the_logit_resolution_it_was_re_masked_at(scene):
+    """An interior boulder is re-masked in a 256 px window (the validated 1.0 logit px per native px);
+    one straddling a cell edge grows its window and so gets less. Gate 3 needs that per row, because
+    `mask_src="sam2"` alone does not say which treatment a row received."""
+    pixel_boxes = [(20, 20, 40, 40), (250, 250, 262, 262)]       # interior; straddles 256
+    gdf = _boxes_gdf(scene, pixel_boxes)
+    out = R.remask_windows(scene, gdf, FakeSAM(inset=2), progress=False, pad=4)
+    assert out.remask_window_px.iloc[0] == 256 and out.logit_px_per_native_px.iloc[0] == 1.0
+    assert out.remask_window_px.iloc[1] > 256 and out.logit_px_per_native_px.iloc[1] < 1.0
+    assert out.attrs["n_prompted_below_unit_logit_ratio"] == 1
+    assert out.attrs["min_logit_px_per_native_px"] == out.logit_px_per_native_px.min()
+
+
+def test_a_row_never_prompted_has_no_logit_resolution(scene):
+    pixel_boxes = [(20, 20, 40, 40), (100, 100, 103, 103)]
+    gdf = _boxes_gdf(scene, pixel_boxes)
+    out = R.remask_windows(scene, gdf, FakeSAM(inset=1), progress=False, min_dpx=10)
+    assert out.remask_note.tolist() == ["", "below_floor"]
+    assert np.isnan(out.remask_window_px.iloc[1]) and np.isnan(out.logit_px_per_native_px.iloc[1])

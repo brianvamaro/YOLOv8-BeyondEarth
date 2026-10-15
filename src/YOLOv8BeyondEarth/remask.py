@@ -42,6 +42,10 @@ from YOLOv8BeyondEarth.orientation_validation import (SAM_PROMPT_CONF, largest_b
 SRC_SAM = "sam2"
 SRC_YOLO = "yolo"
 
+#: Side of SAM2's mask-logit grid at the production ``imgsz`` 1024 (``imgsz / 4``), independent of the
+#: prompt window -- review item G2-10. Used to record each row's logit px per native px (gate 3).
+SAM_LOGIT_PX = 256
+
 
 def _pixel_bboxes(bounds_xy, transform):
     """Map-coordinate bounds -> pixel bboxes in the ``add_geometries`` convention.
@@ -217,6 +221,11 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
         # polygons in FULL-RASTER pixel coordinates, so add_geometries reproduces the production
         # georeferencing exactly (same +0.5 pixel-centre convention, same affine).
         polys = np.full(len(fused), None, dtype=object)
+        # Entry gate 3 (G2-10) asks for the realised logit resolution per re-masked row: SAM2's mask
+        # logits are SAM_LOGIT_PX square whatever window it is handed, so a row re-masked in a
+        # W-px window got SAM_LOGIT_PX / W logit px per native px. Validated `sam256` = 1.0, and a
+        # cell grows past window_size whenever a member straddles its edge, so this varies by row.
+        window_px = np.full(len(fused), np.nan)
         n_windows = n_prompted = n_sam = realigned = 0
 
         idx_eligible = np.flatnonzero(eligible)
@@ -230,6 +239,7 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
         for (col_off, row_off, w, h), local_idx in tqdm(groups, disable=not progress,
                                                         desc="remask windows"):
             rows = idx_eligible[local_idx]
+            window_px[rows] = max(w, h)
             image = _read_window_rgb(src, col_off, row_off, w, h)
             boxes = pix[rows].copy()
             boxes[:, [0, 2]] -= col_off
@@ -287,6 +297,8 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
              else np.full(len(fused), SRC_YOLO, dtype=object))
     out["mask_src"] = np.where(got, SRC_SAM, prior)
     out["remask_note"] = note
+    out["remask_window_px"] = window_px                         # NaN = never prompted
+    out["logit_px_per_native_px"] = SAM_LOGIT_PX / window_px
 
     if got.any():
         sam_geom = add_geometries(in_raster, pd.DataFrame({"polygon": list(polys[got])})).geometry
@@ -298,5 +310,8 @@ def remask_windows(in_raster, fused, sam_model, *, pad=16, window_size=256, sam_
                      realigned_chunks=realigned, window_size=window_size, pad=pad,
                      min_dpx=min_dpx, max_box_blowup=max_box_blowup,
                      max_window_growth=max_window_growth, sam_conf=sam_conf,
-                     n_oversize=int((note == "oversize_window").sum()))
+                     n_oversize=int((note == "oversize_window").sum()),
+                     n_prompted_below_unit_logit_ratio=int(np.sum(SAM_LOGIT_PX / window_px < 1.0)),
+                     min_logit_px_per_native_px=(float(np.nanmin(SAM_LOGIT_PX / window_px))
+                                                 if np.isfinite(window_px).any() else None))
     return out
