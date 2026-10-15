@@ -1,0 +1,141 @@
+{
+ "what": "real-inference check that an escalated arm equals the uncapped catalog at its batch",
+ "raster": "ESP_017355_2260_rom00_t1242.tif",
+ "arm": "256",
+ "start_cap": 25,
+ "attempts": [
+  {
+   "state": "failed",
+   "max_det": 25,
+   "batch_size": 8,
+   "stopped": "max_det",
+   "bound": {
+    "max_det": 25,
+    "threshold": 25,
+    "worst": 25,
+    "n_hit": 8,
+    "n_slices": 8,
+    "first_slice": 0,
+    "mode": "error_near"
+   },
+   "next_attempt": {
+    "max_det": 50,
+    "batch_size": 4
+   },
+   "n": null,
+   "truncation": null,
+   "wall_seconds": 10.12
+  },
+  {
+   "state": "failed",
+   "max_det": 50,
+   "batch_size": 4,
+   "stopped": "max_det",
+   "bound": {
+    "max_det": 50,
+    "threshold": 50,
+    "worst": 50,
+    "n_hit": 4,
+    "n_slices": 4,
+    "first_slice": 0,
+    "mode": "error_near"
+   },
+   "next_attempt": {
+    "max_det": 100,
+    "batch_size": 2
+   },
+   "n": null,
+   "truncation": null,
+   "wall_seconds": 7.324
+  },
+  {
+   "state": "failed",
+   "max_det": 100,
+   "batch_size": 2,
+   "stopped": "max_det",
+   "bound": {
+    "max_det": 100,
+    "threshold": 90,
+    "worst": 96,
+    "n_hit": 2,
+    "n_slices": 2,
+    "first_slice": 0,
+    "mode": "error_near"
+   },
+   "next_attempt": {
+    "max_det": 200,
+    "batch_size": 1
+   },
+   "n": null,
+   "truncation": null,
+   "wall_seconds": 7.008
+  },
+  {
+   "state": "complete",
+   "max_det": 200,
+   "batch_size": 1,
+   "stopped": null,
+   "bound": null,
+   "next_attempt": null,
+   "n": 1632,
+   "truncation": {},
+   "wall_seconds": 16.909
+  }
+ ],
+ "escalated_vs_uncapped_same_batch": {
+  "n_a": 1632,
+  "n_b": 1632,
+  "n_matched": 1632,
+  "n_unmatched_a": 0,
+  "n_unmatched_b": 0,
+  "frac_unmatched": 0.0,
+  "n_geometry_identical": 1632,
+  "frac_geometry_identical": 1.0,
+  "area_ratio_median": 1.0,
+  "area_ratio_p99": 1.0,
+  "max_abs_score_delta": 0.0
+ },
+ "escalated_vs_uncapped_preset_batch": {
+  "n_a": 1632,
+  "n_b": 1631,
+  "n_matched": 1631,
+  "n_unmatched_a": 1,
+  "n_unmatched_b": 0,
+  "frac_unmatched": 0.0006127450980392157,
+  "n_geometry_identical": 1606,
+  "frac_geometry_identical": 0.9846719803801349,
+  "area_ratio_median": 1.0,
+  "area_ratio_p99": 1.0,
+  "max_abs_score_delta": 0.00037160515785217285
+ },
+ "uncapped_same_batch_vs_preset_batch": {
+  "n_a": 1632,
+  "n_b": 1631,
+  "n_matched": 1631,
+  "n_unmatched_a": 1,
+  "n_unmatched_b": 0,
+  "frac_unmatched": 0.0006127450980392157,
+  "n_geometry_identical": 1606,
+  "frac_geometry_identical": 0.9846719803801349,
+  "area_ratio_median": 1.0,
+  "area_ratio_p99": 1.0,
+  "max_abs_score_delta": 0.00037160515785217285
+ },
+ "resubmit_skipped_without_running": true,
+ "code": {
+  "python": "3.10.15",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "host": "Bdirb",
+  "source_sha256": "a705d758024056e541bed16382ffb4248ac1a3b700adb5a7de2cd84404575684",
+  "scripts_sha256": "d2b230fa0d45ec569d7958a7321a1c32125afae77c30eb2d4687ec3a2617fc6f",
+  "git_sha": "49c97ae46b053eeecf0fb1dd266efeda8bdbc7d3",
+  "git_dirty": true,
+  "ultralytics": "8.4.75",
+  "sahi": "0.12.1",
+  "torch": "2.11.0+cu128",
+  "geopandas": "1.1.3",
+  "shapely": "2.1.2",
+  "rasterio": "1.4.4",
+  "opencv-python": "4.13.0.92"
+ }
+}
