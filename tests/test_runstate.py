@@ -270,7 +270,8 @@ def test_fusing_a_subset_of_the_production_arms_is_refused(tmp_path, monkeypatch
     args = SimpleNamespace(
         arms=["256", "256:2"], arm=None, raster=str(tmp_path / "s.tif"), weights="w.pt",
         out_dir=str(tmp_path / "out"), conf=0.10, inference_size=1024, device="cpu",
-        on_conflict="error", on_max_det="error", max_det=None, no_fuse=False)
+        on_conflict="error", on_max_det="error", max_det=None, batch_size=None,
+        max_det_ceiling=None, no_fuse=False)
     with pytest.raises(SystemExit, match="refusing to fuse"):
         r.orchestrate(args)
 
@@ -282,7 +283,8 @@ def test_no_fuse_returns_before_the_fuse_and_says_so(tmp_path, monkeypatch, caps
     args = SimpleNamespace(
         arms=["256", "256:2"], arm=None, raster=str(tmp_path / "s.tif"), weights="w.pt",
         out_dir=str(tmp_path / "out"), conf=0.10, inference_size=1024, device="cpu",
-        on_conflict="error", on_max_det="error", max_det=None, no_fuse=True)
+        on_conflict="error", on_max_det="error", max_det=None, batch_size=None,
+        max_det_ceiling=None, no_fuse=True)
     r.orchestrate(args)                                     # no SystemExit, no fuse
     assert "--no-fuse" in capsys.readouterr().out
     assert not list(pathlib.Path(args.out_dir).glob("*fused*"))
@@ -296,7 +298,8 @@ def test_the_full_arm_set_is_not_refused(tmp_path, monkeypatch):
     args = SimpleNamespace(
         arms=["512", "256", "256:2"], arm=None, raster=str(tmp_path / "s.tif"), weights="w.pt",
         out_dir=str(tmp_path / "out"), conf=0.10, inference_size=1024, device="cpu",
-        on_conflict="error", on_max_det="error", max_det=None, no_fuse=False)
+        on_conflict="error", on_max_det="error", max_det=None, batch_size=None,
+        max_det_ceiling=None, no_fuse=False)
     r.orchestrate(args)     # all stages COMPLETE -> returns at the fuse skip, never reaches the guard
 
 

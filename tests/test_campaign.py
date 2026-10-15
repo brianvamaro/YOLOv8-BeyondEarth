@@ -8,6 +8,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,10 +47,10 @@ def scene(tmp_path):
                    "sha256": file_digest(raster)}}))
     (odir / f"{STEM}.gpkg").write_bytes(b"pretend layer")
 
-    def write_manifest(truncation=None, raster_sha=None):
+    def write_manifest(truncation=None, raster_sha=None, config=None):
         (odir / f"{STEM}-manifest.json").write_text(json.dumps({
             "config_hash": "abc", "truncation": {} if truncation is None else truncation,
-            "outputs": {"n_after_nms": 12}, "config": {"max_det": 1100},
+            "outputs": {"n_after_nms": 12}, "config": config or {"max_det": 1100},
             "inputs": {"raster": {"path": str(raster), "bytes": raster.stat().st_size,
                                   "sha256": raster_sha or file_digest(raster)}},
             "code": {"git_sha": "f" * 40, "source_sha256": "s" * 64}}))
@@ -81,6 +82,43 @@ def test_a_catalog_from_another_raster_fails_the_scene(scene):
     write_manifest(raster_sha="0" * 64)
     ok, report = campaign.verify(campaign.scene_paths(manifest, 0, scenes, out))
     assert not ok and "not the prepared" in report["problems"][0]
+
+
+def test_an_escalated_arm_says_so_in_the_handoff(scene):
+    """The catalog is the uncapped one, but how it got there -- which cap bound, what batch the final
+    attempt ran at -- travels with it rather than staying in a ledger on the cluster."""
+    from YOLOv8BeyondEarth.runstate import StageLedger, file_digest
+    manifest, scenes, out, write_manifest = scene
+    write_manifest(config={"max_det": 2200, "batch_size": 4})
+    odir = out / "ESP_028537_2270"
+    layer = odir / f"{STEM}.gpkg"
+    ledger = StageLedger(odir / "run_ledger.jsonl")
+    ledger.append({"stage": "arm:256", "state": "running"})
+    ledger.append({"stage": "arm:256", "state": "failed", "max_det": 1100, "batch_size": 8,
+                   "stopped": "max_det", "bound": {"worst": 1012}, "wall_seconds": 61.0})
+    ledger.append({"stage": "arm:256", "state": "running"})
+    ledger.append({"stage": "arm:256", "state": "complete", "max_det": 2200, "batch_size": 4,
+                   "wall_seconds": 3600.0, "artifacts": {str(layer): file_digest(layer)}})
+    ok, report = campaign.verify(campaign.scene_paths(manifest, 0, scenes, out))
+    assert ok, report["problems"]
+    rec = report["layers"][0]
+    assert (rec["max_det"], rec["batch_size"]) == (2200, 4)
+    assert [(a["state"], a["max_det"], a["batch_size"], a["stopped"], a["worst_slice"])
+            for a in rec["attempts"]] == [("failed", 1100, 8, "max_det", 1012),
+                                          ("complete", 2200, 4, None, None)]
+
+
+def test_detect_escalates_by_default(scene, monkeypatch):
+    manifest, scenes, out, _ = scene
+    seen = []
+    monkeypatch.setattr(campaign.subprocess, "run", lambda cmd, check: seen.append(cmd))
+    args = SimpleNamespace(
+        weights="w.pt", arms=["512", "256"], max_det=1100, on_max_det="escalate", batch_size=None,
+        device="cpu")
+    campaign.detect(args, campaign.scene_paths(manifest, 0, scenes, out))
+    (cmd,) = seen
+    assert cmd[cmd.index("--on-max-det") + 1] == "escalate"
+    assert "--batch-size" not in cmd and "--no-fuse" in cmd
 
 
 def test_manifest_columns_are_matched_loosely_and_urls_derived(tmp_path):

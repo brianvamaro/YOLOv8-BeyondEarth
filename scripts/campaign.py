@@ -8,8 +8,11 @@ Three steps per manifest row, each resumable, the first two run as Slurm array j
     verify  scripts/campaign.py verify --manifest M --row N --scenes SCENES --out OUT
 
 ``detect`` runs ``run_multiscale_arms.py`` for the scene (one subprocess per arm, ledger-backed resume,
-``--max-det`` explicit, ``--on-max-det error``) and then ``verify``. ``verify`` is the acceptance step,
-and it fails the scene unless:
+``--max-det`` explicit) and then ``verify``. It escalates by default (``--on-max-det escalate``,
+maintainer decision 2026-10-15): an arm with a slice within 10% of its cap is re-run at twice the cap
+and half the batch until none is, so a dense scene yields the uncapped catalog instead of a failure.
+``--on-max-det error`` restores fail-and-stop. ``verify`` is the acceptance step, and it fails the scene
+unless:
 
 - every arm manifest reports ``"truncation": {}`` -- a truncated catalog undercounts exactly the
   densest ground, which for density labels is a bias, not noise;
@@ -19,7 +22,8 @@ and it fails the scene unless:
 and then writes ``SHA256SUMS`` (``sha256sum -c`` format) and ``handoff.json`` beside the layers. The
 hand-off directory is ``OUT/<obs_id>/`` holding ``<product_id>-predictions-...-nms.gpkg`` per arm, as
 the D10 proposal has it. GeoPackage bytes are not deterministic, so the checksums certify transfer
-integrity, not reproducibility; reproducibility is the manifest's job.
+integrity, not reproducibility; reproducibility is the manifest's job. ``handoff.json`` lists every
+attempt behind each layer (its cap, batch and why it stopped), so an escalated arm says so.
 
 ``status`` prints one line per manifest row (prepped / detected / verified / failed).
 
@@ -59,6 +63,23 @@ def _layer_manifests(out_dir):
                   if p.name.endswith("-nms-manifest.json") or "-fused-" in p.name)
 
 
+def _arm_attempts(out_dir):
+    """Every finished attempt behind each arm layer, oldest first, keyed by the layer's file name."""
+    attempts, stage_of = {}, {}
+    for rec in StageLedger(Path(out_dir) / "run_ledger.jsonl").entries():
+        stage = rec.get("stage", "")
+        if not stage.startswith("arm:") or rec.get("state") == "running":
+            continue
+        attempts.setdefault(stage, []).append(
+            {"state": rec.get("state"), "max_det": rec.get("max_det"),
+             "batch_size": rec.get("batch_size"), "stopped": rec.get("stopped"),
+             "worst_slice": (rec.get("bound") or {}).get("worst"),
+             "wall_seconds": rec.get("wall_seconds"), "finished_utc": rec.get("finished_utc")})
+        for path in rec.get("artifacts") or {}:
+            stage_of[Path(path).name] = stage
+    return {layer: attempts[stage] for layer, stage in stage_of.items()}
+
+
 def verify(paths):
     """Check one scene's catalogs and write its hand-off files. Returns ``(ok, report)``."""
     out_dir, problems, layers = Path(paths["out_dir"]), [], []
@@ -68,6 +89,7 @@ def verify(paths):
     manifests = _layer_manifests(out_dir)
     if not manifests:
         problems.append(f"no layer manifests in {out_dir}")
+    attempts = _arm_attempts(out_dir)
     for mpath in manifests:
         man = json.loads(mpath.read_text())
         layer = mpath.with_name(mpath.name.replace("-manifest.json", ".gpkg"))
@@ -75,6 +97,8 @@ def verify(paths):
                "config_hash": man.get("config_hash"), "truncation": man.get("truncation"),
                "n_features": (man.get("outputs") or {}).get("n_after_nms"),
                "max_det": (man.get("config") or {}).get("max_det"),
+               "batch_size": (man.get("config") or {}).get("batch_size"),
+               "attempts": attempts.get(layer.name, []),
                "peak_rss_bytes": man.get("peak_rss_bytes"),
                "n_slices": man.get("n_slices"),
                "n_slices_skipped_fill": man.get("n_slices_skipped_fill"),
@@ -83,7 +107,8 @@ def verify(paths):
                                   "torch", "ultralytics")}}
         if man.get("truncation") not in ({}, None) and "-fused-" not in mpath.name:
             problems.append(f"{layer.name}: truncation {man['truncation']} -- a lower bound, not a "
-                            "catalog; raise max_det (and check VRAM) and re-run this arm")
+                            "catalog; re-run detect, which escalates the cap (an NMS time-limit "
+                            "entry is not a cap problem and will recur)")
         if not layer.exists():
             problems.append(f"{layer.name}: manifest without its layer")
         else:
@@ -122,8 +147,10 @@ def detect(args, paths):
     cmd = [sys.executable, str(REPO / "scripts" / "run_multiscale_arms.py"),
            "--raster", str(paths["raster"]), "--out-dir", str(paths["out_dir"]),
            "--weights", str(args.weights), "--arms", *args.arms,
-           "--max-det", str(args.max_det), "--on-max-det", "error", "--no-fuse",
+           "--max-det", str(args.max_det), "--on-max-det", args.on_max_det, "--no-fuse",
            "--device", args.device]
+    if args.batch_size is not None:
+        cmd += ["--batch-size", str(args.batch_size)]
     print("+ " + " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
 
@@ -168,7 +195,13 @@ def main(argv=None):
         if name == "detect":
             p.add_argument("--arms", nargs="+", default=["256"],
                            help="arms to run; '256' is configuration 1 (D9 is not decided here)")
-            p.add_argument("--max-det", type=int, default=1100)
+            p.add_argument("--max-det", type=int, default=1100,
+                           help="starting per-slice cap (escalation doubles it as needed)")
+            p.add_argument("--on-max-det", default="escalate", choices=("escalate", "error"),
+                           help="'escalate' re-runs a binding arm at twice the cap and half the "
+                                "batch until no slice is within 10%% of it; 'error' stops the scene")
+            p.add_argument("--batch-size", type=int, default=None,
+                           help="starting batch; default the preset's 8 (escalation halves it)")
             p.add_argument("--weights", default=str(DEFAULT_WEIGHTS))
             p.add_argument("--device", default="cuda:0")
     args = ap.parse_args(argv)

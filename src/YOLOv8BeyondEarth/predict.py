@@ -193,6 +193,34 @@ def _watch_nms_time_limit():
         ultralytics_logger.removeHandler(handler)
 
 
+#: What :func:`get_sliced_prediction` may do when a slice reaches its ``max_det``:
+#: ``"error"`` raises when a slice comes back holding the full cap (proven truncation);
+#: ``"error_near"`` also raises when one comes within :data:`_NEAR_MAX_DET_FRACTION` of it, which is
+#: where a truncated slice lands after ultralytics' empty-mask filter, so a run that completes under
+#: it had headroom on every slice; ``"warn"`` records and continues.
+ON_MAX_DET_MODES = ("error", "error_near", "warn")
+
+
+class MaxDetBound(RuntimeError):
+    """A slice reached the per-slice detection cap, so the run stopped rather than truncate.
+
+    A ``RuntimeError`` subclass, so callers that caught the plain error before keep working. The
+    attributes let a runner that escalates the cap (``scripts/run_multiscale_arms.py``) tell this
+    stop apart from a crash without parsing the message.
+    """
+
+    def __init__(self, message, *, max_det, threshold, worst, n_hit, n_slices, first_slice, mode):
+        super().__init__(message)
+        self.max_det, self.threshold, self.worst = int(max_det), int(threshold), int(worst)
+        self.n_hit, self.n_slices, self.first_slice = int(n_hit), int(n_slices), int(first_slice)
+        self.mode = mode
+
+    def as_dict(self):
+        return {"max_det": self.max_det, "threshold": self.threshold, "worst": self.worst,
+                "n_hit": self.n_hit, "n_slices": self.n_slices, "first_slice": self.first_slice,
+                "mode": self.mode}
+
+
 def _note_slice_truncation(results, max_det, truncation, on_max_det, first_slice, new_timeouts):
     """Record — and by default fail fast on — the two ways a slice silently loses detections.
 
@@ -203,7 +231,7 @@ def _note_slice_truncation(results, max_det, truncation, on_max_det, first_slice
     ``slices_at_max_det`` is a **lower** bound. Ultralytics applies ``max_det`` inside NMS and then
     ``SegmentationPredictor.construct_result`` drops detections whose upsampled mask is empty, so a
     slice that truncated at N can come back with fewer than N rows. ``slices_near_max_det`` is where
-    those land, which is why both are recorded.
+    those land, which is why both are recorded, and why ``on_max_det="error_near"`` stops on either.
     """
     counts = [int(r.boxes.data.shape[0]) for r in results]
     near = max(1, int(round(_NEAR_MAX_DET_FRACTION * max_det)))
@@ -222,16 +250,28 @@ def _note_slice_truncation(results, max_det, truncation, on_max_det, first_slice
             truncation.get("slices_zeroed_after_nms_time_limit", 0)
             + sum(1 for c in counts if c == 0))
 
-    if at_cap and on_max_det == "error":
+    if at_cap and on_max_det in ("error", "error_near"):
         worst = max(counts)
-        raise RuntimeError(
+        raise MaxDetBound(
             f"{at_cap} of {len(counts)} slices in the batch starting at slice {first_slice} "
             f"returned max_det={max_det} detections, so the model's output was truncated in each "
             f"of them (worst {worst}). Ultralytics applies the cap after NMS and keeps the top N by "
             "confidence, so what is missing is the faintest detections in the densest slices. "
             "Raise max_det — but check VRAM first: masks are materialised at imgsz, so peak memory "
             "scales with max_det x batch_size (see scripts/review/probe_max_det.py). Pass "
-            "on_max_det='warn' to accept the truncation and record it instead of failing.")
+            "on_max_det='warn' to accept the truncation and record it instead of failing.",
+            max_det=max_det, threshold=max_det, worst=worst, n_hit=at_cap, n_slices=len(counts),
+            first_slice=first_slice, mode=on_max_det)
+    if n_near and on_max_det == "error_near":
+        worst = max(counts)
+        raise MaxDetBound(
+            f"{n_near} of {len(counts)} slices in the batch starting at slice {first_slice} "
+            f"returned at least {near} detections, within {1 - _NEAR_MAX_DET_FRACTION:.0%} of "
+            f"max_det={max_det} (worst {worst}). A slice that close may already be truncated, since "
+            "ultralytics drops empty masks after applying the cap, and it has no headroom either "
+            "way. Re-run with a higher max_det.",
+            max_det=max_det, threshold=near, worst=worst, n_hit=n_near, n_slices=len(counts),
+            first_slice=first_slice, mode=on_max_det)
 
 
 def _validate_prediction_args(*, in_raster, detection_model, confidence_threshold, output_dir,
@@ -261,8 +301,8 @@ def _validate_prediction_args(*, in_raster, detection_model, confidence_threshol
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     if int(max_det) < 1:
         raise ValueError(f"max_det must be >= 1, got {max_det}")
-    if on_max_det not in ("error", "warn"):
-        raise ValueError(f"on_max_det must be 'error' or 'warn', got {on_max_det!r}")
+    if on_max_det not in ON_MAX_DET_MODES:
+        raise ValueError(f"on_max_det must be one of {ON_MAX_DET_MODES}, got {on_max_det!r}")
     if not 0.0 <= float(confidence_threshold) <= 1.0:
         raise ValueError(f"confidence_threshold must be in [0, 1], got {confidence_threshold}")
     for name, value in (("overlap_height_ratio", overlap_height_ratio),
@@ -865,10 +905,12 @@ def get_sliced_prediction(in_raster,
             free. Size it with ``scripts/review/probe_max_det.py``.
         on_max_det: str
             What to do when a slice comes back holding exactly ``max_det`` detections, i.e. when the
-            model's output was cut off. ``"error"`` (default) raises on the first such batch, so a
-            multi-hour scene arm fails in its first minutes rather than writing a quietly truncated
-            catalog; ``"warn"`` records the count and continues. Either way the count reaches
-            ``attrs["truncation"]`` and the manifest.
+            model's output was cut off. ``"error"`` (default) raises :class:`MaxDetBound` on the
+            first such batch, so a multi-hour scene arm fails in its first minutes rather than
+            writing a quietly truncated catalog; ``"error_near"`` also raises when a slice comes
+            within 10% of the cap (where a truncated slice lands after ultralytics' empty-mask
+            filter), which is what a cap-escalating runner wants; ``"warn"`` records the count and
+            continues. Either way the count reaches ``attrs["truncation"]`` and the manifest.
         contour_method: str
             Mask->polygon extractor: ``"skimage"`` (default, bit-identical) or ``"cv2"`` (faster).
         overlap_height_ratio: float

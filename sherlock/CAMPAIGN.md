@@ -16,7 +16,7 @@ locally, and the cluster specifics are copied from jobs that have run (`hirise_a
 | input guard | prediction refuses anything but single-band uint8 | a 10-bit raster used to reach the model clipped at DN 255, silently |
 | fill slices | skipped (lever N1), byte-identical | `data/review/n1n2_identity.json`: old code vs new on real 0.25 m/px ground, 256/512/SR arms |
 | whole-raster copies | gone (lever N2), byte-identical | same file; RAM coefficients in `data/review/n2_memory.json` |
-| `max_det` | 1100, and a truncated arm **fails** its scene | truncation undercounts the densest ground and inflates fabric (`max-det-inflates-fabric`) |
+| `max_det` | 1100 to start, then **escalation**: an arm with any slice within 10% of its cap is re-run at 2x the cap and 1/2 the batch until none is (maintainer decision 2026-10-15). `ON_MAX_DET=error` restores fail-the-scene | truncation undercounts the densest ground and inflates fabric (`max-det-inflates-fabric`). Real-inference check, `data/review/escalation_e2e.json`: from a cap of 25 a ROM tile climbs 25/8 -> 50/4 -> 100/2 -> 200/1, and the result is **identical** to an uncapped run at batch 1 (1,632 of 1,632, all geometry, max \|dscore\| 0) |
 
 ## 0. Stage the code (laptop)
 
@@ -69,6 +69,25 @@ sbatch --array=0-62 --dependency=aftercorr:$PREP \
 `aftercorr` releases task *i* as soon as prep task *i* succeeds. Resume = resubmit: arms are
 ledger-keyed on content (`run_ledger.jsonl`), so finished arms are skipped.
 
+**When an arm escalates.**
+- **What happens.** Each failed attempt stops at its first near-cap batch, usually in minutes.
+  The next attempt then reruns the whole arm at twice the cap and half the batch.
+- **Walltime.** A dense scene can need more than the 12 h limit. Resubmitting resumes at the attempt
+  the ledger says it was on, not at 1100.
+- **The trace.** `handoff.json` lists every attempt behind each layer (cap, batch, why it stopped).
+- **What the halved batch costs.** It is the one thing escalation changes in the result. Measured
+  against batch 8 on the same tile: 1 detection in 1,632, 98.5% of geometry identical, max
+  |dscore| 3.7e-4. That is G1-02's accepted batch 1-vs-8 variation (99.3%, 3.6e-4), the bar the
+  stack-parity check already uses.
+- **Out of memory.** A CUDA OOM halves the batch at the same cap. At batch 1 the arm stops and says
+  it needs a larger card.
+  - **Why that can happen.** Ultralytics holds ~5 MiB per detection of the current slice while it
+    builds masks at imgsz 1024, so one slice at a cap of ~4,000 wants ~20 GB on its own. On the
+    densest HiRISE ground the 512 arm can get there: 1,100 bound on 124 of 153 whole 512-px tiles
+    of `ESP_030222_1220` (backlog §"The control-site null is provisional").
+  - **What to do.** Resubmit that scene on a card with more memory. The ledger resumes it at the
+    attempt it stopped on.
+
 `verify` (run by every detect task, or alone: `scripts/campaign.py verify ...`) fails the scene
 unless every arm reports `"truncation": {}` and ran on the prepared raster (sha256 match), then writes
 `SHA256SUMS` and `handoff.json`.
@@ -113,9 +132,9 @@ relabel (`set_crs`), never a reprojection.
   production three). Configuration 3 (SAM2 re-mask) on a ladder needs phase 5a, which is unbuilt;
   "256 + SAM2" is buildable but SAM2 has never run on this stack, so it needs a parity check first.
 - **D36 score floor** is downstream: catalogs are the conf-0.10 superset.
-- **When `max_det` 1100 binds** at 0.25 m/px (likeliest on the 512 arm): today the scene fails.
-  Retry at a higher cap with a smaller batch, or stop and report? A non-binding run does not depend
-  on the cap (279 tiles verified inert), so retrying until nothing binds is well defined.
+- ~~When `max_det` 1100 binds~~ **decided 2026-10-15: escalate** (see "What is fixed" and "When an
+  arm escalates"). A non-binding run does not depend on the cap (279 tiles verified inert), so
+  retrying until nothing binds is well defined, and it was checked end to end.
 - **Durable storage** for `DEST`.
 - **Mixed-binning scenes.** Many "0.25 m/px" RED products bin some CCDs 2x (e.g. ESP_028537_2270:
   `MRO:BINNING = (2,2,2,1,1,1,1,2,2,...)`), so strips of the scene are 0.5 m/px resampled onto the

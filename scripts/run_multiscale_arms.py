@@ -33,6 +33,23 @@ Three modes, and the third exists because resume is deliberately machine-local:
     # assemble a ladder whose 512 arm was produced on a larger GPU
     conda run -n bouldernet python scripts/run_multiscale_arms.py --fuse-only \
         --raster ... --out-dir data/fullscene
+
+**Cap escalation** (``--on-max-det escalate``, maintainer decision 2026-10-15). A truncated arm is a
+lower bound, not a catalog, so instead of failing the scene the runner re-runs the arm with the cap
+doubled and the batch halved. Halving the batch keeps ``max_det x batch_size``, and with it the
+worst-case mask memory, where it was. It repeats until an attempt completes with no slice within 10%
+of its cap (the child runs with ``on_max_det="error_near"``, so each failed attempt stops at its first
+such batch rather than at the end of the arm). A CUDA out-of-memory stop halves the batch at the same
+cap. Escalation ends at :func:`model_max_boxes`, the most boxes the model can return for one slice,
+since no cap above that can bind.
+
+What it produces is the uncapped catalog: a run that does not bind does not depend on the cap (279
+tiles verified inert). The halved batch is the one thing that moves, at the ~1e-4 level a batch's size
+is measured to move results (G1-02's 1-vs-8 comparison).
+
+Every attempt is a ledger entry of the arm's stage, with its ``max_det``, ``batch_size`` and why it
+stopped, so a resubmitted job resumes at the attempt the last one pointed to, rather than paying again
+for the passes that already bound.
 """
 from __future__ import annotations
 
@@ -61,8 +78,17 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from YOLOv8BeyondEarth import presets                                   # noqa: E402
-from YOLOv8BeyondEarth.runstate import (COMPLETE, StageLedger, file_digest,  # noqa: E402
-                                        stage_key)
+from YOLOv8BeyondEarth.runstate import (COMPLETE, FAILED, INCOMPLETE,       # noqa: E402
+                                        StageLedger, file_digest, stage_key)
+
+#: Exit codes an arm's child uses to say *why* it stopped, so the orchestrator can tell a stop that a
+#: higher cap or a smaller batch fixes from a crash. Anything else non-zero is a crash.
+EXIT_MAX_DET = 3
+EXIT_CUDA_OOM = 4
+
+
+class ArmStopped(Exception):
+    """An arm attempt stopped for a reason the next attempt fixes; recorded, then retried."""
 
 
 def parse_arm(text):
@@ -112,10 +138,116 @@ def effective_max_det(args):
     return int(args.max_det) if args.max_det is not None else presets.GOAL1_PRODUCTION["max_det"]
 
 
+def effective_batch_size(args):
+    """Slices per model call: ``--batch-size``, else the preset's. Escalation halves it."""
+    return (int(args.batch_size) if args.batch_size is not None
+            else presets.GOAL1_PRODUCTION["batch_size"])
+
+
+def model_max_boxes(inference_size, strides=(8, 16, 32)):
+    """The most detections the model can return for one slice: one per grid cell, per stride.
+
+    YOLOv8 is anchor-free with a single prediction per cell at each stride, so at ``imgsz`` 1024 that
+    is 128^2 + 64^2 + 32^2 = 21,504 (below ultralytics' ``max_nms`` of 30,000, so NMS sees them
+    all). A cap at or above this cannot bind, so it is where escalation stops.
+    """
+    return sum((int(inference_size) // s) ** 2 for s in strides)
+
+
+def next_attempt(max_det, batch_size, reason, ceiling):
+    """``(max_det, batch_size)`` for the attempt after a recoverable stop, or ``None`` if none is left.
+
+    The cap doubles and the batch halves together, so ``max_det x batch_size`` -- what the worst-case
+    mask memory scales with -- does not grow. An out-of-memory stop halves the batch at the same cap.
+    """
+    max_det, batch_size = int(max_det), int(batch_size)
+    if reason == "max_det":
+        if max_det >= ceiling:
+            return None
+        return min(2 * max_det, int(ceiling)), max(1, batch_size // 2)
+    if reason == "cuda_oom":
+        return (max_det, batch_size // 2) if batch_size > 1 else None
+    raise ValueError(f"unknown stop reason {reason!r}")
+
+
+def arm_base_parts(args, raster_id, weights_id, slice_size, sr_factor):
+    """Everything that defines an arm's output except the cap and the batch."""
+    # `preset="goal1_production"` is a *name*, so on its own it cannot notice that the preset's
+    # values changed underneath a resumed campaign. `presets.PRESET_VERSION` is bumped whenever they
+    # do (that is its documented contract).
+    return dict(raster=raster_id.get("sha256"), weights=weights_id.get("sha256"),
+                slice_size=slice_size, sr_factor=sr_factor, conf=args.conf,
+                imgsz=args.inference_size, preset="goal1_production",
+                preset_version=presets.PRESET_VERSION)
+
+
+def attempt_key(base, max_det, batch_size):
+    """The stage key of one arm attempt.
+
+    ``max_det`` is spelled out because X-06 made it result-defining: a stale entry would otherwise
+    let a 300-capped arm satisfy a run configured for a higher cap. ``batch_size`` moves results at
+    ~1e-4, so it is keyed too, but only when it differs from the preset's: every ledger written
+    before escalation existed ran at the preset's batch, and keying it unconditionally would orphan
+    them all.
+    """
+    parts = {**base, "max_det": int(max_det)}
+    if int(batch_size) != presets.GOAL1_PRODUCTION["batch_size"]:
+        parts["batch_size"] = int(batch_size)
+    return stage_key(**parts)
+
+
+def resume_point(ledger, arm, base_key, start):
+    """Where an escalating arm stands: the ``(max_det, batch_size)`` to check or try first.
+
+    An arm's attempts share its stage name, and each terminal entry records its ``base_key`` and its
+    own ``max_det`` and ``batch_size``. The latest entry for this configuration decides. A complete
+    attempt is re-checked as it is, so a finished escalated arm is not redone at the starting cap. A
+    recoverable stop resumes at the attempt it pointed to, and any other ending retries the same
+    attempt. A killed attempt leaves only its ``running`` marker, which carries no ``base_key``, so the
+    entry before it decides. No entry for this configuration means ``start``.
+    """
+    for rec in reversed(ledger.entries(f"arm:{arm}")):
+        if rec.get("base_key") != base_key:
+            continue
+        nxt = rec.get("next_attempt")
+        if rec.get("state") == FAILED and nxt:
+            return int(nxt["max_det"]), int(nxt["batch_size"])
+        if rec.get("state") in (COMPLETE, FAILED, INCOMPLETE):
+            return int(rec["max_det"]), int(rec["batch_size"])
+    return start
+
+
+def _run_child(cmd):
+    """Run one arm's child. Returns ``(returncode, summary)``, ``summary`` being the child's one JSON
+    stdout line (progress and logs go to stderr), echoed for the job log, or ``None``."""
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+    sys.stdout.write(res.stdout)
+    for line in reversed(res.stdout.splitlines()):
+        if line.startswith("{"):
+            try:
+                return res.returncode, json.loads(line)
+            except json.JSONDecodeError:
+                break
+    return res.returncode, None
+
+
+def _is_cuda_oom(exc):
+    import torch
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    # a driver-level allocation failure surfaces as a plain RuntimeError ("CUDA error: out of memory")
+    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
 def run_one_arm(args):
-    """The child process: one arm, one layer, then exit so the memory is actually returned."""
+    """The child process: one arm, one layer, then exit so the memory is actually returned.
+
+    A stop the orchestrator can fix exits with :data:`EXIT_MAX_DET` or :data:`EXIT_CUDA_OOM` after
+    printing its summary line; anything else raises as before.
+    """
     from sahi import AutoDetectionModel
-    from YOLOv8BeyondEarth.predict import get_sliced_prediction
+    from YOLOv8BeyondEarth.predict import MaxDetBound, get_sliced_prediction
+    from YOLOv8BeyondEarth.runstate import peak_rss_bytes
 
     slice_size, sr_factor = parse_arm(args.arm)
     model = AutoDetectionModel.from_pretrained(
@@ -123,14 +255,28 @@ def run_one_arm(args):
         image_size=args.inference_size, confidence_threshold=args.conf)
     cfg = {k: v for k, v in presets.GOAL1_PRODUCTION.items()
            if k not in ("slice_size", "sr_factor", "confidence_threshold", "inference_size",
-                        "save_bbox", "save_prenms", "output_format", "max_det")}
+                        "save_bbox", "save_prenms", "output_format", "max_det", "batch_size")}
     cfg["max_det"] = effective_max_det(args)
-    gdf, gdf_nms = get_sliced_prediction(
-        args.raster, model, confidence_threshold=args.conf, output_dir=args.out_dir,
-        slice_size=slice_size, sr_factor=sr_factor, inference_size=args.inference_size,
-        save_bbox=False, save_prenms=False, save_nms=True, output_format="gpkg",
-        on_conflict=args.on_conflict, on_max_det=args.on_max_det, **cfg)
-    from YOLOv8BeyondEarth.runstate import peak_rss_bytes
+    cfg["batch_size"] = effective_batch_size(args)
+    try:
+        gdf, gdf_nms = get_sliced_prediction(
+            args.raster, model, confidence_threshold=args.conf, output_dir=args.out_dir,
+            slice_size=slice_size, sr_factor=sr_factor, inference_size=args.inference_size,
+            save_bbox=False, save_prenms=False, save_nms=True, output_format="gpkg",
+            on_conflict=args.on_conflict, on_max_det=args.on_max_det, **cfg)
+    except MaxDetBound as exc:
+        print(f"arm {args.arm} stopped: {exc}", file=sys.stderr, flush=True)
+        print(json.dumps({"arm": args.arm, "stopped": "max_det", "bound": exc.as_dict(),
+                          "peak_rss_bytes": peak_rss_bytes()}), flush=True)
+        sys.exit(EXIT_MAX_DET)
+    except Exception as exc:
+        if not _is_cuda_oom(exc):
+            raise
+        print(f"arm {args.arm} stopped: CUDA out of memory at max_det {cfg['max_det']}, batch "
+              f"{cfg['batch_size']}: {exc}", file=sys.stderr, flush=True)
+        print(json.dumps({"arm": args.arm, "stopped": "cuda_oom",
+                          "peak_rss_bytes": peak_rss_bytes()}), flush=True)
+        sys.exit(EXIT_CUDA_OOM)
     print(json.dumps({"arm": args.arm, "n": int(len(gdf_nms if gdf_nms is not None else gdf)),
                       "truncation": dict(gdf.attrs.get("truncation", {})),
                       "slices": gdf.attrs.get("slices"), "peak_rss_bytes": peak_rss_bytes()}),
@@ -295,6 +441,55 @@ def fuse_only(args):
     print(f"wrote {fused_path}  ({len(fused)} fused, {len(audit)} suppressed)")
 
 
+def _attempt_arm(args, ledger, arm, key, base_key, layer, max_det, batch, child_mode, escalate,
+                 ceiling):
+    """Run one attempt of one arm in its own process, and record it in the ledger either way.
+
+    Returns ``None`` when the arm is done, or, in escalate mode, the ``(max_det, batch_size)`` to try
+    after a recoverable stop. Any other ending raises, after being recorded as a failed attempt.
+    """
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--arm", arm,
+           "--raster", str(args.raster), "--weights", str(args.weights),
+           "--out-dir", str(args.out_dir), "--conf", str(args.conf),
+           "--inference-size", str(args.inference_size), "--device", args.device,
+           "--max-det", str(max_det), "--batch-size", str(batch),
+           "--on-max-det", child_mode, "--on-conflict", "overwrite"]
+    nxt = None
+    try:
+        with ledger.stage(f"arm:{arm}", key, artifacts=[layer], command=cmd, base_key=base_key,
+                          max_det=int(max_det), batch_size=int(batch),
+                          on_max_det=args.on_max_det) as st:
+            # The child's one JSON stdout line goes into the ledger: peak RSS per arm per scene is
+            # the RAM measurement lever N2 asked for, and a stop says why it stopped.
+            code, child = _run_child(cmd)
+            st.result.update({k: v for k, v in (child or {}).items()
+                              if k in ("n", "truncation", "slices", "peak_rss_bytes", "stopped",
+                                       "bound")})
+            if code == 0:
+                return None
+            reason = {EXIT_MAX_DET: "max_det", EXIT_CUDA_OOM: "cuda_oom"}.get(code)
+            if not (escalate and reason):
+                raise subprocess.CalledProcessError(code, cmd)
+            nxt = next_attempt(max_det, batch, reason, ceiling)
+            if nxt is None:
+                st.result["escalation_exhausted"] = reason
+                if reason == "max_det":
+                    raise SystemExit(
+                        f"arm {arm}: a slice still came within 10% of max_det={max_det}, the "
+                        f"escalation ceiling ({ceiling}; the model returns at most "
+                        f"{model_max_boxes(args.inference_size)} boxes per slice at imgsz "
+                        f"{args.inference_size}). There is no higher cap to try.")
+                raise SystemExit(
+                    f"arm {arm}: CUDA out of memory at batch 1 with max_det={max_det}. This GPU "
+                    "cannot hold the scene's densest slice at that cap, so run this arm on a card "
+                    "with more memory; a resubmitted job resumes at this attempt.")
+            st.result["next_attempt"] = {"max_det": nxt[0], "batch_size": nxt[1]}
+            raise ArmStopped(f"stopped on {reason} at max_det {max_det}, batch {batch}")
+    except ArmStopped as exc:
+        print(f"[esc ] arm {arm}: {exc}; next max_det {nxt[0]}, batch {nxt[1]}", flush=True)
+        return nxt
+
+
 def orchestrate(args):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -302,48 +497,34 @@ def orchestrate(args):
     raster_id = presets.file_identity(args.raster)
     weights_id = presets.file_identity(args.weights)
 
+    escalate = args.on_max_det == "escalate"
+    child_mode = "error_near" if escalate else args.on_max_det
+    ceiling = (int(args.max_det_ceiling) if args.max_det_ceiling is not None
+               else model_max_boxes(args.inference_size))
+
     arm_keys, arm_layers = {}, {}
     for arm in args.arms:
         slice_size, sr_factor = parse_arm(arm)
-        # `preset="goal1_production"` is a *name*, so on its own it cannot notice that the preset's
-        # values changed underneath a resumed campaign. `presets.PRESET_VERSION` is bumped whenever
-        # they do (that is its documented contract), and `max_det` is spelled out because X-06 made
-        # it result-defining and a stale ledger entry would otherwise let a 300-capped arm satisfy a
-        # run configured for a higher cap.
-        key = stage_key(raster=raster_id.get("sha256"), weights=weights_id.get("sha256"),
-                        slice_size=slice_size, sr_factor=sr_factor, conf=args.conf,
-                        imgsz=args.inference_size, preset="goal1_production",
-                        preset_version=presets.PRESET_VERSION,
-                        max_det=effective_max_det(args))
+        base = arm_base_parts(args, raster_id, weights_id, slice_size, sr_factor)
+        base_key = stage_key(**base)
         layer = arm_layer_path(out_dir, args.raster, slice_size, sr_factor, args.conf,
                                args.inference_size, presets.GOAL1_PRODUCTION["overlap_height_ratio"])
+        start = (effective_max_det(args), effective_batch_size(args))
+        max_det, batch = resume_point(ledger, arm, base_key, start) if escalate else start
+        while True:
+            key = attempt_key(base, max_det, batch)
+            state, detail = ledger.status(f"arm:{arm}", key)
+            if state == COMPLETE:
+                print(f"[skip] arm {arm}: {detail} (max_det {max_det}, batch {batch})", flush=True)
+                break
+            print(f"[run ] arm {arm}: {state} ({detail}); max_det {max_det}, batch {batch}",
+                  flush=True)
+            nxt = _attempt_arm(args, ledger, arm, key, base_key, layer, max_det, batch,
+                               child_mode, escalate, ceiling)
+            if nxt is None:
+                break
+            max_det, batch = nxt
         arm_keys[arm], arm_layers[arm] = key, layer
-
-        state, detail = ledger.status(f"arm:{arm}", key)
-        if state == COMPLETE:
-            print(f"[skip] arm {arm}: {detail}")
-            continue
-        print(f"[run ] arm {arm}: {state} ({detail})")
-        cmd = [sys.executable, str(Path(__file__).resolve()), "--arm", arm,
-               "--raster", str(args.raster), "--weights", str(args.weights),
-               "--out-dir", str(out_dir), "--conf", str(args.conf),
-               "--inference-size", str(args.inference_size), "--device", args.device,
-               "--max-det", str(effective_max_det(args)),
-               "--on-max-det", args.on_max_det, "--on-conflict", "overwrite"]
-        with ledger.stage(f"arm:{arm}", key, artifacts=[layer], command=cmd) as st:
-            # stdout is the child's one JSON summary line (progress and logs go to stderr), so it
-            # can be captured into the ledger -- peak RSS per arm per scene is the RAM measurement
-            # lever N2 asked for -- and still echoed for the job log.
-            res = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, text=True)
-            sys.stdout.write(res.stdout)
-            summary = [ln for ln in res.stdout.splitlines() if ln.startswith("{")]
-            if summary:
-                try:
-                    child = json.loads(summary[-1])
-                    st.result.update({k: child.get(k) for k in
-                                      ("n", "truncation", "slices", "peak_rss_bytes")})
-                except json.JSONDecodeError:
-                    pass
 
     # Depend on each arm's key *and* the artifact digest its ledger entry recorded, not on the key
     # alone: the key is a hash of the configuration, so an arm re-executed with unchanged config
@@ -408,17 +589,29 @@ def main():
                     default=presets.GOAL1_PRODUCTION["inference_size"])
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--on-conflict", default="error", choices=("error", "overwrite"))
-    ap.add_argument("--on-max-det", default="error", choices=("error", "warn"),
+    ap.add_argument("--on-max-det", default="error",
+                    choices=("error", "error_near", "warn", "escalate"),
                     help="'error' fails in the first minutes of an arm rather than writing a "
-                         "silently truncated catalog (review item X-06)")
+                         "silently truncated catalog (review item X-06); 'error_near' also fails "
+                         "within 10%% of the cap; 'escalate' re-runs an arm that gets that close at "
+                         "twice the cap and half the batch until it does not (see the docstring)")
     ap.add_argument("--max-det", type=int, default=None,
                     help="per-slice detection cap; defaults to GOAL1_PRODUCTION's 600, which is "
                          "sized for the 256 arm on an 8 GiB card. The 512 arm needs ~1100 and is "
                          "deferred to a larger GPU — raise it there with this flag, which also "
-                         "enters the stage key so the two runs cannot satisfy each other's ledger.")
+                         "enters the stage key so the two runs cannot satisfy each other's ledger. "
+                         "With --on-max-det escalate it is the starting cap.")
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="slices per model call; defaults to GOAL1_PRODUCTION's 8. Keyed when it "
+                         "differs from that. With --on-max-det escalate it is the starting batch.")
+    ap.add_argument("--max-det-ceiling", type=int, default=None,
+                    help="highest cap escalation may reach; defaults to the most boxes the model "
+                         "can return per slice (21,504 at imgsz 1024), where no cap can bind")
     args = ap.parse_args()
     if args.fuse_only and args.no_fuse:
         ap.error("--fuse-only and --no-fuse are contradictory")
+    if args.arm and args.on_max_det == "escalate":
+        ap.error("'escalate' is the orchestrator's mode; one arm's child takes 'error_near'")
     if args.arm:
         run_one_arm(args)
     elif args.fuse_only:
