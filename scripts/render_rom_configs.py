@@ -127,10 +127,6 @@ def run_arm(model, crop, out_dir, slice_size):
 
 def render_tile(crop, configs, device):
     """The child: render one crop's missing configurations, print a ``RESULT`` line, exit."""
-    import geopandas as gpd
-    from YOLOv8BeyondEarth.arm_ratification import arm_key, fuse_combo
-    from YOLOv8BeyondEarth.polygon import outlines_to_shp
-
     t0 = time.monotonic()
     rec = {"tile": crop.stem, "obs": crop.parent.name}
     if "2" in configs or "3" in configs:
