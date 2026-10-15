@@ -137,7 +137,9 @@ def render_tile(crop, configs, device):
         _render_ladder(crop, configs, device, rec)
     if "1g" in configs and not presets.manifest_path(output_1g(crop)).exists():
         _render_1g(crop, rec)
-    rec["seconds"] = round(time.monotonic() - t0, 1)
+    # a "1g"-only run keeps its own clock, so it cannot overwrite the tile's config-2/3 render time
+    rec["seconds" if ("2" in configs or "3" in configs) else "seconds_1g"] = round(
+        time.monotonic() - t0, 1)
     print("RESULT " + json.dumps(rec, default=str), flush=True)
 
 
@@ -266,7 +268,7 @@ def main(argv=None):
             print(f"  [ok]   {crop.stem}  c2={rec.get('n_config2', '-')}  "
                   f"c3={rec.get('n_config3', '-')}  c1g={rec.get('n_config1g', '-')}  "
                   f"ratio>={rec.get('min_ratio', rec.get('min_ratio_1g', '-'))}  "
-                  f"{rec['seconds']}s{flag}", flush=True)
+                  f"{rec.get('seconds', rec.get('seconds_1g'))}s{flag}", flush=True)
         else:
             tail = (res.stderr or "").strip().splitlines()
             oom = "out of memory" in (res.stderr or "").lower()
