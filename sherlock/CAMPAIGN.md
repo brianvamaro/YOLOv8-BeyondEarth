@@ -71,7 +71,16 @@ ledger-keyed on content (`run_ledger.jsonl`), so finished arms are skipped.
 
 `verify` (run by every detect task, or alone: `scripts/campaign.py verify ...`) fails the scene
 unless every arm reports `"truncation": {}` and ran on the prepared raster (sha256 match), then writes
-`SHA256SUMS` and `handoff.json`. With `DEST` set, the scene is rsynced there and `sha256sum -c`'d.
+`SHA256SUMS` and `handoff.json`.
+
+**Getting the catalogs off the cluster (maintainer's choice, 2026-10-15: transfer from `$SCRATCH`, no
+`DEST`).** Pull each verified scene through the DTN as it completes, and re-check it on arrival:
+```bash
+rsync -a bamaro@dtn.sherlock.stanford.edu:'$SCRATCH/campaign/out/<ObsId>/' <local>/<ObsId>/
+(cd <local>/<ObsId> && sha256sum -c SHA256SUMS)
+```
+`$SCRATCH` purges on inactivity, so do not leave a finished campaign there. `DEST` remains available
+if a durable cluster directory is ever wanted: the scene is then rsynced there and `sha256sum -c`'d.
 
 Progress: `python scripts/campaign.py status --manifest $M --scenes $SCENES --out $OUT`.
 
