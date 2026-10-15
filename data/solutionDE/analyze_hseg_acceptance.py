@@ -173,6 +173,10 @@ def _cli():
     for tag in ("512", "256", "256sr2"):
         p.add_argument(f"--prod-dev-dir-{tag}",
                        help=f"per-arm override of the production dev-crop dir for the {tag} arm")
+    # X-07 (2026-10-14): both weight sets' ROM catalogs were made on crops of data/mars_hirise,
+    # which sits (+0.75, -0.75) m from the humans' label frame. `--pred-shift-m -0.75 0.75` moves
+    # every ROM prediction into that frame and writes `*-x07.*` outputs beside the originals.
+    p.add_argument("--pred-shift-m", nargs=2, type=float, metavar=("DX", "DY"))
     a = p.parse_args()
 
     for arm in ("hseg", "prod"):
@@ -191,8 +195,10 @@ def _cli():
 
 
 if __name__ == "__main__":
-    _cli()
-    R, B, S = [], [], []
+    _args = _cli()
+    SHIFT = tuple(_args.pred_shift_m) if _args.pred_shift_m else None
+    SUFFIX = "-x07" if SHIFT else ""
+    R, B, S, PAIRED = [], [], [], []
     print("[arm specs] " + json.dumps(
         {k: {kk: vv for kk, vv in v.items() if kk != "timings_key"} for k, v in ARM_SPECS.items()},
         default=str))
@@ -217,6 +223,8 @@ if __name__ == "__main__":
             for k in ARM_KEYS:
                 ss, sr = k if isinstance(k, tuple) else (k, 1)
                 g = gpd.read_file(gpkg_fn(tile.stem, ss, sr)).set_crs(crs, allow_override=True)
+                if SHIFT:
+                    g = g.set_geometry(g.geometry.translate(*SHIFT))
                 parms[k].append(g[g.geometry.centroid.within(rp)])
         human = gpd.GeoDataFrame(pd.concat(ph, ignore_index=True), geometry="geometry", crs=crs)
         gdfs = {k: gpd.GeoDataFrame(pd.concat(v, ignore_index=True), geometry="geometry", crs=crs)
@@ -234,11 +242,13 @@ if __name__ == "__main__":
         cats[f"{wtag}_fused"] = fuse_pref(gdfs, res)
     h_band = band_of(equivalent_diameter_px(human, res))
     mask_mix = {}
+    human_found = {}
     for name, cat in cats.items():
         # `overlap_match` returns (human-side, prediction-side) match masks. This script used to
         # discard the prediction side, which is exactly what precision needs — so the harness could
         # not compute its own pre-registered decision axis (F1 by band). Both are kept now.
         hm, pm = overlap_match(human, cat)
+        human_found[name] = hm
         hh, ph = overlap_match(human, cat, hybrid=True)
         # NOTE the denominators differ by construction: recall is over HUMANS in the band, precision
         # over PREDICTIONS in the band (a detection's band is its own size — there is no other
@@ -267,6 +277,18 @@ if __name__ == "__main__":
                           off_px_med=float(s.centroid_off_px.median()) if len(s) else np.nan))
         srows, frows = sfd_rows("hirise", human, {name: cat}, res, rom_area)
         S += [f for f in frows if f["catalog"] == name]
+
+    # The paired counts behind the McNemar test that decided H-seg (humans found by one weight set
+    # and not the other, per band). The 2026-08-07 re-audit computed them without a committed
+    # script; this records them with the run so the decision axis can be re-read under any change.
+    for kind in ("256", "fused"):
+        a, b = human_found[f"prod_{kind}"], human_found[f"hseg_{kind}"]
+        for lo, hi in DEFAULT_SIZE_BANDS:
+            lab = _band_label(lo, hi)
+            sel = h_band == lab
+            PAIRED.append(dict(scene="hirise", catalog=kind, band=lab, n_human=int(sel.sum()),
+                               prod_only=int((a & ~b & sel).sum()),
+                               hseg_only=int((b & ~a & sel).sum())))
 
     # ---------------- summary axes on the HiRISE dev crop (hseg weights) ----------------
     gdfs_dev = {k: gpd.read_file(dev_gpkg("hseg", "hirise", "hirise_crop4k",
@@ -298,10 +320,12 @@ if __name__ == "__main__":
         wall_s=dev_wall)
     print("\n[hseg dev-crop summary]", json.dumps(summary, indent=2, default=str))
 
-    pd.DataFrame(R).to_csv(DE / "hseg_acceptance_recall.csv", index=False)
-    pd.DataFrame(B).to_csv(DE / "hseg_acceptance_box.csv", index=False)
-    pd.DataFrame(S).to_csv(DE / "hseg_acceptance_sfd.csv", index=False)
-    pd.Series(summary).to_json(DE / "hseg_acceptance_summary.json", indent=2, default_handler=str)
+    pd.DataFrame(R).to_csv(DE / f"hseg_acceptance_recall{SUFFIX}.csv", index=False)
+    pd.DataFrame(B).to_csv(DE / f"hseg_acceptance_box{SUFFIX}.csv", index=False)
+    pd.DataFrame(S).to_csv(DE / f"hseg_acceptance_sfd{SUFFIX}.csv", index=False)
+    pd.DataFrame(PAIRED).to_csv(DE / f"hseg_acceptance_paired{SUFFIX}.csv", index=False)
+    pd.Series(summary).to_json(DE / f"hseg_acceptance_summary{SUFFIX}.json", indent=2,
+                               default_handler=str)
 
     pd.set_option("display.width", 240)
     rdf = pd.DataFrame(R)

@@ -206,6 +206,17 @@ def sfd_rows(scene, human, cats, res, area_m2):
 
 
 if __name__ == "__main__":
+    # X-07 (2026-10-14): the HiRISE crops were cut from data/mars_hirise, whose georeference sits
+    # (+0.75, -0.75) m from the label frame Prieur's humans are in. `--pred-shift-m -0.75 0.75` moves
+    # every HiRISE prediction into the humans' frame (the exact georeference difference, nothing
+    # fitted) and writes `*-x07.csv` beside the originals. The crops carry a 262-px margin around
+    # each ROM tile, so the 1.5-px shift loses nothing at tile edges. NAC is unaffected.
+    import argparse
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--pred-shift-m", nargs=2, type=float, metavar=("DX", "DY"))
+    _args = _ap.parse_args()
+    SHIFT = tuple(_args.pred_shift_m) if _args.pred_shift_m else None
+    SUFFIX = "-x07" if SHIFT else ""
     R, P, U, S, F, SZ = [], [], [], [], [], []
 
     # ---------------- HiRISE: the 20 ROM-tile crops, pooled ----------------
@@ -227,6 +238,8 @@ if __name__ == "__main__":
         for k in ARM_KEYS:
             g = gpd.read_file(rom_gpkg(tile.stem, *(k if isinstance(k, tuple) else (k, 1))))
             g = g.set_crs(crs, allow_override=True)
+            if SHIFT:
+                g = g.set_geometry(g.geometry.translate(*SHIFT))
             pooled_arms[k].append(g[g.geometry.centroid.within(rpoly)])
     human = pd.concat(pooled_h, ignore_index=True)
     human = gpd.GeoDataFrame(human, geometry="geometry", crs=crs)
@@ -268,12 +281,12 @@ if __name__ == "__main__":
     S += s; F += f
     SZ += size_vs_human_rows("nac", human, cats, res)
 
-    pd.DataFrame(R).to_csv(DE / "goal3_rom_recall.csv", index=False)
-    pd.DataFrame(P).to_csv(DE / "goal3_rom_precision.csv", index=False)
-    pd.DataFrame(U).to_csv(DE / "goal3_rom_unique.csv", index=False)
-    pd.DataFrame(S).to_csv(DE / "goal3_sfd.csv", index=False)
-    pd.DataFrame(F).to_csv(DE / "goal3_sfd_fit.csv", index=False)
-    pd.DataFrame(SZ).to_csv(DE / "goal3_size_vs_human.csv", index=False)
+    pd.DataFrame(R).to_csv(DE / f"goal3_rom_recall{SUFFIX}.csv", index=False)
+    pd.DataFrame(P).to_csv(DE / f"goal3_rom_precision{SUFFIX}.csv", index=False)
+    pd.DataFrame(U).to_csv(DE / f"goal3_rom_unique{SUFFIX}.csv", index=False)
+    pd.DataFrame(S).to_csv(DE / f"goal3_sfd{SUFFIX}.csv", index=False)
+    pd.DataFrame(F).to_csv(DE / f"goal3_sfd_fit{SUFFIX}.csv", index=False)
+    pd.DataFrame(SZ).to_csv(DE / f"goal3_size_vs_human{SUFFIX}.csv", index=False)
 
     rec = pd.DataFrame(R)
     print("\n=== recall vs human, key catalogs ===")
