@@ -235,7 +235,8 @@ def _boot_counts(n_tiles, rng):
     return rng.multinomial(n_tiles, np.full(n_tiles, 1.0 / n_tiles), size=N_BOOT)
 
 
-def rule(cells, le, cell=DECIDING_CELL, subset="held_out", floor_on=None, fixed_floor=None):
+def rule(cells, le, cell=DECIDING_CELL, subset="held_out", floor_on=None, fixed_floor=None,
+         candidates=CANDIDATES, families=FAMILIES):
     """The registered decision rule on one view of the data. Returns a dict."""
     d = cells[cells.cell_size_m == cell]
     if subset == "held_out":
@@ -247,7 +248,7 @@ def rule(cells, le, cell=DECIDING_CELL, subset="held_out", floor_on=None, fixed_
     tiles = sorted(set(map(tuple, d[["obs_id", "tile_id"]].drop_duplicates().to_numpy())))
     index = pd.MultiIndex.from_tuples(tiles, names=["obs_id", "tile_id"])
     best_floor, sse, cnt = {}, {}, {}
-    for cid, *_ in CANDIDATES:
+    for cid, *_ in candidates:
         c = d[d.candidate == cid]
         if fixed_floor is not None:
             f = fixed_floor
@@ -264,9 +265,9 @@ def rule(cells, le, cell=DECIDING_CELL, subset="held_out", floor_on=None, fixed_
     boot = {cid: np.sqrt((w @ sse[cid]) / (w @ cnt[cid])) for cid in sse}
     ratio = {cid: np.percentile(boot[cid] / boot[best], [2.5, 97.5]).tolist() for cid in boot}
     tied = [cid for cid in rmse if ratio[cid][0] <= 1.0 <= ratio[cid][1]]
-    family = next(f for f in FAMILIES if any(c.split(":")[0] == f for c in tied))
+    family = next(f for f in families if any(c.split(":")[0] == f for c in tied))
     # the rule within C2, decided among C2's own variants against C2's best
-    c2 = [cid for cid, fam, *_ in CANDIDATES if fam == "C2"]
+    c2 = [cid for cid, fam, *_ in candidates if fam == "C2"]
     c2_best = min(c2, key=rmse.get)
     c2_tied = [cid for cid in c2
                if np.percentile(boot[cid] / boot[c2_best], 2.5) <= 1.0
@@ -276,20 +277,20 @@ def rule(cells, le, cell=DECIDING_CELL, subset="held_out", floor_on=None, fixed_
             "fixed_floor": fixed_floor, "n_tiles": len(tiles), "best": best,
             "rmse": rmse, "floor": best_floor, "ratio_to_best_ci95": ratio, "tied": tied,
             "family": family, "c2_rule": c2_rule,
-            "recommend": family if family in ("C1", "C1G") else f"{family}:{c2_rule}"}
+            "recommend": family if family in ("C1", "C1G", "C1GS") else f"{family}:{c2_rule}"}
 
 
-def decide(args):
-    le, sha = load_label_error()
-    cells = pd.read_parquet(STUDY_DIR / "paired_cells.parquet")
-    primary = rule(cells, le)
+def evaluate(cells, le, candidates=CANDIDATES, families=FAMILIES):
+    """The registered rule, its checks, and the per-candidate table, for one candidate set."""
+    kw = dict(candidates=candidates, families=families)
+    primary = rule(cells, le, **kw)
     checks = {
-        "80 m cells": rule(cells, le, cell=80.0),
-        "all tiles": rule(cells, le, subset="all"),
-        "fixed floor 0.10": rule(cells, le, fixed_floor=0.10),
-        "fixed floor 0.25": rule(cells, le, fixed_floor=0.25),
-        "floor chosen on training tiles": rule(cells, le, floor_on=("train",)),
-        "0.25 m/px tiles only": rule(cells, le, subset="res_025"),
+        "80 m cells": rule(cells, le, cell=80.0, **kw),
+        "all tiles": rule(cells, le, subset="all", **kw),
+        "fixed floor 0.10": rule(cells, le, fixed_floor=0.10, **kw),
+        "fixed floor 0.25": rule(cells, le, fixed_floor=0.25, **kw),
+        "floor chosen on training tiles": rule(cells, le, floor_on=("train",), **kw),
+        "0.25 m/px tiles only": rule(cells, le, subset="res_025", **kw),
     }
     rec = primary["recommend"]
     if rec.startswith("C3") and primary["c2_rule"] != "256pref_engulf":
@@ -297,7 +298,7 @@ def decide(args):
     # the label's metrics, every candidate at its own primary floor, for the write-up
     d = cells[(cells.cell_size_m == DECIDING_CELL)]
     table = []
-    for cid, fam, *_ in CANDIDATES:
+    for cid, fam, *_ in candidates:
         f = primary["floor"][cid]
         sub = d[(d.candidate == cid) & (d.floor == f)]
         ho = sub[sub.split.isin(le.HELD_OUT)]
@@ -317,29 +318,118 @@ def decide(args):
     compensating = (abs(np.log(win["count_ratio"])) > np.log(1.2) and
                     abs(np.log(win["mean_area_ratio"])) > np.log(1.2) and
                     np.sign(np.log(win["count_ratio"])) != np.sign(np.log(win["mean_area_ratio"])))
-    out = {"what": "detector configuration study (docs/configuration_study_plan.md); label = "
-                   "per-cell area fraction vs Prieur's human ROM mapping, notebook 35's metric",
-           "label_error_sha256": sha, "primary": primary, "checks": checks,
-           "checks_agree": {k: v["recommend"] == primary["recommend"] for k, v in checks.items()},
-           "recommendation": rec, "recommended_candidate": rec_cid,
-           "recommended_is_tied_with_best": bool(lo <= 1.0 <= hi),
-           "compensating_errors_flag": bool(compensating),
-           "held_out_40m_at_primary_floor": table,
-           "meta": json.loads((STUDY_DIR / "score_meta.json").read_text())}
-    OUT_JSON.write_text(json.dumps(out, indent=1, default=float))
+    return {"primary": primary, "checks": checks,
+            "checks_agree": {k: v["recommend"] == primary["recommend"] for k, v in checks.items()},
+            "recommendation": rec, "recommended_candidate": rec_cid,
+            "recommended_is_tied_with_best": bool(lo <= 1.0 <= hi),
+            "compensating_errors_flag": bool(compensating),
+            "held_out_40m_at_primary_floor": table}
+
+
+def _print(out):
     print(json.dumps({k: out[k] for k in ("recommendation", "recommended_is_tied_with_best",
                                           "checks_agree", "compensating_errors_flag")}, indent=1))
-    for r in table:
+    for r in out["held_out_40m_at_primary_floor"]:
         print(f"  {r['candidate']:24s} floor {r['floor']:.2f}  RMSE {r['rmse']:.4f}  pooled ratio "
               f"{r['pooled_ratio']:.3f}  spearman {r['spearman']:.3f}  ratio-to-best CI "
-              f"{[round(x, 3) for x in primary['ratio_to_best_ci95'][r['candidate']]]}")
+              f"{[round(x, 3) for x in out['primary']['ratio_to_best_ci95'][r['candidate']]]}")
+
+
+def decide(args):
+    le, sha = load_label_error()
+    cells = pd.read_parquet(STUDY_DIR / "paired_cells.parquet")
+    out = {"what": "detector configuration study (docs/configuration_study_plan.md); label = "
+                   "per-cell area fraction vs Prieur's human ROM mapping, notebook 35's metric",
+           "label_error_sha256": sha, **evaluate(cells, le),
+           "meta": json.loads((STUDY_DIR / "score_meta.json").read_text())}
+    OUT_JSON.write_text(json.dumps(out, indent=1, default=float))
+    _print(out)
+
+
+# --- post hoc --------------------------------------------------------------------------------------
+
+#: Added 2026-10-15 AFTER the registered decision ran: the validated in-slice SAM2 path. The
+#: registered C1G and C3 re-masked with 5a's post-fusion ``remask_windows``, whose masks came out
+#: 0.97x YOLO's area per row, against 0.70-0.76x for the in-slice path, so neither had tested tight
+#: SAM2 masks. Reported beside the registered result, never in place of it.
+POSTHOC_CANDIDATE = ("C1GS", "C1GS", ROM_DIR, "config1gs")
+POSTHOC_JSON = REPO / "data" / "review" / "config_study_posthoc.json"
+
+
+def _mask_area_vs_yolo(le):
+    """Per-boulder mask area of each SAM2 path over configuration 1's YOLO mask for the same
+    detection (centroids matched within 1 m), overall and per image."""
+    import geopandas as gpd
+    from YOLOv8BeyondEarth.matching import unique_centroid_match
+    ratios = {"C1G (window re-masker)": {}, "C1GS (in-slice, validated)": {}}
+    for s in le.images().values():
+        obs_dir = ROM_DIR / s.obs_id
+        for y_path in sorted(obs_dir.glob(f"{s.obs_id}_rom??_t*-predictions-*-nms.gpkg")):
+            stem = y_path.name.split("-predictions-")[0]
+            y = gpd.read_file(y_path)
+            for name, sub in (("C1G (window re-masker)", "config1g"),
+                              ("C1GS (in-slice, validated)", "config1gs")):
+                hits = sorted((obs_dir / sub).glob(f"{stem}-predictions-*-nms.gpkg"))
+                if not hits or not len(y):
+                    continue
+                o = gpd.read_file(hits[0])
+                ia, ib = unique_centroid_match(
+                    np.c_[y.geometry.centroid.x, y.geometry.centroid.y],
+                    np.c_[o.geometry.centroid.x, o.geometry.centroid.y], 1.0)
+                r = o.geometry.area.to_numpy()[ib] / y.geometry.area.to_numpy()[ia]
+                ratios[name].setdefault(s.obs_id, []).append(r)
+    out = {}
+    for name, by_obs in ratios.items():
+        allr = np.concatenate([np.concatenate(v) for v in by_obs.values()])
+        out[name] = {"n_matched": int(allr.size), "median": float(np.median(allr)),
+                     "iqr": [float(np.percentile(allr, 25)), float(np.percentile(allr, 75))],
+                     "median_by_image": {o: float(np.median(np.concatenate(v)))
+                                         for o, v in by_obs.items()}}
+    return out
+
+
+def posthoc(args):
+    """Score the post-hoc candidate on the registered tiles and re-apply the same rule with it
+    slotted in after C1G (same family size: the 256 arm plus SAM2)."""
+    le, sha = load_label_error()
+    splits = le.split_map()
+    reg = pd.read_parquet(STUDY_DIR / "paired_cells.parquet")
+    reg_tiles = set(map(tuple, reg[["obs_id", "rom_index", "tile_id"]].drop_duplicates()
+                        .itertuples(index=False, name=None)))
+    cid, fam, root, sub = POSTHOC_CANDIDATE
+    keep = reg_tiles & tile_set(le, root, sub)
+    frames = []
+    for floor in FLOORS:
+        for cell in CELLS:
+            frames.append(paired(le, splits, root, sub, floor, cell, keep)
+                          .assign(candidate=cid, family=fam, floor=floor))
+        print(f"  {cid} floor {floor:.2f} done", flush=True)
+    new = pd.concat(frames, ignore_index=True)
+    reg = reg[[(o, int(i), int(t)) in keep
+               for o, i, t in zip(reg.obs_id, reg.rom_index, reg.tile_id)]]
+    cells = pd.concat([reg, new], ignore_index=True)
+    i = next(k for k, c in enumerate(CANDIDATES) if c[0] == "C1G") + 1
+    candidates = CANDIDATES[:i] + [POSTHOC_CANDIDATE] + CANDIDATES[i:]
+    families = ("C1", "C2", "C1G", "C1GS", "C3")
+    out = {"what": "POST HOC addition to the configuration study: the validated in-slice SAM2 path "
+                   "(C1GS), scored beside the registered candidates by the same rule",
+           "why": ("the registered C1G/C3 window re-masker did not tighten "
+                   "masks (0.97x YOLO per row), so SAM2 had not been tested"),
+           "label_error_sha256": sha, "n_tiles": len(keep),
+           "tiles_dropped_vs_registered": sorted(reg_tiles - keep),
+           **evaluate(cells, le, candidates, families),
+           "mask_area_vs_yolo": _mask_area_vs_yolo(le)}
+    POSTHOC_JSON.write_text(json.dumps(out, indent=1, default=float))
+    _print(out)
+    print(json.dumps(out["mask_area_vs_yolo"], indent=1))
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=("validate", "refuse", "score", "decide"))
+    ap.add_argument("cmd", choices=("validate", "refuse", "score", "decide", "posthoc"))
     args = ap.parse_args(argv)
-    {"validate": validate, "refuse": refuse, "score": score, "decide": decide}[args.cmd](args)
+    {"validate": validate, "refuse": refuse, "score": score, "decide": decide,
+     "posthoc": posthoc}[args.cmd](args)
 
 
 if __name__ == "__main__":

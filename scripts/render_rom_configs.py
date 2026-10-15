@@ -87,6 +87,17 @@ def output_1g(crop):
     return crop.parent / "config1g" / f"{crop.stem}-predictions-256-sam2-nms.gpkg"
 
 
+def output_1gs(crop):
+    """Configuration "1gs": the 256 arm with SAM2 re-masking *in-slice* (Solution G's validated path)."""
+    from YOLOv8BeyondEarth.predict import prediction_filenames
+    cfg = presets.GOAL1_PRODUCTION
+    return crop.parent / "config1gs" / prediction_filenames(
+        crop.stem, confidence_threshold=cfg["confidence_threshold"], slice_size=256,
+        inference_size=cfg["inference_size"], overlap_height_ratio=cfg["overlap_height_ratio"],
+        sr_factor=1, downscale_pred=cfg["downscale_pred"], mask_tag="sam2",
+        output_format="gpkg")["nms"]
+
+
 def config1_layer(crop):
     """Configuration 1's catalog for this crop: the one ``-nms.gpkg`` beside it (non-recursive)."""
     hits = sorted(crop.parent.glob(f"{crop.stem}-predictions-*-nms.gpkg"))
@@ -98,6 +109,8 @@ def config1_layer(crop):
 def done(crop, configs):
     fused_path, sam_path = outputs(crop)
     paths = {"2": fused_path, "3": sam_path, "1g": output_1g(crop)}
+    if "1gs" in configs:
+        paths["1gs"] = output_1gs(crop)
     return all(presets.manifest_path(paths[c]).exists() for c in configs)
 
 
@@ -133,9 +146,11 @@ def render_tile(crop, configs, device):
         _render_ladder(crop, configs, device, rec)
     if "1g" in configs and not presets.manifest_path(output_1g(crop)).exists():
         _render_1g(crop, rec)
-    # a "1g"-only run keeps its own clock, so it cannot overwrite the tile's config-2/3 render time
-    rec["seconds" if ("2" in configs or "3" in configs) else "seconds_1g"] = round(
-        time.monotonic() - t0, 1)
+    if "1gs" in configs and not presets.manifest_path(output_1gs(crop)).exists():
+        _render_1gs(crop, device, rec)
+    # a "1g"/"1gs"-only run keeps its own clock, so it cannot overwrite the tile's 2/3 render time
+    clock = "seconds" if ("2" in configs or "3" in configs) else "seconds_" + "_".join(configs)
+    rec[clock] = round(time.monotonic() - t0, 1)
     print("RESULT " + json.dumps(rec, default=str), flush=True)
 
 
@@ -168,6 +183,40 @@ def _render_1g(crop, rec):
     rec.update(n_config1=int(len(catalog)), n_config1g=int(len(out)), n_sam_1g=out.attrs.get("n_sam"),
                sam_seconds_1g=sam_seconds,
                min_ratio_1g=out.attrs.get("min_logit_px_per_native_px"))
+
+
+def _render_1gs(crop, device, rec):
+    """Configuration "1gs": the 256 arm with SAM2 re-masking each detection *inside its slice*,
+    through ``get_sliced_prediction(remask_fn=sam2_remasker(sam), mask_tag="sam2")``.
+
+    This is Solution G's validated path (1.0 logit px per native px; Test 3c: matched area 1.04x
+    human against YOLO's 1.37x). It was added post hoc to the configuration study, 2026-10-15,
+    because "1g" (5a's post-fusion ``remask_windows``, gate 3 open) came out 0.97x YOLO's area per
+    row, so it had not tested tight masks. Unlike "1g", detections whose SAM mask fails the
+    background-grab guard are dropped here, as the validated path does.
+    """
+    from sahi import AutoDetectionModel
+    from ultralytics import SAM
+    from YOLOv8BeyondEarth.orientation_validation import sam2_remasker
+    from YOLOv8BeyondEarth.predict import get_sliced_prediction
+
+    model = AutoDetectionModel.from_pretrained(
+        model_type="ultralytics", model_path=str(WEIGHTS), device=device,
+        image_size=presets.GOAL1_PRODUCTION["inference_size"],
+        confidence_threshold=presets.GOAL1_PRODUCTION["confidence_threshold"])
+    cfg = {k: v for k, v in presets.GOAL1_PRODUCTION.items()
+           if k not in ("slice_size", "sr_factor", "save_bbox", "save_prenms", "output_format",
+                        "max_det", "batch_size")}
+    t0 = time.monotonic()
+    _, nms = get_sliced_prediction(
+        crop, model, output_dir=output_1gs(crop).parent, slice_size=256, sr_factor=1,
+        max_det=MAX_DET, batch_size=BATCH[256], save_bbox=False, save_prenms=False, save_nms=True,
+        output_format="gpkg", on_conflict="overwrite", on_max_det="warn",
+        remask_fn=sam2_remasker(SAM(str(SAM_WEIGHTS)),
+                                device=0 if str(device).startswith("cuda") else device),
+        mask_tag="sam2", **cfg)
+    rec.update(n_config1gs=int(len(nms)), seconds_1gs=round(time.monotonic() - t0, 1),
+               truncation_1gs=dict(nms.attrs.get("truncation", {})))
 
 
 def _render_ladder(crop, configs, device, rec):
@@ -239,8 +288,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--obs", nargs="*", help="only these observations")
     ap.add_argument("--limit", type=int, help="at most this many tiles (smoke test)")
-    ap.add_argument("--configs", nargs="+", default=["2", "3"], choices=["2", "3", "1g"],
-                    help="'1g' = configuration 1's 256 catalog re-masked by SAM2 (no YOLO run)")
+    ap.add_argument("--configs", nargs="+", default=["2", "3"], choices=["2", "3", "1g", "1gs"],
+                    help="'1g' = configuration 1's 256 catalog re-masked by SAM2 (no YOLO run); "
+                         "'1gs' = the 256 arm with SAM2 re-masking in-slice (G's validated path)")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--tile", help=argparse.SUPPRESS)            # internal: the child
     args = ap.parse_args(argv)
@@ -261,10 +311,12 @@ def main(argv=None):
         if res.returncode == 0 and line:
             rec = json.loads(line[-1][len("RESULT "):])
             flag = f" TRUNCATED {rec['truncated_arms']}" if rec.get("truncated_arms") else ""
+            secs = next((v for k, v in rec.items() if k.startswith("seconds")), "-")
             print(f"  [ok]   {crop.stem}  c2={rec.get('n_config2', '-')}  "
                   f"c3={rec.get('n_config3', '-')}  c1g={rec.get('n_config1g', '-')}  "
-                  f"ratio>={rec.get('min_ratio', rec.get('min_ratio_1g', '-'))}  "
-                  f"{rec.get('seconds', rec.get('seconds_1g'))}s{flag}", flush=True)
+                  f"c1gs={rec.get('n_config1gs', '-')}  "
+                  f"ratio>={rec.get('min_ratio', rec.get('min_ratio_1g', '-'))}  {secs}s{flag}",
+                  flush=True)
         else:
             tail = (res.stderr or "").strip().splitlines()
             oom = "out of memory" in (res.stderr or "").lower()
