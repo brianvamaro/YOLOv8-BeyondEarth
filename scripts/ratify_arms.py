@@ -79,8 +79,17 @@ BODIES = {
 DATASET = BASE / "data_prieur/boulder2024"
 
 
-def load_body(body, clip_first=False):
-    """Reference and arm layers for one body, plus the raster's CRS and native resolution."""
+def load_body(body, clip_first=False, pred_shift_m=None, erode_tiles_m=0.0):
+    """Reference and arm layers for one body, plus the raster's CRS and native resolution.
+
+    ``pred_shift_m`` and ``erode_tiles_m`` exist for the X-07 measurement (2026-10-14). The Mars
+    arms were made on a raster in the JP2 frame, which sits (+0.75, -0.75) m from the label frame the
+    human labels are in. So ``pred_shift_m=(-0.75, 0.75)`` translates every prediction into the
+    humans' frame, which is what repairing the raster's transform would do. The arms were pre-clipped
+    to the *unshifted* ROM with no margin, so any shift loses a ~0.75 m strip along two tile edges;
+    ``erode_tiles_m`` scores both runs on tiles shrunk by that much plus a margin, so the comparison
+    sees the frame and not the strip.
+    """
     import rasterio
 
     cfg = BODIES[body]
@@ -88,16 +97,21 @@ def load_body(body, clip_first=False):
         crs, res = src.crs, src.res[0]
     split_map = ar.dataset_splits(DATASET)
     tiles = ar.rom_tiles(cfg["rom"], crs, split_map=split_map)
+    if erode_tiles_m:
+        tiles = tiles.set_geometry(tiles.geometry.buffer(-float(erode_tiles_m)))
     humans = ar.clip_to_tiles(ar.load_aligned(cfg["humans"], crs), tiles)
     arms = {}
     for key, path in cfg["arms"].items():
         layer = gpd.read_file(path).set_crs(crs, allow_override=True)
+        if pred_shift_m:
+            layer = layer.set_geometry(layer.geometry.translate(*map(float, pred_shift_m)))
         arms[key] = ar.clip_to_tiles(layer, tiles) if clip_first else layer
     return dict(crs=crs, res=res, tiles=tiles, humans=humans, arms=arms, cfg=cfg)
 
 
-def run_body(body, out_dir, clip_first=False):
-    data = load_body(body, clip_first=clip_first)
+def run_body(body, out_dir, clip_first=False, pred_shift_m=None, erode_tiles_m=0.0):
+    data = load_body(body, clip_first=clip_first, pred_shift_m=pred_shift_m,
+                     erode_tiles_m=erode_tiles_m)
     tiles, humans, arms, res = data["tiles"], data["humans"], data["arms"], data["res"]
     print(f"[{body}] res {res:.6f} m/px | ROM tiles {len(tiles)} "
           f"({tiles.split.value_counts().to_dict()})")
@@ -126,7 +140,9 @@ def run_body(body, out_dir, clip_first=False):
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"{body}{'-clipfirst' if clip_first else ''}"
+    tag = (f"{body}{'-clipfirst' if clip_first else ''}"
+           f"{'-predshift' if pred_shift_m else ''}"
+           f"{f'-erode{erode_tiles_m:g}m' if erode_tiles_m else ''}")
     scores.to_csv(out_dir / f"arm_ratification_{tag}.csv", index=False)
 
     marg = []
@@ -151,6 +167,8 @@ def run_body(body, out_dir, clip_first=False):
         native_res=res,
         extra=dict(body=body, raster=presets.file_identity(data["cfg"]["raster"]),
                    clip_order="clip-then-fuse" if clip_first else "fuse-then-clip",
+                   pred_shift_m=list(pred_shift_m) if pred_shift_m else None,
+                   erode_tiles_m=float(erode_tiles_m),
                    arms_supplied_clipped=bool(data["cfg"]["arms_are_clipped"]),
                    dataset_root=DATASET.as_posix(),
                    rom_tiles=int(len(tiles)),
@@ -201,10 +219,16 @@ def main():
     ap.add_argument("--clip-first", action="store_true",
                     help="clip the ARM layers to the ROM before fusing, instead of clipping the "
                          "fused catalog after — the Mars-side order, run on the Moon to measure it")
+    ap.add_argument("--pred-shift-m", nargs=2, type=float, metavar=("DX", "DY"),
+                    help="X-07 diagnostic: translate every prediction by (DX, DY) map units "
+                         "before scoring; outputs are tagged -predshift")
+    ap.add_argument("--erode-tiles-m", type=float, default=0.0,
+                    help="score on ROM tiles shrunk by this many map units (tagged -erodeNm)")
     args = ap.parse_args()
     bodies = list(BODIES) if args.body == "both" else [args.body]
     for body in bodies:
-        run_body(body, args.out_dir, clip_first=args.clip_first)
+        run_body(body, args.out_dir, clip_first=args.clip_first, pred_shift_m=args.pred_shift_m,
+                 erode_tiles_m=args.erode_tiles_m)
 
 
 if __name__ == "__main__":

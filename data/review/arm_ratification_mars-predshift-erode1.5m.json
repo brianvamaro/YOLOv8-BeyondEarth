@@ -1,0 +1,762 @@
+{
+ "provenance": {
+  "arms": {
+   "(256, 2)": {
+    "bytes": 16310272,
+    "mtime": "2026-08-20T16:48:26+00:00",
+    "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/review/rom_arms/hirise/ESP_017355_2260_RED-predictions-ct-010-ss-256sr2-is-1024-ov-020-rom-downscaled-mask-nms.gpkg",
+    "sha256": "483056fd972d80fb2fb081d3218b5b4cf34c300434269258f6e2e593c40881ed"
+   },
+   "256": {
+    "bytes": 7467008,
+    "mtime": "2026-08-20T16:47:41+00:00",
+    "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/review/rom_arms/hirise/ESP_017355_2260_RED-predictions-ct-010-ss-256-is-1024-ov-020-rom-downscaled-mask-nms.gpkg",
+    "sha256": "040d988cfb0f4dd3677b2f5c4aaf5faee758c2fd75d8acd3882c4496c9c8b0de"
+   },
+   "512": {
+    "bytes": 7102464,
+    "mtime": "2026-08-20T16:48:50+00:00",
+    "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/review/rom_arms/hirise/ESP_017355_2260_RED-predictions-ct-010-ss-512-is-1024-ov-020-rom-downscaled-mask-nms.gpkg",
+    "sha256": "af8a85f439d1ca62ccdc5efcc63f916f666568ff686a76496013ed8ef0d8f1ef"
+   }
+  },
+  "arms_supplied_clipped": true,
+  "body": "mars",
+  "cells": {
+   "256": {
+    "n_fused": 10882,
+    "n_in_rom": 10650,
+    "n_suppressed": 0
+   },
+   "256_sr": {
+    "n_fused": 18022,
+    "n_in_rom": 17651,
+    "n_suppressed": 9238
+   },
+   "512_256": {
+    "n_fused": 11310,
+    "n_in_rom": 11054,
+    "n_suppressed": 7698
+   },
+   "512_256_sr": {
+    "n_fused": 18246,
+    "n_in_rom": 17856,
+    "n_suppressed": 17140
+   }
+  },
+  "clip_order": "fuse-then-clip",
+  "code": {
+   "geopandas": "1.1.3",
+   "git_dirty": true,
+   "git_sha": "06437526b617252079ee272672fe19ab405abff2",
+   "host": "Bdirb",
+   "opencv-python": "4.13.0.92",
+   "platform": "Windows-10-10.0.26200-SP0",
+   "python": "3.10.15",
+   "rasterio": "1.4.4",
+   "sahi": "0.12.1",
+   "scripts_sha256": "9e62fba89a26ab401d24473483a5d118e8fffa08a412707a04d2c71f14c944fa",
+   "shapely": "2.1.2",
+   "source_sha256": "3663c2418349853ba11e9adf91dee62d582af671dfb5b323be9801afb6592e3a",
+   "torch": "2.11.0+cu128",
+   "ultralytics": "8.4.75"
+  },
+  "combos": {
+   "256": [
+    [
+     256,
+     1
+    ]
+   ],
+   "256_sr": [
+    [
+     256,
+     1
+    ],
+    [
+     256,
+     2
+    ]
+   ],
+   "512_256": [
+    [
+     512,
+     1
+    ],
+    [
+     256,
+     1
+    ]
+   ],
+   "512_256_sr": [
+    [
+     512,
+     1
+    ],
+    [
+     256,
+     1
+    ],
+    [
+     256,
+     2
+    ]
+   ]
+  },
+  "config_hash": "c770a16b",
+  "dataset_root": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/boulder2024",
+  "erode_tiles_m": 1.5,
+  "fusion": {
+   "bands": {
+    "256": [
+     0.0,
+     "inf"
+    ]
+   },
+   "cluster_thr": null,
+   "cross_arm_only": true,
+   "engulf_thr": 0.7,
+   "metric": "diou",
+   "rule": "bands",
+   "scales": [
+    512,
+    256,
+    [
+     256,
+     2
+    ]
+   ]
+  },
+  "harness": "arm_ratification",
+  "humans_by_split": {
+   "test": 133,
+   "train": 4233,
+   "validation": 820
+  },
+  "humans_in_rom": 5186,
+  "matching_rule": {
+   "admissibility": "intersection > 0.5 * area(smaller polygon)",
+   "assignment": "centroid within ROM tile",
+   "bands": [
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     6
+    ],
+    [
+     6,
+     8
+    ],
+    [
+     8,
+     10
+    ],
+    [
+     10,
+     14
+    ],
+    [
+     14,
+     null
+    ]
+   ],
+   "hybrid_gate": "centroid-in-polygon, either side",
+   "resolutions": [
+    "optimal",
+    "greedy"
+   ],
+   "size_definition": "equivalent-area diameter in native px"
+  },
+  "native_res": 0.5,
+  "pred_shift_m": [
+   -0.75,
+   0.75
+  ],
+  "preset_version": 2,
+  "raster": {
+   "bytes": 1937783861,
+   "mtime": "2026-06-23T23:54:57.893327+00:00",
+   "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/mars_hirise/raster/ESP_017355_2260_RED.tif",
+   "sha256": "d6d6aa3187df581e150bc2ecd570f441a3b208f309f8a6e35371113267c72011"
+  },
+  "reference": {
+   "humans": {
+    ".cpg": {
+     "bytes": 5,
+     "mtime": "2026-06-28T03:47:17.713844+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.cpg",
+     "sha256": "3ad3031f5503a4404af825262ee8232cc04d4ea6683d42c5dd0a2f2a27ac9824"
+    },
+    ".dbf": {
+     "bytes": 367518,
+     "mtime": "2026-06-28T03:47:17.729863+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.dbf",
+     "sha256": "60c584f7623b63c0af207f15491e204eca992c64135c6db51c409599b152a1a1"
+    },
+    ".prj": {
+     "bytes": 374,
+     "mtime": "2026-06-28T03:47:17.729863+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.prj",
+     "sha256": "4385556701c8759165abb7233c57168a3a88fecfd072edbdb0fad9b48f38f8f1"
+    },
+    ".shp": {
+     "bytes": 1868596,
+     "mtime": "2026-06-28T03:47:17.755938+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.shp",
+     "sha256": "db67d37406f2c0d760860b30bf78c161b1de31e0e5ac72635ddd99a1cd702800"
+    },
+    ".shx": {
+     "bytes": 42692,
+     "mtime": "2026-06-28T03:47:17.761582+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.shx",
+     "sha256": "d86d7b9991ee6193b76ae5defaaa99138eda5a15127d38de21796b23fed89f1c"
+    }
+   },
+   "rom": {
+    ".cpg": {
+     "bytes": 10,
+     "mtime": "2026-06-28T03:47:17.808677+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.cpg",
+     "sha256": "09fc313075748ce8ead962229ed89c919d5a9ff71974ee725a0b48bb87d975a2"
+    },
+    ".dbf": {
+     "bytes": 8822,
+     "mtime": "2026-06-28T03:47:17.813186+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.dbf",
+     "sha256": "09be21a27584e69ab0d54f41d5a72f2a665827e6fe388f7a507a7968e79a71ef"
+    },
+    ".prj": {
+     "bytes": 374,
+     "mtime": "2026-06-28T03:47:17.820073+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.prj",
+     "sha256": "4385556701c8759165abb7233c57168a3a88fecfd072edbdb0fad9b48f38f8f1"
+    },
+    ".shp": {
+     "bytes": 2820,
+     "mtime": "2026-06-28T03:47:17.828927+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.shp",
+     "sha256": "6b6d89af7a188a37915ecce1e1b349b0e64041834f8179134f73102ddcc48124"
+    },
+    ".shx": {
+     "bytes": 260,
+     "mtime": "2026-06-28T03:47:17.828927+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.shx",
+     "sha256": "2aa4fec87536374c6c51e4a8670366380d10c7a9bad45cb3131eb6ed8c68d65c"
+    }
+   }
+  },
+  "rom_tiles": 20,
+  "rom_tiles_by_split": {
+   "test": 1,
+   "train": 16,
+   "validation": 3
+  }
+ },
+ "marginals_recall_pooled_optimal_strict": [
+  {
+   "metric": "recall",
+   "band": "all",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 5186,
+   "base": 0.9371384496721944,
+   "d512_without_sr": 0.01677593521018128,
+   "d512_with_sr": 0.010605476282298576,
+   "dsr_without_512": 0.019668337832626226,
+   "dsr_with_512": 0.013497878904743521,
+   "interaction": -0.006170458927882705,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "4-6",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 1127,
+   "base": 0.935226264418811,
+   "d512_without_sr": 0.008873114463176623,
+   "d512_with_sr": 0.0026619343389530092,
+   "dsr_without_512": 0.028393966282165062,
+   "dsr_with_512": 0.022182786157941448,
+   "interaction": -0.006211180124223614,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "6-8",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 1496,
+   "base": 0.945855614973262,
+   "d512_without_sr": 0.016042780748663166,
+   "d512_with_sr": 0.011363636363636354,
+   "dsr_without_512": 0.012032085561497374,
+   "dsr_with_512": 0.007352941176470562,
+   "interaction": -0.004679144385026812,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "8-10",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 1124,
+   "base": 0.9448398576512456,
+   "d512_without_sr": 0.01690391459074736,
+   "d512_with_sr": 0.011565836298932486,
+   "dsr_without_512": 0.009786476868327343,
+   "dsr_with_512": 0.004448398576512469,
+   "interaction": -0.005338078291814874,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "10-14",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 986,
+   "base": 0.9290060851926978,
+   "d512_without_sr": 0.02535496957403649,
+   "d512_with_sr": 0.01724137931034475,
+   "dsr_without_512": 0.020283975659229236,
+   "dsr_with_512": 0.012170385395537497,
+   "interaction": -0.008113590263691739,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "14-inf",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 371,
+   "base": 0.9353099730458221,
+   "d512_without_sr": 0.021563342318059342,
+   "d512_with_sr": 0.013477088948787075,
+   "dsr_without_512": 0.018867924528301883,
+   "dsr_with_512": 0.010781671159029615,
+   "interaction": -0.008086253369272267,
+   "body": "mars"
+  }
+ ],
+ "scores_pooled_optimal_strict": [
+  {
+   "combo": "256",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 10650,
+   "n_matched": 4860,
+   "recall": 0.9371384496721944,
+   "precision": 0.4563380281690141,
+   "f1": 0.6137913614549129
+  },
+  {
+   "combo": "256",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 3,
+   "n_matched": 66,
+   "recall": 0.8048780487804879,
+   "precision": 0.0,
+   "f1": 0.0
+  },
+  {
+   "combo": "256",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 2643,
+   "n_matched": 1054,
+   "recall": 0.935226264418811,
+   "precision": 0.14945138100643207,
+   "f1": 0.25771870077783593
+  },
+  {
+   "combo": "256",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4021,
+   "n_matched": 1415,
+   "recall": 0.945855614973262,
+   "precision": 0.4006466053220592,
+   "f1": 0.5628714688353534
+  },
+  {
+   "combo": "256",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2077,
+   "n_matched": 1062,
+   "recall": 0.9448398576512456,
+   "precision": 0.660086663456909,
+   "f1": 0.7772021721062736
+  },
+  {
+   "combo": "256",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1419,
+   "n_matched": 916,
+   "recall": 0.9290060851926978,
+   "precision": 0.773784355179704,
+   "f1": 0.844320425514768
+  },
+  {
+   "combo": "256",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 487,
+   "n_matched": 347,
+   "recall": 0.9353099730458221,
+   "precision": 0.7905544147843943,
+   "f1": 0.8568615629329365
+  },
+  {
+   "combo": "512_256",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 11054,
+   "n_matched": 4947,
+   "recall": 0.9539143848823757,
+   "precision": 0.44753030577166636,
+   "f1": 0.6092364532019704
+  },
+  {
+   "combo": "512_256",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 3,
+   "n_matched": 67,
+   "recall": 0.8170731707317073,
+   "precision": 0.0,
+   "f1": 0.0
+  },
+  {
+   "combo": "512_256",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 2625,
+   "n_matched": 1064,
+   "recall": 0.9440993788819876,
+   "precision": 0.14857142857142858,
+   "f1": 0.25674007665822124
+  },
+  {
+   "combo": "512_256",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4034,
+   "n_matched": 1439,
+   "recall": 0.9618983957219251,
+   "precision": 0.39538919186911253,
+   "f1": 0.5604180467305396
+  },
+  {
+   "combo": "512_256",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2228,
+   "n_matched": 1081,
+   "recall": 0.9617437722419929,
+   "precision": 0.624326750448833,
+   "f1": 0.7571445979206194
+  },
+  {
+   "combo": "512_256",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1609,
+   "n_matched": 941,
+   "recall": 0.9543610547667343,
+   "precision": 0.714108141702921,
+   "f1": 0.8169368673693786
+  },
+  {
+   "combo": "512_256",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 555,
+   "n_matched": 355,
+   "recall": 0.9568733153638814,
+   "precision": 0.7603603603603604,
+   "f1": 0.8473727823703926
+  },
+  {
+   "combo": "256_sr",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 17651,
+   "n_matched": 4962,
+   "recall": 0.9568067875048206,
+   "precision": 0.2811172171548354,
+   "f1": 0.43455795419713616
+  },
+  {
+   "combo": "256_sr",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 2568,
+   "n_matched": 80,
+   "recall": 0.975609756097561,
+   "precision": 0.00661993769470405,
+   "f1": 0.013150642544262549
+  },
+  {
+   "combo": "256_sr",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 6615,
+   "n_matched": 1086,
+   "recall": 0.963620230700976,
+   "precision": 0.07210884353741497,
+   "f1": 0.13417705879541836
+  },
+  {
+   "combo": "256_sr",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4351,
+   "n_matched": 1433,
+   "recall": 0.9578877005347594,
+   "precision": 0.3704895426338773,
+   "f1": 0.5343171571039729
+  },
+  {
+   "combo": "256_sr",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2135,
+   "n_matched": 1073,
+   "recall": 0.9546263345195729,
+   "precision": 0.6421545667447307,
+   "f1": 0.7678168742639018
+  },
+  {
+   "combo": "256_sr",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1460,
+   "n_matched": 936,
+   "recall": 0.949290060851927,
+   "precision": 0.7506849315068493,
+   "f1": 0.8383861498126851
+  },
+  {
+   "combo": "256_sr",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 504,
+   "n_matched": 354,
+   "recall": 0.954177897574124,
+   "precision": 0.7718253968253969,
+   "f1": 0.853368862999055
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 17856,
+   "n_matched": 5017,
+   "recall": 0.9674122637871192,
+   "precision": 0.28096998207885304,
+   "f1": 0.4354656713826925
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 2552,
+   "n_matched": 80,
+   "recall": 0.975609756097561,
+   "precision": 0.004702194357366771,
+   "f1": 0.009359279335491168
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 6547,
+   "n_matched": 1089,
+   "recall": 0.966282165039929,
+   "precision": 0.07117763861310523,
+   "f1": 0.13258862174577865
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4329,
+   "n_matched": 1450,
+   "recall": 0.9692513368983957,
+   "precision": 0.3691383691383691,
+   "f1": 0.5346542283971056
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2228,
+   "n_matched": 1086,
+   "recall": 0.9661921708185054,
+   "precision": 0.6202872531418312,
+   "f1": 0.7555303631333288
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1617,
+   "n_matched": 953,
+   "recall": 0.9665314401622718,
+   "precision": 0.7043908472479901,
+   "f1": 0.8148983410627784
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 565,
+   "n_matched": 359,
+   "recall": 0.967654986522911,
+   "precision": 0.7433628318584071,
+   "f1": 0.8408080188481967
+  }
+ ],
+ "splits_14plus": [
+  {
+   "combo": "256",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 347,
+   "recall": 0.9353099730458221,
+   "precision": 0.7905544147843943
+  },
+  {
+   "combo": "256",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.5454545454545454
+  },
+  {
+   "combo": "256",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 282,
+   "recall": 0.9368770764119602,
+   "precision": 0.8164893617021277
+  },
+  {
+   "combo": "256",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 55,
+   "recall": 0.9166666666666666,
+   "precision": 0.72
+  },
+  {
+   "combo": "512_256",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 355,
+   "recall": 0.9568733153638814,
+   "precision": 0.7603603603603604
+  },
+  {
+   "combo": "512_256",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.4375
+  },
+  {
+   "combo": "512_256",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 290,
+   "recall": 0.9634551495016611,
+   "precision": 0.7966903073286052
+  },
+  {
+   "combo": "512_256",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 55,
+   "recall": 0.9166666666666666,
+   "precision": 0.6724137931034483
+  },
+  {
+   "combo": "256_sr",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 354,
+   "recall": 0.954177897574124,
+   "precision": 0.7718253968253969
+  },
+  {
+   "combo": "256_sr",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.5833333333333334
+  },
+  {
+   "combo": "256_sr",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 288,
+   "recall": 0.9568106312292359,
+   "precision": 0.8
+  },
+  {
+   "combo": "256_sr",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 56,
+   "recall": 0.9333333333333333,
+   "precision": 0.6862745098039216
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 359,
+   "recall": 0.967654986522911,
+   "precision": 0.7433628318584071
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.4666666666666667
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 293,
+   "recall": 0.973421926910299,
+   "precision": 0.7824074074074074
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 56,
+   "recall": 0.9333333333333333,
+   "precision": 0.635593220338983
+  }
+ ]
+}

@@ -1,0 +1,44 @@
+{
+ "what": "256 arm, production preset, same pixel window and georeference; a = training rule min((DN+2)>>2,255), b = x255/1023 (the data/mars_hirise working copy)",
+ "tiles": {
+  "ESP_017355_2260_rom00_t1242": {
+   "n_a": 1631,
+   "n_b": 1637,
+   "n_matched": 1604,
+   "n_unmatched_a": 27,
+   "n_unmatched_b": 33,
+   "frac_unmatched": 0.01655426118945432,
+   "n_geometry_identical": 539,
+   "frac_geometry_identical": 0.3360349127182045,
+   "area_ratio_median": 1.0,
+   "area_ratio_p99": 1.1459792432767366,
+   "max_abs_score_delta": 0.15317754447460175
+  },
+  "ESP_017355_2260_rom02_t1954": {
+   "n_a": 2734,
+   "n_b": 2740,
+   "n_matched": 2700,
+   "n_unmatched_a": 34,
+   "n_unmatched_b": 40,
+   "frac_unmatched": 0.012435991221653255,
+   "n_geometry_identical": 633,
+   "frac_geometry_identical": 0.23444444444444446,
+   "area_ratio_median": 1.0,
+   "area_ratio_p99": 1.1087611647479747,
+   "max_abs_score_delta": 0.09669831395149231
+  },
+  "ESP_017355_2260_rom04_t2252": {
+   "n_a": 2426,
+   "n_b": 2417,
+   "n_matched": 2380,
+   "n_unmatched_a": 46,
+   "n_unmatched_b": 37,
+   "frac_unmatched": 0.018961253091508656,
+   "n_geometry_identical": 663,
+   "frac_geometry_identical": 0.2785714285714286,
+   "area_ratio_median": 1.0,
+   "area_ratio_p99": 1.1126602322620067,
+   "max_abs_score_delta": 0.10575632750988007
+  }
+ }
+}

@@ -1,0 +1,759 @@
+{
+ "provenance": {
+  "arms": {
+   "(256, 2)": {
+    "bytes": 16310272,
+    "mtime": "2026-08-20T16:48:26+00:00",
+    "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/review/rom_arms/hirise/ESP_017355_2260_RED-predictions-ct-010-ss-256sr2-is-1024-ov-020-rom-downscaled-mask-nms.gpkg",
+    "sha256": "483056fd972d80fb2fb081d3218b5b4cf34c300434269258f6e2e593c40881ed"
+   },
+   "256": {
+    "bytes": 7467008,
+    "mtime": "2026-08-20T16:47:41+00:00",
+    "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/review/rom_arms/hirise/ESP_017355_2260_RED-predictions-ct-010-ss-256-is-1024-ov-020-rom-downscaled-mask-nms.gpkg",
+    "sha256": "040d988cfb0f4dd3677b2f5c4aaf5faee758c2fd75d8acd3882c4496c9c8b0de"
+   },
+   "512": {
+    "bytes": 7102464,
+    "mtime": "2026-08-20T16:48:50+00:00",
+    "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/review/rom_arms/hirise/ESP_017355_2260_RED-predictions-ct-010-ss-512-is-1024-ov-020-rom-downscaled-mask-nms.gpkg",
+    "sha256": "af8a85f439d1ca62ccdc5efcc63f916f666568ff686a76496013ed8ef0d8f1ef"
+   }
+  },
+  "arms_supplied_clipped": true,
+  "body": "mars",
+  "cells": {
+   "256": {
+    "n_fused": 10882,
+    "n_in_rom": 10642,
+    "n_suppressed": 0
+   },
+   "256_sr": {
+    "n_fused": 18022,
+    "n_in_rom": 17636,
+    "n_suppressed": 9238
+   },
+   "512_256": {
+    "n_fused": 11310,
+    "n_in_rom": 11047,
+    "n_suppressed": 7698
+   },
+   "512_256_sr": {
+    "n_fused": 18246,
+    "n_in_rom": 17840,
+    "n_suppressed": 17140
+   }
+  },
+  "clip_order": "fuse-then-clip",
+  "code": {
+   "geopandas": "1.1.3",
+   "git_dirty": true,
+   "git_sha": "06437526b617252079ee272672fe19ab405abff2",
+   "host": "Bdirb",
+   "opencv-python": "4.13.0.92",
+   "platform": "Windows-10-10.0.26200-SP0",
+   "python": "3.10.15",
+   "rasterio": "1.4.4",
+   "sahi": "0.12.1",
+   "scripts_sha256": "9e62fba89a26ab401d24473483a5d118e8fffa08a412707a04d2c71f14c944fa",
+   "shapely": "2.1.2",
+   "source_sha256": "3663c2418349853ba11e9adf91dee62d582af671dfb5b323be9801afb6592e3a",
+   "torch": "2.11.0+cu128",
+   "ultralytics": "8.4.75"
+  },
+  "combos": {
+   "256": [
+    [
+     256,
+     1
+    ]
+   ],
+   "256_sr": [
+    [
+     256,
+     1
+    ],
+    [
+     256,
+     2
+    ]
+   ],
+   "512_256": [
+    [
+     512,
+     1
+    ],
+    [
+     256,
+     1
+    ]
+   ],
+   "512_256_sr": [
+    [
+     512,
+     1
+    ],
+    [
+     256,
+     1
+    ],
+    [
+     256,
+     2
+    ]
+   ]
+  },
+  "config_hash": "c770a16b",
+  "dataset_root": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/boulder2024",
+  "erode_tiles_m": 1.5,
+  "fusion": {
+   "bands": {
+    "256": [
+     0.0,
+     "inf"
+    ]
+   },
+   "cluster_thr": null,
+   "cross_arm_only": true,
+   "engulf_thr": 0.7,
+   "metric": "diou",
+   "rule": "bands",
+   "scales": [
+    512,
+    256,
+    [
+     256,
+     2
+    ]
+   ]
+  },
+  "harness": "arm_ratification",
+  "humans_by_split": {
+   "test": 133,
+   "train": 4233,
+   "validation": 820
+  },
+  "humans_in_rom": 5186,
+  "matching_rule": {
+   "admissibility": "intersection > 0.5 * area(smaller polygon)",
+   "assignment": "centroid within ROM tile",
+   "bands": [
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     6
+    ],
+    [
+     6,
+     8
+    ],
+    [
+     8,
+     10
+    ],
+    [
+     10,
+     14
+    ],
+    [
+     14,
+     null
+    ]
+   ],
+   "hybrid_gate": "centroid-in-polygon, either side",
+   "resolutions": [
+    "optimal",
+    "greedy"
+   ],
+   "size_definition": "equivalent-area diameter in native px"
+  },
+  "native_res": 0.5,
+  "pred_shift_m": null,
+  "preset_version": 2,
+  "raster": {
+   "bytes": 1937783861,
+   "mtime": "2026-06-23T23:54:57.893327+00:00",
+   "path": "C:/Users/brian/Documents/PhD/BoulderNet/YOLOv8-BeyondEarth/data/mars_hirise/raster/ESP_017355_2260_RED.tif",
+   "sha256": "d6d6aa3187df581e150bc2ecd570f441a3b208f309f8a6e35371113267c72011"
+  },
+  "reference": {
+   "humans": {
+    ".cpg": {
+     "bytes": 5,
+     "mtime": "2026-06-28T03:47:17.713844+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.cpg",
+     "sha256": "3ad3031f5503a4404af825262ee8232cc04d4ea6683d42c5dd0a2f2a27ac9824"
+    },
+    ".dbf": {
+     "bytes": 367518,
+     "mtime": "2026-06-28T03:47:17.729863+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.dbf",
+     "sha256": "60c584f7623b63c0af207f15491e204eca992c64135c6db51c409599b152a1a1"
+    },
+    ".prj": {
+     "bytes": 374,
+     "mtime": "2026-06-28T03:47:17.729863+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.prj",
+     "sha256": "4385556701c8759165abb7233c57168a3a88fecfd072edbdb0fad9b48f38f8f1"
+    },
+    ".shp": {
+     "bytes": 1868596,
+     "mtime": "2026-06-28T03:47:17.755938+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.shp",
+     "sha256": "db67d37406f2c0d760860b30bf78c161b1de31e0e5ac72635ddd99a1cd702800"
+    },
+    ".shx": {
+     "bytes": 42692,
+     "mtime": "2026-06-28T03:47:17.761582+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-boulder-mapping.shx",
+     "sha256": "d86d7b9991ee6193b76ae5defaaa99138eda5a15127d38de21796b23fed89f1c"
+    }
+   },
+   "rom": {
+    ".cpg": {
+     "bytes": 10,
+     "mtime": "2026-06-28T03:47:17.808677+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.cpg",
+     "sha256": "09fc313075748ce8ead962229ed89c919d5a9ff71974ee725a0b48bb87d975a2"
+    },
+    ".dbf": {
+     "bytes": 8822,
+     "mtime": "2026-06-28T03:47:17.813186+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.dbf",
+     "sha256": "09be21a27584e69ab0d54f41d5a72f2a665827e6fe388f7a507a7968e79a71ef"
+    },
+    ".prj": {
+     "bytes": 374,
+     "mtime": "2026-06-28T03:47:17.820073+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.prj",
+     "sha256": "4385556701c8759165abb7233c57168a3a88fecfd072edbdb0fad9b48f38f8f1"
+    },
+    ".shp": {
+     "bytes": 2820,
+     "mtime": "2026-06-28T03:47:17.828927+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.shp",
+     "sha256": "6b6d89af7a188a37915ecce1e1b349b0e64041834f8179134f73102ddcc48124"
+    },
+    ".shx": {
+     "bytes": 260,
+     "mtime": "2026-06-28T03:47:17.828927+00:00",
+     "path": "C:/Users/brian/Documents/PhD/BoulderNet/data_prieur/raw_data/mars/ESP_017355_2260/shp/ESP_017355_2260-ROM.shx",
+     "sha256": "2aa4fec87536374c6c51e4a8670366380d10c7a9bad45cb3131eb6ed8c68d65c"
+    }
+   }
+  },
+  "rom_tiles": 20,
+  "rom_tiles_by_split": {
+   "test": 1,
+   "train": 16,
+   "validation": 3
+  }
+ },
+ "marginals_recall_pooled_optimal_strict": [
+  {
+   "metric": "recall",
+   "band": "all",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 5186,
+   "base": 0.8735055919784034,
+   "d512_without_sr": 0.017354415734670225,
+   "d512_with_sr": 0.011955264172772817,
+   "dsr_without_512": 0.013690705746239873,
+   "dsr_with_512": 0.008291554184342464,
+   "interaction": -0.005399151561897408,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "4-6",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 1127,
+   "base": 0.7595385980479148,
+   "d512_without_sr": 0.010647737355811926,
+   "d512_with_sr": 0.0053238686779059075,
+   "dsr_without_512": 0.013309671694764935,
+   "dsr_with_512": 0.007985803016858917,
+   "interaction": -0.0053238686779060185,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "6-8",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 1496,
+   "base": 0.8997326203208557,
+   "d512_without_sr": 0.016042780748663055,
+   "d512_with_sr": 0.012032085561497263,
+   "dsr_without_512": 0.010026737967914423,
+   "dsr_with_512": 0.006016042780748632,
+   "interaction": -0.004010695187165791,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "8-10",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 1124,
+   "base": 0.9181494661921709,
+   "d512_without_sr": 0.016014234875444844,
+   "d512_with_sr": 0.01245551601423489,
+   "dsr_without_512": 0.009786476868327343,
+   "dsr_with_512": 0.00622775800711739,
+   "interaction": -0.003558718861209953,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "10-14",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 986,
+   "base": 0.9168356997971603,
+   "d512_without_sr": 0.02738336713995937,
+   "d512_with_sr": 0.018255578093306357,
+   "dsr_without_512": 0.020283975659229125,
+   "dsr_with_512": 0.011156186612576113,
+   "interaction": -0.009127789046653012,
+   "body": "mars"
+  },
+  {
+   "metric": "recall",
+   "band": "14-inf",
+   "split": "all",
+   "resolve": "optimal",
+   "hybrid": false,
+   "n_human": 371,
+   "base": 0.9299191374663073,
+   "d512_without_sr": 0.02425876010781669,
+   "d512_with_sr": 0.016172506738544423,
+   "dsr_without_512": 0.02695417789757415,
+   "dsr_with_512": 0.018867924528301883,
+   "interaction": -0.008086253369272267,
+   "body": "mars"
+  }
+ ],
+ "scores_pooled_optimal_strict": [
+  {
+   "combo": "256",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 10642,
+   "n_matched": 4530,
+   "recall": 0.8735055919784034,
+   "precision": 0.4256718661905657,
+   "f1": 0.5724033358605004
+  },
+  {
+   "combo": "256",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 3,
+   "n_matched": 47,
+   "recall": 0.573170731707317,
+   "precision": 0.0,
+   "f1": 0.0
+  },
+  {
+   "combo": "256",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 2645,
+   "n_matched": 856,
+   "recall": 0.7595385980479148,
+   "precision": 0.08431001890359169,
+   "f1": 0.15177298930883293
+  },
+  {
+   "combo": "256",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4017,
+   "n_matched": 1346,
+   "recall": 0.8997326203208557,
+   "precision": 0.3694299228279811,
+   "f1": 0.5237913051960772
+  },
+  {
+   "combo": "256",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2077,
+   "n_matched": 1032,
+   "recall": 0.9181494661921709,
+   "precision": 0.6456427539720752,
+   "f1": 0.7581525758556877
+  },
+  {
+   "combo": "256",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1413,
+   "n_matched": 904,
+   "recall": 0.9168356997971603,
+   "precision": 0.7735314932767162,
+   "f1": 0.8391091484257234
+  },
+  {
+   "combo": "256",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 487,
+   "n_matched": 345,
+   "recall": 0.9299191374663073,
+   "precision": 0.7987679671457906,
+   "f1": 0.8593684965453648
+  },
+  {
+   "combo": "512_256",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 11047,
+   "n_matched": 4620,
+   "recall": 0.8908600077130736,
+   "precision": 0.4182130895265683,
+   "f1": 0.5692108667529109
+  },
+  {
+   "combo": "512_256",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 3,
+   "n_matched": 47,
+   "recall": 0.573170731707317,
+   "precision": 0.0,
+   "f1": 0.0
+  },
+  {
+   "combo": "512_256",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 2626,
+   "n_matched": 868,
+   "recall": 0.7701863354037267,
+   "precision": 0.08301599390708302,
+   "f1": 0.14987719074522762
+  },
+  {
+   "combo": "512_256",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4031,
+   "n_matched": 1370,
+   "recall": 0.9157754010695187,
+   "precision": 0.36392954601835775,
+   "f1": 0.5208665118071525
+  },
+  {
+   "combo": "512_256",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2229,
+   "n_matched": 1050,
+   "recall": 0.9341637010676157,
+   "precision": 0.6119336025123374,
+   "f1": 0.7394698349281519
+  },
+  {
+   "combo": "512_256",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1604,
+   "n_matched": 931,
+   "recall": 0.9442190669371197,
+   "precision": 0.7144638403990025,
+   "f1": 0.8134289896617976
+  },
+  {
+   "combo": "512_256",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 554,
+   "n_matched": 354,
+   "recall": 0.954177897574124,
+   "precision": 0.7671480144404332,
+   "f1": 0.8505021326150184
+  },
+  {
+   "combo": "256_sr",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 17636,
+   "n_matched": 4601,
+   "recall": 0.8871962977246433,
+   "precision": 0.2608868224087095,
+   "f1": 0.4032074314258172
+  },
+  {
+   "combo": "256_sr",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 2561,
+   "n_matched": 47,
+   "recall": 0.573170731707317,
+   "precision": 0.007809449433814916,
+   "f1": 0.015408951945380184
+  },
+  {
+   "combo": "256_sr",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 6615,
+   "n_matched": 871,
+   "recall": 0.7728482697426797,
+   "precision": 0.04338624338624339,
+   "f1": 0.08216016988342371
+  },
+  {
+   "combo": "256_sr",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4350,
+   "n_matched": 1361,
+   "recall": 0.9097593582887701,
+   "precision": 0.34045977011494255,
+   "f1": 0.4954914781673285
+  },
+  {
+   "combo": "256_sr",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2134,
+   "n_matched": 1043,
+   "recall": 0.9279359430604982,
+   "precision": 0.6265229615745079,
+   "f1": 0.7480071341406176
+  },
+  {
+   "combo": "256_sr",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1454,
+   "n_matched": 924,
+   "recall": 0.9371196754563894,
+   "precision": 0.7455295735900963,
+   "f1": 0.8304171917490216
+  },
+  {
+   "combo": "256_sr",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 504,
+   "n_matched": 355,
+   "recall": 0.9568733153638814,
+   "precision": 0.7777777777777778,
+   "f1": 0.8580801104972375
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "all",
+   "n_human": 5186,
+   "n_pred": 17840,
+   "n_matched": 4663,
+   "recall": 0.8991515618974161,
+   "precision": 0.26137892376681615,
+   "f1": 0.40502041170850345
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "3-4",
+   "n_human": 82,
+   "n_pred": 2544,
+   "n_matched": 47,
+   "recall": 0.573170731707317,
+   "precision": 0.007075471698113208,
+   "f1": 0.013978388024189553
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "4-6",
+   "n_human": 1127,
+   "n_pred": 6546,
+   "n_matched": 877,
+   "recall": 0.7781721384205856,
+   "precision": 0.042315918117934614,
+   "f1": 0.08026702699362848
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "6-8",
+   "n_human": 1496,
+   "n_pred": 4328,
+   "n_matched": 1379,
+   "recall": 0.9217914438502673,
+   "precision": 0.33849353049907577,
+   "f1": 0.4951585499522546
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "8-10",
+   "n_human": 1124,
+   "n_pred": 2228,
+   "n_matched": 1057,
+   "recall": 0.9403914590747331,
+   "precision": 0.6063734290843806,
+   "f1": 0.7373174786757265
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "10-14",
+   "n_human": 986,
+   "n_pred": 1612,
+   "n_matched": 942,
+   "recall": 0.9553752535496958,
+   "precision": 0.7003722084367245,
+   "f1": 0.8082371153529014
+  },
+  {
+   "combo": "512_256_sr",
+   "band": "14-inf",
+   "n_human": 371,
+   "n_pred": 564,
+   "n_matched": 361,
+   "recall": 0.9730458221024259,
+   "precision": 0.75,
+   "f1": 0.8470864294094641
+  }
+ ],
+ "splits_14plus": [
+  {
+   "combo": "256",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 345,
+   "recall": 0.9299191374663073,
+   "precision": 0.7987679671457906
+  },
+  {
+   "combo": "256",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.6363636363636364
+  },
+  {
+   "combo": "256",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 281,
+   "recall": 0.9335548172757475,
+   "precision": 0.8169761273209549
+  },
+  {
+   "combo": "256",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 54,
+   "recall": 0.9,
+   "precision": 0.7474747474747475
+  },
+  {
+   "combo": "512_256",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 354,
+   "recall": 0.954177897574124,
+   "precision": 0.7671480144404332
+  },
+  {
+   "combo": "512_256",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.5
+  },
+  {
+   "combo": "512_256",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 290,
+   "recall": 0.9634551495016611,
+   "precision": 0.7971698113207547
+  },
+  {
+   "combo": "512_256",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 54,
+   "recall": 0.9,
+   "precision": 0.6929824561403509
+  },
+  {
+   "combo": "256_sr",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 355,
+   "recall": 0.9568733153638814,
+   "precision": 0.7777777777777778
+  },
+  {
+   "combo": "256_sr",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.6666666666666666
+  },
+  {
+   "combo": "256_sr",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 289,
+   "recall": 0.9601328903654485,
+   "precision": 0.7979539641943734
+  },
+  {
+   "combo": "256_sr",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 56,
+   "recall": 0.9333333333333333,
+   "precision": 0.7128712871287128
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "all",
+   "n_human": 371,
+   "n_matched": 361,
+   "recall": 0.9730458221024259,
+   "precision": 0.75
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "test",
+   "n_human": 10,
+   "n_matched": 10,
+   "recall": 1.0,
+   "precision": 0.5333333333333333
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "train",
+   "n_human": 301,
+   "n_matched": 295,
+   "recall": 0.9800664451827242,
+   "precision": 0.7806004618937644
+  },
+  {
+   "combo": "512_256_sr",
+   "split": "validation",
+   "n_human": 60,
+   "n_matched": 56,
+   "recall": 0.9333333333333333,
+   "precision": 0.6637931034482759
+  }
+ ]
+}
