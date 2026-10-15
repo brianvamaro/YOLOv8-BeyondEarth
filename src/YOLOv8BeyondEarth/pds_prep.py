@@ -18,10 +18,12 @@ Which origin convention is *absolutely* right does not matter at this level. HiR
 geolocation is good to tens of metres; what matters is that rasters, detections and human truth share
 one frame, and the label frame is the one the truth is in.
 
-**2. The bit-depth rule** is ``min((DN + 2) >> 2, 255)``, i.e. round-half-up of DN/4, clipped. The
-unclipped form is what the hirise2ctx session measured on ESP_017355_2260 (fit slope 0.25000,
-intercept 0.12, residual sd 0.28 DN, which is exactly round-half-up's error distribution). The clip
-is not cosmetic. DN 1022 and 1023 (the label's ``CORE_HIGH_INSTR_SATURATION`` and
+**2. The bit-depth rule** is ``min((DN + 2) >> 2, 255)``, i.e. round-half-up of DN/4, clipped. Through
+this module it reproduces two Prieur training rasters **pixel for pixel**, at both binnings:
+ESP_017355_2260 (0.5 m/px; 0 of 1,932,385,780 px differ) and ESP_028537_2270 (0.25 m/px; 0 of
+1,875,276,700), transform and CRS equal (2026-10-14). The hirise2ctx session first measured the
+unclipped form on a sample of the first scene: slope 0.25000, intercept 0.12, residual sd 0.28 DN,
+which is exactly round-half-up's error distribution. The clip is not cosmetic. DN 1022 and 1023 (the label's ``CORE_HIGH_INSTR_SATURATION`` and
 ``CORE_HIGH_REPR_SATURATION``) round to 256, and a bare ``uint8`` cast wraps them to **0**, the
 nodata value, punching fill-valued holes into the brightest ground.
 

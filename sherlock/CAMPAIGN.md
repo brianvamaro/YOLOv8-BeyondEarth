@@ -11,7 +11,7 @@ locally, and the cluster specifics are copied from jobs that have run (`hirise_a
 | choice | value | evidence |
 |---|---|---|
 | georeferencing | the PDS **label** (GDAL's PDS driver), never the JP2's GeoJP2 box | the box's origin is 1.5 px off in x and y, and its CRS has lat_ts/lat_0 transposed; the label route reproduces the Prieur training rasters' origins to 0.00 px on all 3 PDS training scenes |
-| 10 -> 8 bit | `min((DN + 2) >> 2, 255)` | reproduces `ESP_017355_2260_RED.tif` (training raster) **pixel for pixel, 0 of 1,932,385,780 differ**; the clip matters (12,467 px at DN 1023 would otherwise wrap to nodata) |
+| 10 -> 8 bit | `min((DN + 2) >> 2, 255)` | reproduces two training rasters **pixel for pixel**: `ESP_017355_2260` (0.5 m/px, 0 of 1,932,385,780 differ) and `ESP_028537_2270` (0.25 m/px, 0 of 1,875,276,700). The clip matters: 12,467 and 6,475 px at DN 1023 would otherwise wrap to nodata |
 | grid | native, no resampling or reprojection, nodata 0 | any resampling moves predictions |
 | input guard | prediction refuses anything but single-band uint8 | a 10-bit raster used to reach the model clipped at DN 255, silently |
 | fill slices | skipped (lever N1), byte-identical | `data/review/n1n2_identity.json`: old code vs new on real 0.25 m/px ground, 256/512/SR arms |
