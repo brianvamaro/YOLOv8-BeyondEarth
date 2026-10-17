@@ -127,10 +127,25 @@ RETIRED_CLAIMS = [
                              r"|211\s*[-–]\s*711", re.IGNORECASE),
      "the pooled high-incidence recall collapse is a CROSS-PAIR MIXTURE: of the six repeat-pair "
      "members, 24 is a low-incidence member and 498 a high-incidence one, so the two ranges are not "
-     "high-vs-low at all. Same-ground the three pairs give 30x (2270a), 1.43x and inverted on raw "
-     "counts (2270b), and cannot-tell (2260b, high-vs-high) — and the no-collapse pair is the only "
-     "statistically usable one. Source data/sam2_validation/t2_hirise_meta.json; table in "
-     "orientation_results_summary.md section T2"),
+     "high-vs-low at all. On each pair's full shared ground the high-incidence image carries 14.0x "
+     "(2270a) and 12.6x (2270b) less boulder area, and 2.3x less on 2260b (high-vs-high). Source "
+     "data/review/incidence_pairs_label.json; orientation_results_summary.md section T2"),
+    # Withdrawn 2026-10-16 by the configuration-study audit: the 2026-08-06 correction's own per-pair
+    # reading. T2's per-member counts covered different ground (its scan stopped at 700 elongated
+    # boulders, and 2270b's low-incidence member was the only one to reach that), so "1.43x, no
+    # collapse" compared different areas. `1.43x` alone is not retired: the hand-out quotes an
+    # unrelated SAM2 area ratio of 1.43x at 4-6 px.
+    ("T2-2270B", re.compile(r"2270b\W[^\n]{0,80}?\b1\.43\s*[x×]"
+                            r"|\b1\.43\s*[x×]\W{0,3}\s*(?:on\s+elongated|\(?inverted|and\s+inverted"
+                            r"|/\s*cannot)"
+                            r"|no-collapse\s+pair"
+                            r"|pair\s+(?:showing|that\s+shows)\s+(?:essentially\s+)?no\s+collapse"
+                            r"|no\s+drop\s+in\s+the\s+other", re.IGNORECASE),
+     "on the two images' full shared ground 2270b loses 12.6x of the boulder area (16.6x the "
+     "detections) at 68.2 deg against 51.4 deg, and 2270a 14.0x. T2's per-member counts covered "
+     "different ground: its scan stopped at 700 elongated boulders, and 2270b's low-incidence member "
+     "was the only one to reach that. Source data/review/incidence_pairs_label.json; "
+     "orientation_results_summary.md section T2, the 2026-10-16 block"),
 ]
 
 

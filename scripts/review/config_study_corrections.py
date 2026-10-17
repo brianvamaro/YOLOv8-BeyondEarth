@@ -8,8 +8,8 @@ the hirise2ctx brief quote. It works from the study's own inputs, through the sa
 
 Sections, which are also the JSON keys:
 - validate: the harness still reproduces notebook 35.
-- v2_basis: what v2's labels were made from (the vClaire exports' scores), and C1 at >= 0.25 as the
-  v2 equivalent.
+- v2_basis: what v2's labels were made from (the vClaire exports' scores, with each .dbf and .shp
+  checked for truncation), and C1 at >= 0.25 as the v2 equivalent.
 - matched: one-to-one matching of C1 to the humans at floors 0.10 / 0.25 / 0.40, giving recall, recall
   by size, and the area decomposition.
 - scene: the level per image, matched-score medians, exact-zero cells, and the kept-share diagnostic.
@@ -17,9 +17,15 @@ Sections, which are also the JSON keys:
 - concentration: where the deciding squared error comes from (image and tile shares).
 - res025: the four held-out 0.25 m/px tiles.
 - fine_grid: C1 and C1GS on a 0.05 floor grid, and with the floor chosen out of sample.
+- selection: every candidate's floor chosen leaving one tile, or one image, out (selection optimism).
+- reweighted: the registered rule with ROM's cells weighted to v2's 40 m label distribution, with v2
+  deflated by 1 / 1.3 / 1.4 / 1.7 / 1.95 (audit D2).
 - power: the smallest RMSE ratio the registered tile bootstrap can resolve, and an image-aware bootstrap.
-- cells_160m: the 160 m comparison, with intervals.
+- cells_160m: the 160 m comparison, with intervals; RMSE at 160 m against the 40 m cells on the same
+  footprint; v2's own label cells by size (read-only from hirise2ctx's dataset_v2).
 - mask_area: SAM2/YOLO area per matched detection, area-weighted over the label's own population.
+- extras: the compensation test per image, size-floor reach, the ROM images' viewing geometry, the
+  C1-vs-C1GS tie at each size floor, C1GS's render cost and how often it kept YOLO's mask.
 
 Conventions:
 - Held-out means validation + test.
@@ -51,6 +57,7 @@ sys.path.insert(0, str(REPO / "src"))
 import config_study as cs                                                   # noqa: E402
 
 VCLAIRE = Path(r"C:/Users/brian/Documents/PhD/HiRiseToCTXBoulders/hirise_40_vClaire")
+V2_LABELS = Path(r"C:/Users/brian/Documents/PhD/HiRiseToCTXBoulders/hirise2ctx/dataset_v2/labels")
 RES = {"ESP_017355_2260": 0.50, "ESP_025650_2165": 0.25, "ESP_028537_2270": 0.25,
        "ESP_037018_2170": 0.595}
 RES025 = ("ESP_025650_2165", "ESP_028537_2270")
@@ -182,10 +189,21 @@ def sec_validate(le):
     return {"worst_relative_difference_vs_notebook35": worst}
 
 
+def _shp_integrity(path):
+    """A .shp header declares the file's length (big-endian 16-bit words at byte 24), so a partly
+    copied file shows itself."""
+    with open(path, "rb") as f:
+        declared = 2 * struct.unpack(">i", f.read(28)[24:28])[0]
+    actual = os.path.getsize(path)
+    return {"declared_bytes": declared, "actual_bytes": actual, "complete": actual >= declared}
+
+
 def _dbf_scores(path):
+    """The score column, plus the record count the header declares: a truncated .dbf holds fewer
+    rows than it declares, and the rows it lost are the low-score ones (exports are score-ordered)."""
     with open(path, "rb") as f:
         hdr = f.read(32)
-        _nrec, hlen, rlen = struct.unpack("<IHH", hdr[4:12])
+        nrec, hlen, rlen = struct.unpack("<IHH", hdr[4:12])
         fields, off = [], 1
         while True:
             fd = f.read(32)
@@ -199,7 +217,7 @@ def _dbf_scores(path):
     arr = np.frombuffer(raw[:n * rlen], dtype=np.uint8).reshape(n, rlen)
     _, fl, o = next(x for x in fields if x[0] == "score")
     col = arr[:, o:o + fl].tobytes()
-    return np.array([float(col[i * fl:(i + 1) * fl].strip() or b"nan") for i in range(n)])
+    return np.array([float(col[i * fl:(i + 1) * fl].strip() or b"nan") for i in range(n)]), int(nrec)
 
 
 def sec_v2_basis(le, cells, tiles):
@@ -209,20 +227,26 @@ def sec_v2_basis(le, cells, tiles):
         if not fs:
             continue
         try:
-            s = _dbf_scores(fs[0])
+            s, declared = _dbf_scores(fs[0])
         except Exception as e:
             exports.append({"obs": d.name, "error": f"{type(e).__name__}: {e}"})
             continue
+        present = int(s.size)
         s = s[np.isfinite(s)]
         lit = np.isclose(s, 0.10, atol=1e-9)
         real = s[~lit]
-        exports.append({"obs": d.name, "n": int(s.size), "n_at_exactly_0.10": int(lit.sum()),
+        shp = sorted(glob.glob(str(d / "*.shp")))
+        exports.append({"obs": d.name, "dbf_records_declared": declared, "dbf_records_present": present,
+                        "dbf_complete": present >= declared,
+                        "shp": _shp_integrity(shp[0]) if shp else None,
+                        "n": int(s.size), "n_at_exactly_0.10": int(lit.sum()),
                         "min_score_other_rows": float(real.min()) if real.size else None,
                         "n_strictly_between_0.10_and_0.25": int(((s > 0.10 + 1e-9) &
                                                                   (s < 0.25 - 1e-9)).sum()),
                         "frac_rows_below_0.40": float((s < 0.40).mean()),
                         "frac_real_rows_below_0.40": float((real < 0.40).mean()) if real.size else None})
-    ok = [e for e in exports if "n" in e]
+    # only a complete .dbf can show where an export's scores stop; a truncated one lost its low rows
+    ok = [e for e in exports if "n" in e and e["dbf_complete"]]
     d40 = cells[(cells.candidate == "C1") & (cells.cell_size_m == 40.0)]
     d160 = cells[(cells.candidate == "C1") & (cells.cell_size_m == 160.0)]
     levels = {}
@@ -250,7 +274,13 @@ def sec_v2_basis(le, cells, tiles):
     tot = [sum(x) for x in zip(*by_img.values())]
     return {"vclaire_exports": exports,
             "vclaire_summary": {
-                "n_readable": len(ok), "n_unreadable": len(exports) - len(ok),
+                "n_exports": len(exports), "n_complete_dbf": len(ok),
+                "truncated_dbf": [e["obs"] for e in exports if "n" in e and not e["dbf_complete"]],
+                "unreadable": [e["obs"] for e in exports if "n" not in e],
+                "truncated_shp": [e["obs"] for e in exports if e.get("shp") and not e["shp"]["complete"]],
+                "note": "the summary covers complete .dbf files only. A truncated .shp leaves the scores "
+                        "intact but drops geometry, so that image's label sits at a higher realised "
+                        "floor (hirise2ctx R23, DECISIONS 2026-08-06o)",
                 "n_with_any_score_strictly_between_0.10_and_0.25":
                     sum(1 for e in ok if e["n_strictly_between_0.10_and_0.25"]),
                 "rows_at_exactly_0.10_range": [min(e["n_at_exactly_0.10"] for e in ok),
@@ -264,7 +294,7 @@ def sec_v2_basis(le, cells, tiles):
                                                       "pooled": 1 - tot[1] / tot[0]}}
 
 
-def _matched_rows(le, tiles, floors):
+def _matched_rows(le, tiles, floors, unmatched=None):
     D0 = le.STAGE4_MIN_DIAMETER_M
     rows, pairs = [], []
     for r in tiles.rows:
@@ -301,6 +331,9 @@ def _matched_rows(le, tiles, floors):
                 pairs.append(pd.DataFrame(dict(obs=r["obs"], split=r["split"], floor=f,
                                                a_p=aP[ip][both], a_h=aH[ih][both],
                                                score=sc[ip][both])))
+            if unmatched is not None:
+                unmatched.append(pd.DataFrame(dict(obs=r["obs"], floor=f,
+                                                   d_m=eqd(aP[bigP & ~mP]))))
     return pd.DataFrame(rows), (pd.concat(pairs, ignore_index=True) if pairs else pd.DataFrame())
 
 
@@ -323,7 +356,10 @@ def _agg(m):
 
 
 def sec_matched(le, tiles):
-    m, pairs = _matched_rows(le, tiles, (0.10, 0.25, 0.40))
+    unmatched = []
+    m, pairs = _matched_rows(le, tiles, (0.10, 0.25, 0.40), unmatched)
+    um = pd.concat(unmatched, ignore_index=True)
+    um = um[um.floor == 0.10].assign(d_px=lambda x: x.d_m / x.obs.map(RES))
     out = {"method": "optimal one-to-one IoU >= 0.3; both sides >= 1.4105 m; polygons with centroid "
                      "in the ROM tile; areas are sums of polygon areas", "by_floor": {}}
     for f in (0.10, 0.25, 0.40):
@@ -340,7 +376,11 @@ def sec_matched(le, tiles):
                      "area_weighted": float(p[p.split.isin(le.HELD_OUT)].a_p.sum()
                                             / p[p.split.isin(le.HELD_OUT)].a_h.sum())},
         "all_tiles": {"median": float(np.median(p.a_p / p.a_h)),
-                      "area_weighted": float(p.a_p.sum() / p.a_h.sum())}}
+                      "area_weighted": float(p.a_p.sum() / p.a_h.sum())},
+        "median_by_image_all_tiles": {o: float(np.median(g.a_p / g.a_h)) for o, g in p.groupby("obs")}}
+    out["unmatched_detections_at_0.10_all_tiles"] = {
+        o: {"n": int(len(g)), "share_6_to_10_px": float(((g.d_px >= 6) & (g.d_px < 10)).mean()),
+            "median_px": float(g.d_px.median())} for o, g in um.groupby("obs")}
     return out, pairs
 
 
@@ -483,6 +523,102 @@ def sec_fine_grid(le, cells):
             "floor_chosen_leave_one_image_out": loio}
 
 
+def sec_selection(le, cells):
+    """Selection optimism: each candidate's floor (registered grid) chosen with one held-out tile, or
+    one image, left out, then scored on what was left out. Optimism = nested RMSE / in-sample - 1."""
+    d = held(cells[(cells.cell_size_m == 40.0) & cells.floor.isin(cs.FLOORS)], le)
+    out = {}
+    for cid, g in d.groupby("candidate"):
+        g = g.assign(se=(g.fa_pred - g.fa_true) ** 2)
+        sse = g.groupby(["floor", "obs_id", "tile_id"]).se.agg(["sum", "size"])
+        floors = sorted(g.floor.unique())
+        tiles = sorted(set(map(tuple, g[["obs_id", "tile_id"]].drop_duplicates().to_numpy())))
+
+        def part(f, sel):
+            s = sse.loc[f]
+            s = s[[t in sel for t in s.index]]
+            return s["sum"].sum(), s["size"].sum()
+
+        def pooled(f, sel):
+            a, n = part(f, sel)
+            return np.sqrt(a / n)
+        everything = set(tiles)
+        f_in = min(floors, key=lambda f: pooled(f, everything))
+        row = {"in_sample_floor": f_in, "in_sample_rmse": pooled(f_in, everything)}
+        images = sorted({t[0] for t in tiles})
+        for name, groups in (("leave_one_tile_out", {f"{o}_t{t}": {(o, t)} for o, t in tiles}),
+                             ("leave_one_image_out", {o: {t for t in tiles if t[0] == o} for o in images})):
+            sse_tot, n_tot, chosen = 0.0, 0, {}
+            for label, grp in groups.items():
+                f = min(floors, key=lambda f: pooled(f, everything - grp))
+                a, n = part(f, grp)
+                sse_tot, n_tot, chosen[label] = sse_tot + a, n_tot + n, f
+            nested = float(np.sqrt(sse_tot / n_tot))
+            row[name] = {"rmse": nested, "optimism": nested / row["in_sample_rmse"] - 1,
+                         "floors_chosen": sorted(set(chosen.values())), "by_fold": chosen}
+        out[cid] = row
+    return out
+
+
+DEFLATIONS = (1.0, 1.3, 1.4, 1.7, 1.95)
+FA_BINS = "0 | (0, 1e-3] | (1e-3, 1e-2] | (1e-2, 0.05] | > 0.05"
+
+
+def _fa_bin(x):
+    x = np.asarray(x, dtype=float)
+    b = np.full(x.shape, 4)
+    for edge, k in ((0.05, 3), (1e-2, 2), (1e-3, 1)):
+        b[x <= edge] = k
+    b[x == 0] = 0
+    return b
+
+
+def sec_reweighted(le, cells):
+    """The registered rule (held-out, 40 m, each candidate at its own best floor, the same tile draws)
+    with each cell weighted so that ROM's truth has v2's 40 m label distribution (audit D2). v2's
+    labels are detector-made and over-state area, so they are also deflated by k before binning."""
+    v2 = pd.concat([pd.read_parquet(f, columns=["tile_size_px", "fractional_area"])
+                    for f in sorted(V2_LABELS.glob("*.parquet"))], ignore_index=True)
+    v2 = v2[v2.tile_size_px == 8].fractional_area.dropna().to_numpy()
+    d = held(cells[(cells.cell_size_m == 40.0) & cells.floor.isin(cs.FLOORS)], le)
+    key = ["obs_id", "rom_index", "tile_id", "cell"]
+    truth = d[(d.candidate == "C1") & (d.floor == 0.40)]
+    rom_bin = _fa_bin(truth.fa_true)
+    rom_share = np.bincount(rom_bin, minlength=5) / len(rom_bin)
+    index = tiles_of(d)
+    w_draw = draws(len(index))
+    out = {"bins": FA_BINS, "rom_held_out_cells_by_bin": np.bincount(rom_bin, minlength=5).tolist(),
+           "by_deflation": {}}
+    for k in DEFLATIONS:
+        v2_share = np.bincount(_fa_bin(v2 / k), minlength=5) / len(v2)
+        w = pd.Series((v2_share / rom_share)[rom_bin],
+                      index=pd.MultiIndex.from_frame(truth[key])).rename("w")
+        x = d.join(w, on=key)
+        x = x.assign(wse=x.w * (x.fa_pred - x.fa_true) ** 2)
+        per = {}
+        for cid, g in x.groupby("candidate"):
+            f, gf = min(((f, gf) for f, gf in g.groupby("floor")),
+                        key=lambda t: t[1].wse.sum() / t[1].w.sum())
+            t = gf.groupby(["obs_id", "tile_id"])
+            per[cid] = {"floor": float(f), "rmse": float(np.sqrt(gf.wse.sum() / gf.w.sum())),
+                        "parts": (t.wse.sum().reindex(index).to_numpy(), t.w.sum().reindex(index).to_numpy())}
+        row = {"v2_share_by_bin": v2_share.tolist(), "weight_by_bin": (v2_share / rom_share).tolist(),
+               "kish_ess": float(w.sum() ** 2 / (w ** 2).sum())}
+        for name, ids in (("with_C1GS", sorted(per)), ("registered", sorted(c for c in per if c != "C1GS"))):
+            best = min(ids, key=lambda c: per[c]["rmse"])
+            rb = {c: ci(boot_rmse(per[c]["parts"], w_draw) / boot_rmse(per[best]["parts"], w_draw))
+                  for c in ids}
+            row[name] = {"best": best, "rmse": {c: per[c]["rmse"] for c in ids},
+                         "floor": {c: per[c]["floor"] for c in ids}, "ratio_to_best_ci95": rb,
+                         "tied": [c for c in ids if rb[c][0] <= 1.0 <= rb[c][1]],
+                         "C1_tied": bool(rb["C1"][0] <= 1.0 <= rb["C1"][1])}
+        if "C1GS" in per:
+            row["c1_over_c1gs_ci95"] = ci(boot_rmse(per["C1"]["parts"], w_draw)
+                                          / boot_rmse(per["C1GS"]["parts"], w_draw))
+        out["by_deflation"][f"{k:g}"] = row
+    return out
+
+
 def sec_power(le, cells, floors):
     d = held(cells[cells.cell_size_m == 40.0], le)
     index = tiles_of(d)
@@ -513,9 +649,74 @@ def sec_power(le, cells, floors):
     return out
 
 
-def sec_160m(le, cells, floors):
-    d = cells[cells.cell_size_m == 160.0]
+def _parent160(le, keep):
+    """For each registered tile, the 160 m cell each 40 m cell nests in (-1 if none). Both grids are
+    label_error.cells_in_rom's, anchored at the tile's north-west corner, so a 160 m cell is exactly
+    4 x 4 of the 40 m cells."""
+    splits, out = le.split_map(), {}
+    for s in le.images().values():
+        rom = le.load_rom(s, splits)
+        for _, t in rom.iterrows():
+            key = (s.obs_id, int(t.rom_index), int(t.tile_id))
+            if key not in keep:
+                continue
+            tile = shapely.make_valid(t.geometry)
+            c40 = np.asarray(le.cells_in_rom(tile, rom.crs, 40.0), dtype=object)
+            c160 = np.asarray(le.cells_in_rom(tile, rom.crs, 160.0), dtype=object)
+            par = np.full(len(c40), -1)
+            if len(c40) and len(c160):
+                q, p = shapely.STRtree(c160).query(shapely.centroid(c40), predicate="within")
+                par[q] = p
+            out[key] = par
+    return out
+
+
+def _same_footprint(le, cells, keep):
+    """C1 at 0.40: RMSE at 160 m against RMSE of the 40 m cells inside those same 160 m cells. If the
+    16 children's errors were independent, the ratio would be 1/4."""
+    par = _parent160(le, keep)
+    d40 = cells[(cells.cell_size_m == 40.0) & (cells.candidate == "C1") & (cells.floor == 0.40)]
+    d160 = cells[(cells.cell_size_m == 160.0) & (cells.candidate == "C1") & (cells.floor == 0.40)]
+    key = ["obs_id", "rom_index", "tile_id"]
+    d40 = d40.assign(parent=[par[(o, r, t)][k] for o, r, t, k in
+                             d40[key + ["cell"]].itertuples(index=False, name=None)])
     out = {}
+    for tag, sel in (("held_out", lambda x: held(x, le)), ("all_tiles", lambda x: x)):
+        a, b = sel(d40[d40.parent >= 0]), sel(d160)
+        m = a.groupby(key + ["parent"])[["fa_true", "fa_pred"]].mean()
+        bb = b.set_index(key + ["cell"])[["fa_true", "fa_pred"]]
+        bb.index.names = m.index.names
+        j = m.join(bb, lsuffix="_40", rsuffix="_160", how="inner")
+        dev = np.abs(j[["fa_true_40", "fa_pred_40"]].to_numpy() - j[["fa_true_160", "fa_pred_160"]].to_numpy())
+        out[tag] = {"n_160m_cells": int(len(b)), "n_child_40m_cells": int(len(a)),
+                    "n_parents_matched": int(len(j)), "rmse_40m_same_footprint": rmse(a),
+                    "rmse_160m": rmse(b), "ratio_160_over_40": rmse(b) / rmse(a),
+                    "ratio_if_independent": 0.25,
+                    "max_abs_dev_parent_vs_mean_of_children": float(dev.max()) if dev.size else None}
+    return out
+
+
+def _v2_label_cells():
+    """hirise2ctx's v2 training labels (read-only): how much of each cell size is empty or near-empty,
+    to compare with ROM's truth. S = 8 / 16 / 32 CTX px is 40 / 80 / 160 m."""
+    fs = sorted(V2_LABELS.glob("*.parquet"))
+    if not fs:
+        return None
+    d = pd.concat([pd.read_parquet(f, columns=["tile_size_px", "fractional_area"]) for f in fs],
+                  ignore_index=True)
+    out = {"n_images": len(fs)}
+    for s, g in d.groupby("tile_size_px"):
+        x = g.fractional_area.dropna()
+        out[f"S{int(s)}"] = {"n_cells": int(len(x)), "frac_zero": float((x == 0).mean()),
+                             "frac_in_0_to_1e-3": float(((x > 0) & (x <= 1e-3)).mean()),
+                             "median_fa": float(x.median())}
+    return out
+
+
+def sec_160m(le, cells, floors, keep):
+    d = cells[cells.cell_size_m == 160.0]
+    out = {"same_footprint_C1_0.40": _same_footprint(le, cells, keep),
+           "v2_label_cells_by_size": _v2_label_cells()}
     for tag, sel in (("held_out", lambda x: held(x, le)), ("all_tiles", lambda x: x)):
         x = sel(d)
         index = tiles_of(x)
@@ -538,6 +739,88 @@ def sec_160m(le, cells, floors):
     e40 = held(cells[(cells.cell_size_m == 40.0) & (cells.candidate == "C1") & (cells.floor == 0.40)], le)
     out["held_out_40m_empty_cells"] = [int((e40.fa_true == 0).sum()), int(len(e40))]
     return out
+
+
+def sec_extras(le, cells, tiles, keep):
+    """Per-image compensation test, size-floor reach, the ROM images' viewing geometry, the
+    C1-vs-C1GS tie at each size floor, and C1GS's render cost."""
+    from YOLOv8BeyondEarth import pds_prep
+    d = cells[(cells.cell_size_m == 40.0) & (cells.candidate == "C1") & (cells.floor == 0.40)]
+    flag = {}
+    for tag, x in (("held_out", held(d, le)), ("all_tiles", d)):
+        rows = {}
+        for o, g in x.groupby("obs_id"):
+            cr = float(g.n_pred.sum() / g.n_true.sum())
+            ar = le.error_metrics(g)["pooled_ratio"]
+            ma = ar / cr
+            rows[o] = {"area_ratio": ar, "count_ratio": cr, "mean_area_ratio": ma,
+                       "flag": bool(abs(np.log(cr)) > np.log(1.2) and abs(np.log(ma)) > np.log(1.2)
+                                    and np.sign(np.log(cr)) != np.sign(np.log(ma)))}
+        flag[tag] = rows
+    reach = {}
+    for r in tiles.rows:
+        dm = eqd(shapely.area(r["P"]))
+        acc = reach.setdefault(r["obs"], {"n": 0, "below_1.0": 0, "below_1.4105": 0, "below_2.0": 0})
+        acc["n"] += int(dm.size)
+        for k, v in (("below_1.0", 1.0), ("below_1.4105", 1.4105), ("below_2.0", 2.0)):
+            acc[k] += int((dm < v).sum())
+    reach = {o: {k: (v / a["n"] if k != "n" else v) for k, v in a.items()} for o, a in reach.items()}
+    geom = {}
+    for obs in RES:
+        lbl = next(iter(sorted(glob.glob(str(REPO / "data" / "**" / f"{obs}_RED.LBL"), recursive=True))),
+                   None)
+        if lbl is None:                     # labels are small; fetch the one not yet on disk
+            lbl_url, _ = pds_prep.rdr_urls(obs)
+            dest = REPO / "data" / "pds_scenes" / obs
+            dest.mkdir(parents=True, exist_ok=True)
+            pds_prep.fetch(lbl_url, dest / f"{obs}_RED.LBL")
+            lbl = str(dest / f"{obs}_RED.LBL")
+        f = pds_prep.read_label(lbl)
+        s = pds_prep.label_summary(f)
+        geom[obs] = {"incidence_angle": float(s["incidence_angle"]),
+                     "emission_angle": float(pds_prep._lookup(f, "EMISSION_ANGLE")),
+                     "map_scale": float(s["map_scale"])}
+    splits = le.split_map()
+    tie = {}
+    for size in (1.0, 1.4105, 2.0, 3.0):
+        per = {}
+        for cid, sub in (("C1", ""), ("C1GS", "config1gs")):
+            frames = {f: held(cs.paired(le, splits, cs.ROM_DIR, sub, f, 40.0, keep,
+                                        min_diameter_m=size), le) for f in cs.FLOORS}
+            bf = min(cs.FLOORS, key=lambda f: rmse(frames[f]))
+            per[cid] = (bf, frames[bf])
+        index = tiles_of(per["C1"][1])
+        w = draws(len(index))
+        r = boot_rmse(tile_parts(per["C1"][1], index), w) / boot_rmse(tile_parts(per["C1GS"][1], index), w)
+        tie[f"{size:g}"] = {"best_floor": {c: v[0] for c, v in per.items()},
+                            "rmse": {c: rmse(v[1]) for c, v in per.items()}, "c1_over_c1gs_ci95": ci(r)}
+    cost = None
+    summ = cs.ROM_DIR / "render_rom_configs_summary.json"
+    if summ.exists():
+        t = [x for x in json.loads(summ.read_text())["tiles"] if "seconds_1gs" in x]
+        if t:
+            secs, n = sum(x["seconds_1gs"] for x in t), sum(x.get("n_config1gs", 0) for x in t)
+            cost = {"n_tiles": len(t), "seconds_total": secs, "rows_total": n,
+                    "ms_per_output_row": 1000 * secs / n if n else None,
+                    "note": "one laptop run (RTX 5070, AC); each tile in its own process, so model "
+                            "loading is included: an upper bound on the SAM2 + YOLO cost"}
+    import pyogrio
+    src = {"all_rows": [0, 0], "label_population": [0, 0]}      # [rows, rows that kept YOLO's mask]
+    for f in sorted(glob.glob(str(cs.ROM_DIR / "*" / "config1gs" / "*.gpkg"))):
+        g = pyogrio.read_dataframe(f, columns=["score", "mask_src"])
+        yolo = (g.mask_src == "yolo").to_numpy()
+        lab = ((g.score >= 0.40).to_numpy()
+               & (eqd(shapely.area(np.asarray(g.geometry.values))) >= le.STAGE4_MIN_DIAMETER_M))
+        for k, sel in (("all_rows", np.ones(len(g), bool)), ("label_population", lab)):
+            src[k][0] += int(sel.sum())
+            src[k][1] += int((sel & yolo).sum())
+    mask_source = {k: {"n_rows": n, "n_kept_yolo_mask": y, "frac": y / n if n else None}
+                   for k, (n, y) in src.items()}
+    mask_source["note"] = ("C1GS rows whose SAM2 re-mask failed the guard or was degenerate keep YOLO's "
+                           "mask (mask_src == 'yolo'); label population = score >= 0.40, >= 1.4105 m")
+    return {"compensation_test_by_image_at_0.40": flag, "size_floor_reach_by_image": reach,
+            "rom_viewing_geometry": geom, "c1_vs_c1gs_by_size_floor": tie, "c1gs_render_cost": cost,
+            "c1gs_mask_source": mask_source}
 
 
 def sec_mask_area(le, keep):
@@ -608,9 +891,12 @@ def main():
     out["concentration"] = sec_concentration(le, cells, floors)
     out["res025"] = sec_res025(le, cells, floors)
     out["fine_grid"] = sec_fine_grid(le, cells)
+    out["selection"] = sec_selection(le, cells)
+    out["reweighted"] = sec_reweighted(le, cells)
     out["power"] = sec_power(le, cells, floors)
-    out["cells_160m"] = sec_160m(le, cells, floors)
+    out["cells_160m"] = sec_160m(le, cells, floors, keep)
     out["mask_area"] = sec_mask_area(le, keep)
+    out["extras"] = sec_extras(le, cells, tiles, keep)
     Path(args.out).write_text(json.dumps(out, indent=1, default=float))
     print(f"wrote {args.out}")
 

@@ -68,10 +68,20 @@ def test_g2_09_is_only_a_defect_while_the_table_disagrees(tmp_path):
     ("T3-01", "the near-circular pile-up is 12.9% on the treatment scene"),
     ("T2-RECALL", "counts collapse at high incidence (7-24 vs 211-711 on identical ground)"),
     ("T2-RECALL", "the detector finds 7–24 boulders where its partner finds 211–711"),
+    ("T2-2270B", "same-ground the three repeat pairs give 30×, 1.43× (inverted on raw counts)"),
+    ("T2-2270B", "* **2270b** (Δinc 16.8°): **1.43×** on elongated (498 vs 711)"),
+    ("T2-2270B", "the pair showing no collapse is the only statistically usable one"),
+    ("T2-2270B", "30× fewer detections at ~70° than at ~51° in one pair, no drop in the other"),
 ])
 def test_retired_claims_are_caught(tmp_path, cid, line):
     problems = _check(tmp_path, line)
     assert any(f"[{cid}]" in p for p in problems), f"{cid} not caught in {line!r}"
+
+
+def test_an_unrelated_1_43x_is_not_the_2270b_claim(tmp_path):
+    """The hand-out quotes SAM2's area at 1.43x the human outline at 4-6 px; only the 2270b reading
+    is retired."""
+    assert _check(tmp_path, "SAM2's area is 1.27× on the Moon and 1.43× at 4–6 px.") == []
 
 
 def test_a_retraction_may_quote_the_wording_it_retracts(tmp_path):
