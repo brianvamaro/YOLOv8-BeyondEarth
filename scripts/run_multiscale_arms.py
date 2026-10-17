@@ -36,12 +36,24 @@ Three modes, and the third exists because resume is deliberately machine-local:
 
 **Cap escalation** (``--on-max-det escalate``, maintainer decision 2026-10-15). A truncated arm is a
 lower bound, not a catalog, so instead of failing the scene the runner re-runs the arm with the cap
-doubled and the batch halved. Halving the batch keeps ``max_det x batch_size``, and with it the
-worst-case mask memory, where it was. It repeats until an attempt completes with no slice within 10%
-of its cap (the child runs with ``on_max_det="error_near"``, so each failed attempt stops at its first
-such batch rather than at the end of the arm). A CUDA out-of-memory stop halves the batch at the same
-cap. Escalation ends at :func:`model_max_boxes`, the most boxes the model can return for one slice,
-since no cap above that can bind.
+doubled and the batch halved. It repeats until an attempt completes with no slice within 10% of its
+cap (the child runs with ``on_max_det="error_near"``, so each failed attempt stops at its first such
+batch rather than at the end of the arm). Escalation ends at :func:`model_max_boxes`, the most boxes
+the model can return for one slice, since no cap above that can bind.
+
+What an escalation step costs (corrected after the configuration-study audit, 2026-10-16):
+
+- GPU memory. Halving the batch keeps ``max_det x batch_size``, and with it the retained masks (~1 MiB
+  per detection at imgsz 1024), where they were. The transient for the slice being processed does not
+  stay put: ultralytics holds ~5 MiB per detection of that slice while it builds masks, which follows
+  the cap alone, ~5.4 / 10.7 / 21.5 / 43 GiB worst case at caps 1,100 / 2,200 / 4,400 / 8,800. So a
+  later attempt can run out of memory. A CUDA out-of-memory stop halves the batch at the same cap, and
+  at batch 1 the arm stops and asks for a card with more memory.
+- Time. A failed attempt runs until the first near-cap batch in slice order. That took seconds on the
+  25-slice tile of the end-to-end check; on a scene it can be most of a pass.
+- Walltime. An attempt has no checkpoint. A resubmit resumes at the attempt the ledger points to, but
+  an attempt that needs longer than the job's ``--time`` restarts from zero every time and never
+  finishes, so that scene needs a longer ``--time``.
 
 What it produces is the uncapped catalog: a run that does not bind does not depend on the cap (279
 tiles verified inert). The halved batch is the one thing that moves, at the ~1e-4 level a batch's size
@@ -49,7 +61,9 @@ is measured to move results (G1-02's 1-vs-8 comparison).
 
 Every attempt is a ledger entry of the arm's stage, with its ``max_det``, ``batch_size`` and why it
 stopped, so a resubmitted job resumes at the attempt the last one pointed to, rather than paying again
-for the passes that already bound.
+for the passes that already bound. An arm that ``--on-max-det error`` or ``warn`` completed with a
+slice at or near its cap is a lower bound as well, so escalation does not accept that entry as done: it
+counts as a ``max_det`` stop, and the arm goes on at the next attempt.
 """
 from __future__ import annotations
 
@@ -85,6 +99,11 @@ from YOLOv8BeyondEarth.runstate import (COMPLETE, FAILED, INCOMPLETE,       # no
 #: higher cap or a smaller batch fixes from a crash. Anything else non-zero is a crash.
 EXIT_MAX_DET = 3
 EXIT_CUDA_OOM = 4
+
+#: The truncation counts that say the cap bound: a slice at it, or within 10% of it (where a truncated
+#: slice lands after ultralytics drops empty masks). The NMS time-limit counts are a different failure,
+#: which no cap fixes.
+CAP_TRUNCATION = ("slices_at_max_det", "slices_near_max_det")
 
 
 class ArmStopped(Exception):
@@ -157,8 +176,10 @@ def model_max_boxes(inference_size, strides=(8, 16, 32)):
 def next_attempt(max_det, batch_size, reason, ceiling):
     """``(max_det, batch_size)`` for the attempt after a recoverable stop, or ``None`` if none is left.
 
-    The cap doubles and the batch halves together, so ``max_det x batch_size`` -- what the worst-case
-    mask memory scales with -- does not grow. An out-of-memory stop halves the batch at the same cap.
+    The cap doubles and the batch halves together, so ``max_det x batch_size`` -- what the retained
+    masks scale with -- does not grow. The transient for the slice being processed scales with the cap
+    alone and doubles at every step (see the module docstring), so a later attempt can still run out of
+    memory. An out-of-memory stop halves the batch at the same cap.
     """
     max_det, batch_size = int(max_det), int(batch_size)
     if reason == "max_det":
@@ -186,9 +207,11 @@ def attempt_key(base, max_det, batch_size):
 
     ``max_det`` is spelled out because X-06 made it result-defining: a stale entry would otherwise
     let a 300-capped arm satisfy a run configured for a higher cap. ``batch_size`` moves results at
-    ~1e-4, so it is keyed too, but only when it differs from the preset's: every ledger written
-    before escalation existed ran at the preset's batch, and keying it unconditionally would orphan
-    them all.
+    ~1e-4, so it is keyed too, but only when it differs from the preset's. A preset-batch key is then
+    the key the formula gave before escalation existed, so the batch adds no re-key of its own. That
+    does not keep older entries valid: every stage key also embeds the package's source digest
+    (``runstate.stage_key``), so any change under ``src/`` -- the escalation change itself among them --
+    re-keys every banked arm anyway.
     """
     parts = {**base, "max_det": int(max_det)}
     if int(batch_size) != presets.GOAL1_PRODUCTION["batch_size"]:
@@ -196,15 +219,44 @@ def attempt_key(base, max_det, batch_size):
     return stage_key(**parts)
 
 
-def resume_point(ledger, arm, base_key, start):
+def cap_truncation(rec):
+    """The cap-side truncation a ledger entry recorded, ``{}`` if none.
+
+    An escalating run never completes with any, because its child stops on them. An attempt that
+    ``--on-max-det error`` or ``warn`` completed can, and to escalation that layer is a lower bound.
+    """
+    return {k: v for k, v in ((rec or {}).get("truncation") or {}).items()
+            if k in CAP_TRUNCATION and v}
+
+
+def _no_higher_cap(arm, max_det, ceiling, inference_size):
+    return (f"arm {arm}: a slice still came within 10% of max_det={max_det}, the escalation ceiling "
+            f"({ceiling}; the model returns at most {model_max_boxes(inference_size)} boxes per slice "
+            f"at imgsz {inference_size}). There is no higher cap to try.")
+
+
+def _bound(rec):
+    """Whether a ledger entry's cap already bound, so that running the same attempt again would
+    only bind again: complete with a slice at or near the cap (which only 'error' or 'warn' can
+    leave), or stopped on the cap. The latter includes a stop that recorded no next attempt: one
+    written under 'error', which fails before computing one, or one at an exhausted ceiling."""
+    rec = rec or {}
+    return ((rec.get("state") == COMPLETE and bool(cap_truncation(rec)))
+            or (rec.get("state") == FAILED and rec.get("stopped") == "max_det"))
+
+
+def resume_point(ledger, arm, base_key, start, ceiling):
     """Where an escalating arm stands: the ``(max_det, batch_size)`` to check or try first.
 
     An arm's attempts share its stage name, and each terminal entry records its ``base_key`` and its
     own ``max_det`` and ``batch_size``. The latest entry for this configuration decides. A complete
     attempt is re-checked as it is, so a finished escalated arm is not redone at the starting cap. A
-    recoverable stop resumes at the attempt it pointed to, and any other ending retries the same
-    attempt. A killed attempt leaves only its ``running`` marker, which carries no ``base_key``, so the
-    entry before it decides. No entry for this configuration means ``start``.
+    recoverable stop resumes at the attempt it pointed to. An attempt whose cap already bound
+    (:func:`_bound`) but that points nowhere resumes at the attempt after it, up to ``ceiling``; at
+    the ceiling it is returned as it is, and :func:`orchestrate` refuses it. Any other ending retries
+    the same attempt. A killed attempt leaves only its ``running`` marker, which carries no
+    ``base_key``, so the entry before it decides. No entry for this configuration means ``start``.
+    A stored next attempt may lie above a ceiling lowered since; :func:`orchestrate` refuses that too.
     """
     for rec in reversed(ledger.entries(f"arm:{arm}")):
         if rec.get("base_key") != base_key:
@@ -212,6 +264,15 @@ def resume_point(ledger, arm, base_key, start):
         nxt = rec.get("next_attempt")
         if rec.get("state") == FAILED and nxt:
             return int(nxt["max_det"]), int(nxt["batch_size"])
+        if _bound(rec):
+            nxt = next_attempt(rec["max_det"], rec["batch_size"], "max_det", ceiling)
+            if nxt is not None:
+                why = (f"recorded {cap_truncation(rec)}, a lower bound" if rec["state"] == COMPLETE
+                       else "stopped on the cap")
+                print(f"[esc ] arm {arm}: its attempt at max_det {rec['max_det']}, batch "
+                      f"{rec['batch_size']} (on_max_det={rec.get('on_max_det')!r}) {why}; next "
+                      f"max_det {nxt[0]}, batch {nxt[1]}", flush=True)
+                return nxt
         if rec.get("state") in (COMPLETE, FAILED, INCOMPLETE):
             return int(rec["max_det"]), int(rec["batch_size"])
     return start
@@ -474,11 +535,7 @@ def _attempt_arm(args, ledger, arm, key, base_key, layer, max_det, batch, child_
             if nxt is None:
                 st.result["escalation_exhausted"] = reason
                 if reason == "max_det":
-                    raise SystemExit(
-                        f"arm {arm}: a slice still came within 10% of max_det={max_det}, the "
-                        f"escalation ceiling ({ceiling}; the model returns at most "
-                        f"{model_max_boxes(args.inference_size)} boxes per slice at imgsz "
-                        f"{args.inference_size}). There is no higher cap to try.")
+                    raise SystemExit(_no_higher_cap(arm, max_det, ceiling, args.inference_size))
                 raise SystemExit(
                     f"arm {arm}: CUDA out of memory at batch 1 with max_det={max_det}. This GPU "
                     "cannot hold the scene's densest slice at that cap, so run this arm on a card "
@@ -510,10 +567,19 @@ def orchestrate(args):
         layer = arm_layer_path(out_dir, args.raster, slice_size, sr_factor, args.conf,
                                args.inference_size, presets.GOAL1_PRODUCTION["overlap_height_ratio"])
         start = (effective_max_det(args), effective_batch_size(args))
-        max_det, batch = resume_point(ledger, arm, base_key, start) if escalate else start
+        max_det, batch = resume_point(ledger, arm, base_key, start, ceiling) if escalate else start
+        if escalate and max_det > ceiling:
+            raise SystemExit(f"arm {arm}: the ledger points at max_det {max_det}, above the escalation "
+                             f"ceiling ({ceiling}). A lower cap already bound, so no attempt at or "
+                             "below the ceiling can complete; raise --max-det-ceiling to go on.")
         while True:
             key = attempt_key(base, max_det, batch)
             state, detail = ledger.status(f"arm:{arm}", key)
+            last = ledger.latest(f"arm:{arm}")
+            if escalate and last and last.get("key") == key and _bound(last):
+                # This very attempt already bound. resume_point moves past such an entry while a
+                # higher cap is left, so this one is at the ceiling, and a rerun would bind again.
+                raise SystemExit(_no_higher_cap(arm, max_det, ceiling, args.inference_size))
             if state == COMPLETE:
                 print(f"[skip] arm {arm}: {detail} (max_det {max_det}, batch {batch})", flush=True)
                 break
@@ -617,7 +683,20 @@ def main():
     elif args.fuse_only:
         fuse_only(args)
     else:
-        orchestrate(args)
+        try:
+            orchestrate(args)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode >= 0:
+                raise
+            # An arm killed by a signal exits the way a shell reports one, 128 + signal, so the job
+            # script can tell SIGKILL (137) -- on a cluster node, the host-RAM out-of-memory killer --
+            # from a crash, which exits 1. The ledger has already recorded the attempt as failed.
+            print(exc, file=sys.stderr, flush=True)
+            if exc.returncode == -9:
+                print("SIGKILL is usually the out-of-memory killer. The same attempt at the same "
+                      "memory limit dies the same way, so raise the job's --mem.",
+                      file=sys.stderr, flush=True)
+            sys.exit(128 - exc.returncode)
 
 
 if __name__ == "__main__":

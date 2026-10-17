@@ -12,7 +12,11 @@
 # Campaign step 1 (runbook: sherlock/CAMPAIGN.md). One scene-manifest row per array task -> the 8-bit
 # GeoTIFF BoulderNet infers on, in the PDS label frame, plus its .prep.json sidecar. No GPU.
 #
-#   sbatch --array=0-62%8 --export=ALL,MANIFEST=$HOME/campaign/scenes.csv sherlock/campaign_prep.sbatch
+#   N=$(python scripts/campaign.py count --manifest $M)        # array tasks 0..N-1: derive, never type
+#   sbatch --array=0-$((N-1))%8 --export=ALL,MANIFEST=$M sherlock/campaign_prep.sbatch
+#
+# (M is the manifest CSV; the runbook's shell setup defines it. A range one past the manifest's last row
+# launches a task that can only fail.)
 #
 # FETCH (env):  yes  download whatever is missing, then convert (default)
 #               no   convert files already fetched (a partition without outbound internet)

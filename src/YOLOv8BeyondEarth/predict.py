@@ -819,6 +819,20 @@ def prediction_filenames(stem, *, confidence_threshold, slice_size, inference_si
             "nms": mask[: -len(ext)] + "-nms" + ext}
 
 
+def _available_cpus():
+    """CPUs this process may run on: its affinity mask where the OS has one, else the machine's count.
+
+    ``os.cpu_count()`` counts the whole node. Under a Slurm step, a cgroup or a ``taskset`` the process
+    can be pinned to fewer, and sizing the worker pool from the node would put eight threads on
+    however many cores the step actually got (configuration-study audit, 2026-10-16). Windows and
+    macOS have no ``sched_getaffinity``, so they keep ``os.cpu_count()``.
+    """
+    try:
+        return len(os.sched_getaffinity(0)) or 1
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
 def get_sliced_prediction(in_raster,
                           detection_model=None,
                           confidence_threshold: float = 0.1,
@@ -942,9 +956,10 @@ def get_sliced_prediction(in_raster,
             ``"shp"`` (default) or ``"gpkg"``. GeoPackage avoids the shapefile 2 GB / field
             limits and is faster to write for very large (~1e6-feature) outputs.
         n_workers: int
-            Threads for the per-detection mask->polygon post-processing. Default
-            ``min(8, os.cpu_count())``; pass ``1`` to force the serial path. Output is identical
-            regardless of worker count (order-preserving).
+            Threads for the per-detection mask->polygon post-processing. Default ``min(8, n)``,
+            ``n`` being the CPUs this process may run on (its affinity mask where the OS has one,
+            e.g. a Slurm step's; else ``os.cpu_count()``); pass ``1`` to force the serial path.
+            Output is identical regardless of worker count (order-preserving).
         remask_fn: callable or None
             Solution G (detector-preserving re-masking). If given, YOLO still supplies every box and
             score, but each detection's **mask** is produced by ``remask_fn(slice_image, boxes_xyxy)``
@@ -1094,7 +1109,7 @@ def get_sliced_prediction(in_raster,
     # run it across a thread pool (find_contours / cv2 / numpy release the GIL). Output order is
     # preserved, so results are identical to the serial path. Default to a modest worker count
     # (returns diminish past ~8 and we don't want to oversubscribe alongside the GPU thread).
-    workers = n_workers if n_workers is not None else min(8, os.cpu_count() or 1)
+    workers = n_workers if n_workers is not None else min(8, _available_cpus())
     executor = ThreadPoolExecutor(max_workers=workers) if workers and workers > 1 else None
     try:
         # perform sliced prediction in batches (batched GPU inference instead of one slice at a
