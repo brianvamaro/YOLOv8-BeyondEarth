@@ -35,8 +35,26 @@ C:\Users\brian\Documents\PhD\BoulderNet\data\deliveries\hirise2ctx_v3\<TAG>\   (
   the label sits beside the prepared raster, which is already in the label frame. Ask if R11's overlays
   need the native JP2 instead.
 
-**The pull.** The laptop has no `rsync`, so this streams `tar` over one `ssh` session, in Git Bash.
-Pull after `campaign.py status` reports the scenes `verified`:
+**What the pilot actually used (2026-10-18), and it worked.**
+1. **Two archives on `$SCRATCH`,** made on a login node:
+   ```bash
+   cd $SCRATCH/campaign
+   tar cf $SCRATCH/pilot-1_catalogs.tar out scenes/*/*_RED.LBL scenes/*/*_RED.prep.json scenes/*/fetched.json
+   tar cf $SCRATCH/pilot-1_rasters.tar scenes/*/*_RED.tif
+   ```
+   They came to 7.4 GB and 14.4 GB.
+2. **Downloaded through Sherlock OnDemand's file manager,** then unpacked into the delivery root with
+   `tar xf <archive> -C <root>`.
+3. **Re-verified on the laptop:** every scene's `SHA256SUMS`, plus each prepared raster against
+   `handoff.json`'s `raster.sha256` (`scripts/review/sherlock_pilot_analysis.py --sections run`).
+
+**The direct pull below has not been used.**
+- On 2026-10-17 an `scp` to `dtn.sherlock.stanford.edu:~/` reported success, but the file never
+  appeared in the login node's home.
+- So whether the DTN shares that home, and whether it gives a shell, is unchecked.
+
+The recipe streams `tar` over one `ssh` session in Git Bash, since the laptop has no `rsync`. Pull
+after `campaign.py status` reports the scenes `verified`:
 
 ```bash
 TAG=pilot-1

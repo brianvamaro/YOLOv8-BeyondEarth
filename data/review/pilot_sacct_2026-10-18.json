@@ -1,0 +1,427 @@
+{
+ "what": "sacct for the Sherlock pilot (release pilot-1, dfcaa26), as Brian ran it on 2026-10-18",
+ "notes": [
+  "Sherlock pilot (release pilot-1, dfcaa26), sacct as Brian ran it on 2026-10-18 (login node sh03-ln04):",
+  "  sacct -X -j 48319948,48319950,48319951,48319952,48319953 --format=JobID%16,JobName%10,State%14,ExitCode,Elapsed,Start%19,End%19",
+  "48319948 = prep, pilot_scenes.csv (S1-S3); 48319950 = prep, pilot_pairs.csv (20 images);",
+  "48319951 = detect S1, S2 (--mem=128G); 48319952 = detect S3; 48319953 = detect, pilot_pairs.csv.",
+  "Array task N is manifest row N. Times are Pacific.",
+  "campaign.py status: pilot_scenes.csv totals {'verified': 3}; pilot_pairs.csv totals {'verified': 20}."
+ ],
+ "rows": [
+  {
+   "job_task": "48319948_0",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "03:02:30",
+   "start": "2026-10-18T00:30:07",
+   "end": "2026-10-18T03:32:37"
+  },
+  {
+   "job_task": "48319948_1",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:56:02",
+   "start": "2026-10-18T00:30:07",
+   "end": "2026-10-18T01:26:09"
+  },
+  {
+   "job_task": "48319948_2",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:11:51",
+   "start": "2026-10-18T00:30:07",
+   "end": "2026-10-18T00:41:58"
+  },
+  {
+   "job_task": "48319950_0",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:01:56",
+   "start": "2026-10-18T00:27:21",
+   "end": "2026-10-18T00:29:17"
+  },
+  {
+   "job_task": "48319950_1",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:02:08",
+   "start": "2026-10-18T00:27:21",
+   "end": "2026-10-18T00:29:29"
+  },
+  {
+   "job_task": "48319950_2",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:01:42",
+   "start": "2026-10-18T00:27:21",
+   "end": "2026-10-18T00:29:03"
+  },
+  {
+   "job_task": "48319950_3",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:03:09",
+   "start": "2026-10-18T00:27:21",
+   "end": "2026-10-18T00:30:30"
+  },
+  {
+   "job_task": "48319950_4",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:13:51",
+   "start": "2026-10-18T00:27:21",
+   "end": "2026-10-18T00:41:12"
+  },
+  {
+   "job_task": "48319950_5",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:28:51",
+   "start": "2026-10-18T00:28:44",
+   "end": "2026-10-18T00:57:35"
+  },
+  {
+   "job_task": "48319950_6",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:01:25",
+   "start": "2026-10-18T00:28:44",
+   "end": "2026-10-18T00:30:09"
+  },
+  {
+   "job_task": "48319950_7",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:04:47",
+   "start": "2026-10-18T00:30:07",
+   "end": "2026-10-18T00:34:54"
+  },
+  {
+   "job_task": "48319950_8",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:24:31",
+   "start": "2026-10-18T00:30:07",
+   "end": "2026-10-18T00:54:38"
+  },
+  {
+   "job_task": "48319950_9",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:18:50",
+   "start": "2026-10-18T00:30:07",
+   "end": "2026-10-18T00:48:57"
+  },
+  {
+   "job_task": "48319950_10",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:09:20",
+   "start": "2026-10-18T00:30:07",
+   "end": "2026-10-18T00:39:27"
+  },
+  {
+   "job_task": "48319950_11",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:08:01",
+   "start": "2026-10-18T00:31:28",
+   "end": "2026-10-18T00:39:29"
+  },
+  {
+   "job_task": "48319950_12",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:08:55",
+   "start": "2026-10-18T00:31:28",
+   "end": "2026-10-18T00:40:23"
+  },
+  {
+   "job_task": "48319950_13",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:19:00",
+   "start": "2026-10-18T00:35:37",
+   "end": "2026-10-18T00:54:37"
+  },
+  {
+   "job_task": "48319950_14",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:07:41",
+   "start": "2026-10-18T00:41:19",
+   "end": "2026-10-18T00:49:00"
+  },
+  {
+   "job_task": "48319950_15",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:05:27",
+   "start": "2026-10-18T00:41:19",
+   "end": "2026-10-18T00:46:46"
+  },
+  {
+   "job_task": "48319950_16",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:09:44",
+   "start": "2026-10-18T00:41:19",
+   "end": "2026-10-18T00:51:03"
+  },
+  {
+   "job_task": "48319950_17",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:10:35",
+   "start": "2026-10-18T00:41:19",
+   "end": "2026-10-18T00:51:54"
+  },
+  {
+   "job_task": "48319950_18",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:24:26",
+   "start": "2026-10-18T00:48:21",
+   "end": "2026-10-18T01:12:47"
+  },
+  {
+   "job_task": "48319950_19",
+   "name": "bnet-prep",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:13:10",
+   "start": "2026-10-18T00:49:46",
+   "end": "2026-10-18T01:02:56"
+  },
+  {
+   "job_task": "48319951_0",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:43:43",
+   "start": "2026-10-18T03:44:19",
+   "end": "2026-10-18T04:28:02"
+  },
+  {
+   "job_task": "48319951_1",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:33:34",
+   "start": "2026-10-18T02:07:50",
+   "end": "2026-10-18T02:41:24"
+  },
+  {
+   "job_task": "48319952_2",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:18:01",
+   "start": "2026-10-18T01:57:10",
+   "end": "2026-10-18T02:15:11"
+  },
+  {
+   "job_task": "48319953_0",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:06:14",
+   "start": "2026-10-18T01:43:50",
+   "end": "2026-10-18T01:50:04"
+  },
+  {
+   "job_task": "48319953_1",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:04:37",
+   "start": "2026-10-18T01:51:32",
+   "end": "2026-10-18T01:56:09"
+  },
+  {
+   "job_task": "48319953_2",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:03:39",
+   "start": "2026-10-18T02:16:10",
+   "end": "2026-10-18T02:19:49"
+  },
+  {
+   "job_task": "48319953_3",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:05:08",
+   "start": "2026-10-18T02:20:58",
+   "end": "2026-10-18T02:26:06"
+  },
+  {
+   "job_task": "48319953_4",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:16:20",
+   "start": "2026-10-18T02:26:45",
+   "end": "2026-10-18T02:43:05"
+  },
+  {
+   "job_task": "48319953_5",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:18:10",
+   "start": "2026-10-18T02:26:45",
+   "end": "2026-10-18T02:44:55"
+  },
+  {
+   "job_task": "48319953_6",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:05:05",
+   "start": "2026-10-18T02:42:43",
+   "end": "2026-10-18T02:47:48"
+  },
+  {
+   "job_task": "48319953_7",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:04:40",
+   "start": "2026-10-18T02:42:43",
+   "end": "2026-10-18T02:47:23"
+  },
+  {
+   "job_task": "48319953_8",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:37:34",
+   "start": "2026-10-18T02:44:24",
+   "end": "2026-10-18T03:21:58"
+  },
+  {
+   "job_task": "48319953_9",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:31:07",
+   "start": "2026-10-18T02:46:02",
+   "end": "2026-10-18T03:17:09"
+  },
+  {
+   "job_task": "48319953_10",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:22:57",
+   "start": "2026-10-18T02:49:15",
+   "end": "2026-10-18T03:12:12"
+  },
+  {
+   "job_task": "48319953_11",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:20:42",
+   "start": "2026-10-18T02:49:15",
+   "end": "2026-10-18T03:09:57"
+  },
+  {
+   "job_task": "48319953_12",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:12:07",
+   "start": "2026-10-18T03:11:45",
+   "end": "2026-10-18T03:23:52"
+  },
+  {
+   "job_task": "48319953_13",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:11:22",
+   "start": "2026-10-18T03:13:21",
+   "end": "2026-10-18T03:24:43"
+  },
+  {
+   "job_task": "48319953_14",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:10:35",
+   "start": "2026-10-18T03:18:13",
+   "end": "2026-10-18T03:28:48"
+  },
+  {
+   "job_task": "48319953_15",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:09:59",
+   "start": "2026-10-18T03:18:13",
+   "end": "2026-10-18T03:28:12"
+  },
+  {
+   "job_task": "48319953_16",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:14:38",
+   "start": "2026-10-18T03:22:58",
+   "end": "2026-10-18T03:37:36"
+  },
+  {
+   "job_task": "48319953_17",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:11:50",
+   "start": "2026-10-18T03:24:26",
+   "end": "2026-10-18T03:36:16"
+  },
+  {
+   "job_task": "48319953_18",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:16:27",
+   "start": "2026-10-18T03:25:56",
+   "end": "2026-10-18T03:42:23"
+  },
+  {
+   "job_task": "48319953_19",
+   "name": "bnet-dete+",
+   "state": "COMPLETED",
+   "exit_code": "0:0",
+   "elapsed": "00:11:33",
+   "start": "2026-10-18T03:29:13",
+   "end": "2026-10-18T03:40:46"
+  }
+ ]
+}
