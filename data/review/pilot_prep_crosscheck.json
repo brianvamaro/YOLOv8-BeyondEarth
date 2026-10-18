@@ -1,0 +1,123 @@
+{
+ "what": "the pilot's prep cross-check: laptop pds_prep vs the cluster's delivered prepared raster",
+ "code": {
+  "python": "3.10.15",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "host": "Bdirb",
+  "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+  "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+  "git_sha": "1c4735284914c613ca4239acb4b4bbccb3489def",
+  "git_dirty": true,
+  "ultralytics": "8.4.75",
+  "sahi": "0.12.1",
+  "torch": "2.11.0+cu128",
+  "geopandas": "1.1.3",
+  "shapely": "2.1.2",
+  "rasterio": "1.4.4",
+  "opencv-python": "4.13.0.92"
+ },
+ "delivery": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\data\\deliveries\\hirise2ctx_v3\\pilot-1",
+ "products": [
+  {
+   "obs_id": "PSP_007492_2265",
+   "jp2_identical": true,
+   "gdal": {
+    "laptop": "3.10",
+    "cluster": "3.9"
+   },
+   "identical": true,
+   "n_pixels": 1663885763,
+   "n_differ": 0,
+   "diff_histogram": {},
+   "transform_equal": true,
+   "crs_equal": true,
+   "dn_histogram_equal": true,
+   "frame_check": {
+    "laptop": [
+     0.0,
+     0.0
+    ],
+    "cluster": [
+     0.0,
+     0.0
+    ]
+   }
+  },
+  {
+   "obs_id": "ESP_059499_2270",
+   "jp2_identical": true,
+   "gdal": {
+    "laptop": "3.10",
+    "cluster": "3.9"
+   },
+   "identical": true,
+   "n_pixels": 263780880,
+   "n_differ": 0,
+   "diff_histogram": {},
+   "transform_equal": true,
+   "crs_equal": true,
+   "dn_histogram_equal": true,
+   "frame_check": {
+    "laptop": [
+     0.0,
+     0.0
+    ],
+    "cluster": [
+     0.0,
+     0.0
+    ]
+   }
+  },
+  {
+   "obs_id": "ESP_071699_2260",
+   "jp2_identical": true,
+   "gdal": {
+    "laptop": "3.10",
+    "cluster": "3.9"
+   },
+   "identical": true,
+   "n_pixels": 294039240,
+   "n_differ": 0,
+   "diff_histogram": {},
+   "transform_equal": true,
+   "crs_equal": true,
+   "dn_histogram_equal": true,
+   "frame_check": {
+    "laptop": [
+     0.0,
+     0.0
+    ],
+    "cluster": [
+     0.0,
+     0.0
+    ]
+   }
+  },
+  {
+   "obs_id": "ESP_069088_2270",
+   "jp2_identical": true,
+   "gdal": {
+    "laptop": "3.10",
+    "cluster": "3.9"
+   },
+   "identical": true,
+   "n_pixels": 1469289568,
+   "n_differ": 0,
+   "diff_histogram": {},
+   "transform_equal": true,
+   "crs_equal": true,
+   "dn_histogram_equal": true,
+   "frame_check": {
+    "laptop": [
+     0.0,
+     0.0
+    ],
+    "cluster": [
+     0.0,
+     0.0
+    ]
+   }
+  }
+ ],
+ "all_identical": true
+}

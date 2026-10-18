@@ -65,7 +65,7 @@ def main():
                "identical": cmp["identical"], "n_pixels": cmp.get("n_pixels"), "n_differ": cmp.get("n_differ"),
                "diff_histogram": cmp.get("diff_histogram"), "transform_equal": cmp["transform_equal"],
                "crs_equal": cmp["crs_equal"],
-               "dn_histogram_equal": local_prep["dn_counts"]["histogram_nonzero"]
+               "dn_histogram_equal": {int(k): v for k, v in local_prep["dn_counts"]["histogram_nonzero"].items()}
                == {int(k): v for k, v in cluster_prep["dn_counts"]["histogram_nonzero"].items()},
                "frame_check": {"laptop": [local_prep["frame_check"]["dx_px"], local_prep["frame_check"]["dy_px"]],
                                "cluster": [cluster_prep["frame_check"]["dx_px"], cluster_prep["frame_check"]["dy_px"]]}}
