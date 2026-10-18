@@ -1,0 +1,695 @@
+{
+ "what": "GDAL's PDS driver vs the label frame, and the JP2 box, on every local product",
+ "code": {
+  "python": "3.10.15",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "host": "Bdirb",
+  "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+  "scripts_sha256": "21c540e2e054e1e2f692581c9b0c1df1493d8f3b486d77bc3b2bfddd8b2c94da",
+  "git_sha": "e007bb4517e5066d9c0ec8ac491f91a1ce9b32b0",
+  "git_dirty": true,
+  "ultralytics": "8.4.75",
+  "sahi": "0.12.1",
+  "torch": "2.11.0+cu128",
+  "geopandas": "1.1.3",
+  "shapely": "2.1.2",
+  "rasterio": "1.4.4",
+  "opencv-python": "4.13.0.92"
+ },
+ "gdal": "3.10",
+ "convention": "minus_label_px = ((ulx - label_ulx) / s, (label_uly - uly) / s): +x east, +y south",
+ "products": [
+  {
+   "product_id": "ESP_055714_2270_RED",
+   "product_version": "1.0",
+   "map_scale": 0.5,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6707397.0,
+    2766792.5
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6707397.0,
+     2766792.5
+    ],
+    "pixel": [
+     0.5,
+     -0.5
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6707396.25,
+     2766791.75
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_055833_2260_RED",
+   "product_version": "1.0",
+   "map_scale": 0.5,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -7025252.5,
+    2718477.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -7025252.5,
+     2718477.0
+    ],
+    "pixel": [
+     0.5,
+     -0.5
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -7025251.75,
+     2718476.25
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_059499_2270_RED",
+   "product_version": "1.0",
+   "map_scale": 0.5,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6706984.0,
+    2763688.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6706984.0,
+     2763688.0
+    ],
+    "pixel": [
+     0.5,
+     -0.5
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6706983.25,
+     2763687.25
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_067214_2270_RED",
+   "product_version": "1.0",
+   "map_scale": 0.25,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6917509.25,
+    2774101.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6917509.25,
+     2774101.0
+    ],
+    "pixel": [
+     0.25,
+     -0.25
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6917508.875,
+     2774100.625
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_069088_2270_RED",
+   "product_version": "1.0",
+   "map_scale": 0.25,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6917363.5,
+    2771464.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6917363.5,
+     2771464.0
+    ],
+    "pixel": [
+     0.25,
+     -0.25
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6917363.25,
+     2771463.75
+    ],
+    "minus_label_px": [
+     1.0,
+     1.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_071699_2260_RED",
+   "product_version": "1.0",
+   "map_scale": 0.5,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6948209.5,
+    2690572.5
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6948209.5,
+     2690572.5
+    ],
+    "pixel": [
+     0.5,
+     -0.5
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6948209.0,
+     2690572.0
+    ],
+    "minus_label_px": [
+     1.0,
+     1.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_071923_2260_RED",
+   "product_version": "1.0",
+   "map_scale": 0.5,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6948908.5,
+    2690786.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6948908.5,
+     2690786.0
+    ],
+    "pixel": [
+     0.5,
+     -0.5
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6948908.0,
+     2690785.5
+    ],
+    "minus_label_px": [
+     1.0,
+     1.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_076235_2260_RED",
+   "product_version": "1.0",
+   "map_scale": 0.5,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -7026347.5,
+    2715407.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -7026347.5,
+     2715407.0
+    ],
+    "pixel": [
+     0.5,
+     -0.5
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -7026347.0,
+     2715406.5
+    ],
+    "minus_label_px": [
+     1.0,
+     1.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "PSP_007492_2265_RED",
+   "product_version": "2.0",
+   "map_scale": 0.25,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6878025.0,
+    2732341.75
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6878025.0,
+     2732341.75
+    ],
+    "pixel": [
+     0.25,
+     -0.25
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6878024.625,
+     2732341.375
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "PSP_007703_2265_RED",
+   "product_version": "2.0",
+   "map_scale": 0.25,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6878073.75,
+    2733640.25
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6878073.75,
+     2733640.25
+    ],
+    "pixel": [
+     0.25,
+     -0.25
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6878073.375,
+     2733639.875
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_028537_2270_RED",
+   "product_version": "1.0",
+   "map_scale": 0.25,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6736886.25,
+    2755670.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6736886.25,
+     2755670.0
+    ],
+    "pixel": [
+     0.25,
+     -0.25
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6736885.875,
+     2755669.625
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  },
+  {
+   "product_id": "ESP_017355_2260_RED",
+   "product_version": "1.0",
+   "map_scale": 0.5,
+   "center_latitude": 45.0,
+   "label_ul_m": [
+    -6839383.5,
+    2729223.0
+   ],
+   "pds": {
+    "driver": "PDS",
+    "ul_m": [
+     -6839383.5,
+     2729223.0
+    ],
+    "pixel": [
+     0.5,
+     -0.5
+    ],
+    "minus_label_px": [
+     0.0,
+     0.0
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 45,
+     "lat_0": 0,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     -6839382.75,
+     2729222.25
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   },
+   "pds_is_label_frame": true
+  }
+ ],
+ "jp2_box_only": [
+  {
+   "product_id": "ESP_045788_2045_RED",
+   "map_scale": 0.25,
+   "center_latitude": 20.0,
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     6707459.875,
+     1448774.625
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 20,
+     "lon_0": 180,
+     "R": 3393833.2607584
+    }
+   }
+  },
+  {
+   "product_id": "ESP_068483_2280_RED",
+   "map_scale": 0.25,
+   "center_latitude": 45.0,
+   "jp2": {
+    "driver": "JP2OpenJPEG",
+    "ul_m": [
+     5552278.625,
+     2813043.375
+    ],
+    "minus_label_px": [
+     1.5,
+     1.5
+    ],
+    "crs": {
+     "proj": "eqc",
+     "lat_ts": 0,
+     "lat_0": 45,
+     "lon_0": 180,
+     "R": 3386150.7470034
+    }
+   }
+  }
+ ],
+ "all_pds_label_frame": true,
+ "config_option_probe": {
+  "product": "ESP_055714_2270_RED",
+  "options": {
+   "PDS_SampleProjOffset_Shift": "-0.5",
+   "PDS_LineProjOffset_Shift": "-0.5"
+  },
+  "minus_label_px": [
+   1.0,
+   1.0
+  ]
+ }
+}

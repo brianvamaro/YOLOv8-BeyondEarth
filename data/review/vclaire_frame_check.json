@@ -1,0 +1,91 @@
+{
+ "what": "matched-centroid offset, vClaire's ESP_017355_2260 export minus a JP2-frame catalog of the same image",
+ "code": {
+  "python": "3.10.15",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "host": "Bdirb",
+  "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+  "scripts_sha256": "a88322ebb5822615b22e39585aa02d9c2129d5e08ca295a0d6eedec4f427dd05",
+  "git_sha": "e007bb4517e5066d9c0ec8ac491f91a1ce9b32b0",
+  "git_dirty": true,
+  "ultralytics": "8.4.75",
+  "sahi": "0.12.1",
+  "torch": "2.11.0+cu128",
+  "geopandas": "1.1.3",
+  "shapely": "2.1.2",
+  "rasterio": "1.4.4",
+  "opencv-python": "4.13.0.92"
+ },
+ "inputs": {
+  "vclaire_shp": {
+   "path": "C:\\Users\\brian\\Documents\\PhD\\HiRiseToCTXBoulders\\hirise_40_vClaire\\ESP_017355_2260\\ESP_017355_2260_RED-predictions-ct-010-ss-256-is-1024-ov-020-downscaled-mask-nms.shp",
+   "sha256": "ba030bde8e936e6647d3c43814c91263d346f42272c17774305953525ab5f77d",
+   "prj": "PROJCS[\"Equirectangular_MARS\",GEOGCS[\"GCS_MARS\",DATUM[\"D_unnamed\",SPHEROID[\"unnamed\",3386150.7470034,0.0]],PRIMEM[\"Reference_meridian\",0.0],UNIT[\"Degree\",0.0174532925199433]],PROJECTION[\"Equidistant_Cylindrical\"],PARAMETER[\"False_Easting\",0.0],PARAMETER[\"False_Northing\",0.0],PARAMETER[\"Central_Meridian\",180.0],PARAMETER[\"Standard_Parallel_1\",0.0],UNIT[\"Meter\",1.0]]"
+  },
+  "ours_gpkg": {
+   "path": "C:\\Users\\brian\\Documents\\PhD\\BoulderNet\\YOLOv8-BeyondEarth\\data\\mars_hirise\\predictions_new\\ESP_017355_2260_RED-predictions-skimage-mask-nms.gpkg",
+   "sha256": "419159e3a0f07c04788e87567d43fb6a21477fb1b55eee7138790b4693b62155",
+   "crs": "PROJCS[\"Equirectangular MARS\",GEOGCS[\"GCS_MARS\",DATUM[\"unnamed\",SPHEROID[\"unnamed\",3386150.7470034,0]],PRIMEM[\"Reference meridian\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]]],PROJECTION[\"Equirectangular\"],PARAMETER[\"latitude_of_origin\",45],PARAMETER[\"central_meridian\",180],PARAMETER[\"standard_parallel_1\",0],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]]"
+  }
+ },
+ "filters": {
+  "score_min": 0.25,
+  "equivalent_diameter_min_m": 1.5,
+  "radius_m": 3.0,
+  "area_ratio": [
+   0.8,
+   1.25
+  ],
+  "matching": "mutual nearest centroid"
+ },
+ "vclaire": {
+  "n_rows": 1105447,
+  "n_geom": 359933,
+  "n_kept": 359933,
+  "total_bounds": [
+   -6839379.5,
+   2686314.5,
+   -6828152.0,
+   2729185.5
+  ]
+ },
+ "ours": {
+  "n_rows": 1104992,
+  "n_geom": 1104992,
+  "n_kept": 1104861,
+  "total_bounds": [
+   -6839379.5,
+   2686314.5,
+   -6828152.0,
+   2729185.5
+  ]
+ },
+ "n_matched": 359929,
+ "offset_m": {
+  "median_dx": 0.0,
+  "median_dy": 0.0,
+  "mean_dx": 8.152410164079448e-06,
+  "mean_dy": 3.7171895827542226e-05,
+  "p05_p95_dx": [
+   0.0,
+   0.0
+  ],
+  "p05_p95_dy": [
+   0.0,
+   0.0
+  ],
+  "share_within_0.05m": 0.9985580489485426,
+  "share_within_0.05m_of_label_frame_expect": 0.0
+ },
+ "expected_m": {
+  "jp2_frame": [
+   0.0,
+   0.0
+  ],
+  "label_frame": [
+   -0.75,
+   0.75
+  ]
+ },
+ "verdict": "jp2_frame"
+}
