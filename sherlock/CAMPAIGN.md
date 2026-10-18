@@ -83,6 +83,9 @@ dx/dy 0.0. Anything else: fix the environment before submitting the array.
 
 **Then measure the PDS host from Sherlock.** On 2026-10-14 it served ~50 KB/s to the laptop, and
 parallel connections did not help (8 got 29 KB/s between them). At that rate a 1 GB JP2 takes ~6 h.
+On 2026-10-17 it served the laptop 14.2 MB/s (a whole 484 MB JP2 in 34 s). The rate swings by
+orders of magnitude, so measure on the day, and upload any JP2 already on the laptop instead of
+fetching it again.
 ```bash
 curl -o /dev/null -w '%{speed_download}\n' --max-time 60 \
   https://hirise-pds.lpl.arizona.edu/PDS/RDR/ESP/ORB_028500_028599/ESP_028537_2270/ESP_028537_2270_RED.JP2
@@ -197,7 +200,11 @@ rsync -a bamaro@dtn.sherlock.stanford.edu:"$R/campaign/out/${OBS:?}/" "${LOCAL:?
 (cd "$LOCAL/$OBS" && sha256sum -c SHA256SUMS)
 ```
 `$SCRATCH` is resolved by a separate `ssh` because rsync 3.2.4 and later escapes `$` in remote paths,
-so a literal `\$SCRATCH` in the rsync line would name a directory called `$SCRATCH`. If the `ssh` line
+so a literal `\$SCRATCH` in the rsync line would name a directory called `$SCRATCH`.
+**The laptop has no `rsync`** (Git Bash ships `ssh`, `scp`, `tar` and `sha256sum`, checked
+2026-10-17). Pull to the laptop with `HANDOFF.md` §1 instead. It streams `tar` over `ssh` into the
+stable delivery root, `BoulderNet/data/deliveries/hirise2ctx_v3/<TAG>/`, and brings each scene's
+`.LBL`, prep sidecar and prepared raster along with its hand-off. If the `ssh` line
 prints nothing (the variable may be unset in a non-interactive DTN shell; not yet checked), set `R` to
 the absolute path that `echo $SCRATCH` shows on a login node.
 `$SCRATCH` purges on inactivity, so do not leave a finished campaign there. `DEST` remains available
@@ -218,6 +225,10 @@ and each detect task prints `sacct ... MaxRSS`, whatever the detection's exit. A
 The same works retroactively for the 2026-08-19 HiRISE jobs (pre-N2 RAM at 1.93 Gpx).
 
 ## Hand-off layout (D10, proposed)
+
+The full schema is in `HANDOFF.md`: `handoff.json` field by field (its `frame` value included), the
+manifest keys a consumer checks, `CODE_STAMP.json`, the three origin-offset conventions and their
+signs, and the reading rules for hirise2ctx's Stage 1.
 
 ```
 <OUT or DEST>/<ObsId>/
@@ -247,3 +258,7 @@ relabel (`set_crs`), never a reprojection.
 - **Mixed-binning scenes.** Many "0.25 m/px" RED products bin some CCDs 2x (e.g. ESP_028537_2270:
   `MRO:BINNING = (2,2,2,1,1,1,1,2,2,...)`), so strips of the scene are 0.5 m/px resampled onto the
   0.25 grid and have a coarser completeness floor. The prep sidecar records the binning per scene.
+  Read from the labels on 2026-10-17 (`data/review/pilot_images_check.json`), **11 of v3's 62 scenes
+  are mixed**: 7 drawn, 3 transfer and 1 lander. All of them bin outer CCDs (RED0-2 or RED0-3, often
+  with RED7-8). None of the pilot's 23 images is mixed except ESP_069088_2270, pair 3's
+  low-incidence member, which bins RED0-3 and RED7-8.
