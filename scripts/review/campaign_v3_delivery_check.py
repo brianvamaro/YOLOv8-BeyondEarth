@@ -15,10 +15,13 @@ tarball, and writes nothing but its JSON.
   - the release in every code block: `dfcaa26` through `CODE_STAMP.json`, the stamp matching the source;
   - the scene against its manifest row: product, URLs and size, and the label against its fetch record;
   - S1–S3: the 256 layer and its manifest, byte for byte against `pilot-1`'s delivery.
-- **Per arm, the run:** features, GPU-h (every attempt this campaign ran, from the ledger), escalations,
-  peak RSS and slices skipped as fill. Attempts already in `pilot-1`'s ledger are the pilot's, not the
-  campaign's.
+- **Per arm, the run:** GPU-h (every attempt this campaign ran, from the ledger), escalations, peak RSS
+  and slices skipped as fill. Attempts already in `pilot-1`'s ledger are the pilot's, not the campaign's.
 - **`CODE_STAMP.json`** in the root, against the release tarball and every manifest's embedded stamp.
+
+**Nothing the detector found is recorded:** no feature counts, no densities, and no GeoPackage is
+opened. The 62 include hirise2ctx's 12 lockbox scenes, and whether the campaign's catalogs stay unread
+until their step 5 is dated is Brian's ruling, not yet made.
 
 Results are reported as measured. Nothing here applies a score floor or fuses the layers.
 
@@ -161,7 +164,6 @@ def check_scene(row, i, root, pilot):
         markers = [r for r in lines if r.get("stage") == st and r.get("state") == "running"]
         att = lay["attempts"]
         arms[st] = {
-            "n_features": lay["n_features"], "detections_per_gpx": lay["n_features"] / gpx,
             "max_det": lay["max_det"], "batch_size": lay["batch_size"], "n_attempts": len(att),
             "stopped": [a.get("stopped") for a in att if a.get("stopped")],
             "delivered_wall_s": att[-1].get("wall_seconds"),
@@ -197,7 +199,6 @@ def arm_totals(scenes, st):
     wall = sum(x["campaign_wall_s"] for x in a)
     worst = max(scenes, key=lambda r: r["arms"][st]["peak_rss_gib"])
     return {"n_scenes_run_in_campaign": len(camp), "gpx_run_in_campaign": gpx,
-            "n_features_delivered": sum(r["arms"][st]["n_features"] for r in scenes),
             "campaign_gpu_h": wall / 3600, "campaign_h_per_gpx": wall / 3600 / gpx if gpx else None,
             "escalated_scenes": sorted(r["obs_id"] for r in scenes if r["arms"][st]["n_attempts"] > 1),
             "stopped": dict(Counter(s for r in scenes for s in r["arms"][st]["stopped"])),
@@ -229,16 +230,12 @@ def main():
         scenes.append(rec)
         manifests += mans
         a, b = rec["arms"]["arm:256"], rec["arms"]["arm:512"]
-        print(f"{i:2d} {rec['obs_id']} {rec['set']:2s} {rec['gpx']:5.2f} Gpx  256: {a['n_features']:>9,d} det "
-              f"{(a['delivered_wall_s'] or 0) / 60:5.1f} min ({a['ran_in']})  512: {b['n_features']:>9,d} det "
-              f"{(b['delivered_wall_s'] or 0) / 60:5.1f} min, RSS {max(a['peak_rss_gib'], b['peak_rss_gib']):5.2f} GiB, "
-              f"attempts {a['n_attempts']}/{b['n_attempts']}; checks "
+        print(f"{i:2d} {rec['obs_id']} {rec['set']:2s} {rec['gpx']:5.2f} Gpx  256 ({a['ran_in']}), attempts "
+              f"{a['n_attempts']}/{b['n_attempts']}; checks "
               f"{'pass' if rec['all_checks_pass'] else [k for k, v in rec['checks'].items() if not v]}", flush=True)
     both = [r for r in scenes if all(r["arms"][st]["ran_in"] == "campaign" for st in STAGES)]
     w256 = sum(r["arms"]["arm:256"]["campaign_wall_s"] for r in both)
     w512 = sum(r["arms"]["arm:512"]["campaign_wall_s"] for r in both)
-    n256 = sum(r["arms"]["arm:256"]["n_features"] for r in both)
-    n512 = sum(r["arms"]["arm:512"]["n_features"] for r in both)
     ratios = sorted((r["arms"]["arm:256"]["campaign_wall_s"] + r["arms"]["arm:512"]["campaign_wall_s"])
                     / r["arms"]["arm:256"]["campaign_wall_s"] for r in both)
     totals = {
@@ -253,7 +250,6 @@ def main():
             "per_scene_min_median_max": [ratios[0], ratios[len(ratios) // 2], ratios[-1]] if ratios else None,
             "note": "both arms' wall time over the 256 arm's, on scenes where the campaign ran both; "
                     "fusion is not included (it is not built)"},
-        "arm512_over_arm256_features": {"pooled": n512 / n256 if n256 else None, "scenes": len(both)},
         "prep_convert_h": sum(r["prep_convert_s"] or 0 for r in scenes if r["set"] == "") / 3600,
         "prep_convert_s_max": max((r["prep_convert_s"] or 0, r["obs_id"]) for r in scenes if r["set"] == ""),
     }
