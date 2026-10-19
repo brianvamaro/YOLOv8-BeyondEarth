@@ -119,6 +119,8 @@ def main():
     ap.add_argument("--first", default="e007bb4")
     ap.add_argument("--last", default="08c94df")
     ap.add_argument("--incidence-backup", help="a copy of data/incidence_pairs_pilot taken before the re-run")
+    ap.add_argument("--incidence-regenerated-since",
+                    help="ISO time the re-run started: only intermediates written after it count as regenerated")
     ap.add_argument("--crosscheck-orig", help="the prep cross-check's laptop rasters from the original run")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -149,11 +151,16 @@ def main():
             files[name]["rerun"] = None
     inter = {}
     if args.incidence_backup:
+        from datetime import datetime
+        since = (datetime.fromisoformat(args.incidence_regenerated_since).timestamp()
+                 if args.incidence_regenerated_since else None)
         bdir, ndir = Path(args.incidence_backup), REPO / "data" / "incidence_pairs_pilot"
         for f in sorted(bdir.iterdir()):
             g = ndir / f.name
             if not g.exists():
                 inter[f.name] = {"rerun_missing": True}
+            elif since is not None and g.stat().st_mtime < since:
+                inter[f.name] = {"regenerated": False}
             elif f.suffix == ".json":
                 c = compare(json.loads(f.read_text()), json.loads(g.read_text()), skip=())
                 inter[f.name] = {"differ": sum(v["differ"] for v in c.values()),

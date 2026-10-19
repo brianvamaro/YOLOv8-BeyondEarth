@@ -63,7 +63,13 @@ def label_fields(lbl):
     flags = re.findall(r"ON|OFF", str(get("MRO:CCD_FLAG")))
     on = [k for k in range(min(10, len(flags))) if flags[k] == "ON"]
     tdi, binning = ints("MRO:TDI"), ints("MRO:BINNING")
-    return {"scaling_factor": num("SCALING_FACTOR"), "offset": num("OFFSET"),
+    # the HiRISE pipeline's own per-CCD flag: CUBENORM is its column normalisation, ISIS's fix for
+    # vertical striping
+    special = re.findall(r"[A-Z_]+", str(get("MRO:SPECIAL_PROCESSING_FLAG") or ""))
+    special_on = [special[k] for k in on if k < len(special)]
+    return {"special_processing_on": sorted(set(special_on)),
+            "cubenorm": bool(special_on) and all(x == "CUBENORM" for x in special_on),
+            "scaling_factor": num("SCALING_FACTOR"), "offset": num("OFFSET"),
             "incidence": num("INCIDENCE_ANGLE"), "emission": num("EMISSION_ANGLE"), "phase": num("PHASE_ANGLE"),
             "ls": num("SOLAR_LONGITUDE"), "local_time": num("LOCAL_TIME"), "start_time": str(get("START_TIME")),
             "center_latitude": num("CENTER_LATITUDE"), "map_scale": num("MAP_SCALE"),
@@ -73,8 +79,12 @@ def label_fields(lbl):
 
 
 def scene_dn10(prep):
-    """Mean and 1 / 99 % of the scene's valid 10-bit DN, from the prep sidecar's histogram."""
+    """Mean, sd and 1 / 99 % of the scene's valid 10-bit DN, from the prep sidecar's histogram.
+
+    The histogram (``histogram_nonzero``) keeps a DN-0 bin, which is the fill (it equals
+    ``dn_counts.null_fill``, 18-43 % of these rasters); it is dropped here."""
     h = json.loads(Path(prep).read_text())["dn_counts"]["histogram_nonzero"]
+    h = {k: v for k, v in h.items() if int(k) > 0}
     dn = np.array([int(k) for k in h], dtype=float)
     n = np.array(list(h.values()), dtype=float)
     o = np.argsort(dn)
@@ -184,14 +194,19 @@ def spectrum(windows, swath_deg=None, half_width_deg=4.0):
         band = (KR >= 0.05) & (KR <= 0.45)
 
         def wedge(center):
+            """Median over annuli (broadband stripes) and the maximum, with where it sits (narrowband)."""
             dev = np.abs(((ang - center + 90.0) % 180.0) - 90.0)
-            vals = []
+            vals, ks = [], []
             for b in np.unique(rbin[band]):
                 m = band & (rbin == b)
                 w = m & (dev <= half_width_deg)
                 if w.any():
                     vals.append(float(P[w].mean() / np.median(P[m])))
-            return {"median_ratio": float(np.median(vals)), "max_ratio": float(np.max(vals)), "n_annuli": len(vals)}
+                    ks.append(float(b) / n)
+            i = int(np.argmax(vals))
+            return {"median_ratio": float(np.median(vals)), "max_ratio": float(vals[i]),
+                    "max_at_k": ks[i], "max_at_period_px": 1.0 / ks[i], "n_annuli": len(vals),
+                    "n_annuli_over_3": int(sum(v > 3.0 for v in vals))}
         wedges = {"across_track_column_stripes": wedge(swath_deg), "along_track_row_stripes": wedge(swath_deg + 90.0),
                   "image_x_axis": wedge(0.0), "image_y_axis": wedge(90.0), "half_width_deg": half_width_deg}
     return {"peaks": peaks, "max_on_kx_nyquist": float(nyq_x.max()), "max_on_ky_nyquist": float(nyq_y.max()),
@@ -229,7 +244,12 @@ def across_swath(ov, origins, sigma, span, n_bins=12, decimation=64, window=128)
                      "n": int(m.sum()), "sigma_lap_mad": float(np.median(sigma[m])) if m.sum() >= 5 else None,
                      "noise_over_span": float(np.median(sigma[m] / np.maximum(span[m], 1.0))) if m.sum() >= 5 else None})
     v = [r["sigma_lap_mad"] for r in rows if r["sigma_lap_mad"] is not None]
-    return {"bins": rows, "max_over_min_sigma": float(max(v) / min(v)) if v and min(v) > 0 else None}
+    if not v:
+        return {"bins": rows, "max_over_min_sigma": None, "max_over_median_of_rest": None}
+    k = int(np.argmax(v))
+    rest = v[:k] + v[k + 1:]
+    return {"bins": rows, "max_over_min_sigma": float(max(v) / min(v)) if min(v) > 0 else None,
+            "max_over_median_of_rest": float(v[k] / np.median(rest)) if rest and np.median(rest) > 0 else None}
 
 
 def across_track_steps(tif, f=8, seg_m=1000.0, win_m=20.0, min_jump=0.5, min_agree=0.85, min_seg=10, sep=150):
@@ -388,6 +408,10 @@ def main():
                           for k in a["noise_over_span_median"]},
                       "sigma_if_other_over_ref": b["in_if"]["sigma_lap_meanabs"] / a["in_if"]["sigma_lap_meanabs"],
                       "span_if_other_over_ref": b["in_if"]["span"] / a["in_if"]["span"],
+                      "relative_contrast_other_over_ref": (b["in_if"]["span"] / b["in_if"]["window_mean"])
+                                                          / (a["in_if"]["span"] / a["in_if"]["window_mean"]),
+                      "window_mean_if_other_over_ref": b["in_if"]["window_mean"] / a["in_if"]["window_mean"],
+                      "both_cubenorm": [a["label"]["cubenorm"], b["label"]["cubenorm"]],
                       "scene_mean_if_other_over_ref": b["in_if"]["scene_mean"] / a["in_if"]["scene_mean"],
                       "scene_sd_if_other_over_ref": b["in_if"]["scene_sd"] / a["in_if"]["scene_sd"],
                       "scene_sd_dn10_other_over_ref": b["in_if"]["scene_dn10_mean_sd"][1] / a["in_if"]["scene_dn10_mean_sd"][1],
@@ -395,6 +419,10 @@ def main():
     out = {"what": "the pilot's pixel noise beside hirise2ctx's R11: their measure reproduced, two others, the same "
                    "in I/F, and column patterns at two scales (read-only on the delivery)",
            "code": presets.code_identity(), "delivery": str(delivery), "hirise2ctx_noise_json": str(args.h2c_noise),
+           "caveats": ["windows are drawn over each image's own footprint, not the ground two images share, so a "
+                       "comparison's ratios mix terrain with acquisition",
+                       "scene statistics exclude the fill (DN 0)",
+                       "nothing here is a test: 11 comparisons on 9 grounds, no truth"],
            "scenes": scenes, "comparisons": comps}
     Path(args.out).write_text(json.dumps(out, indent=1, default=float))
     print(f"wrote {args.out}")
