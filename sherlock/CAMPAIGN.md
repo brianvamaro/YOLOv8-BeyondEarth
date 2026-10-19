@@ -41,6 +41,20 @@ A CSV, one row per scene, row 0 = first data row = array task 0. Needs an observ
 URLs are optional (derived from the id) and column names are matched loosely, so hirise2ctx's
 `obs_id, product_id, jp2_url, lbl_url` and `ObsId, ProductId, JP2 URL, LBL URL` both work.
 
+**The v3 campaign's manifest is `sherlock/manifests/campaign_v3.csv`** (2026-10-18).
+- **What it is.** hirise2ctx's final 62 after D35, in their row order: 113.45 Gpx, of which 59 scenes and
+  103.51 Gpx remain after `pilot-1`.
+- **How it is built.** `scripts/build_campaign_manifest.py` writes it, and refuses any source but their
+  `manifest_v3.csv` sha256 `13d22888…`. Its record, `campaign_v3.json`, holds the checks, the binning (11
+  mixed) and the three D35 swaps.
+- **It is not in release `pilot-1`.** Copy it to the cluster yourself, through a login node or OnDemand: the
+  DTN's `~` did not match the login node's on 2026-10-18. Check its sha256 there: `bc370cb5…` (LF line
+  endings).
+- **S1–S3** (rows 8, 44 and 47) were delivered in `pilot-1`. On the same release, `$SCENES` and `$OUT`, prep
+  skips them and detect skips their 256 arm.
+- **Both arms, `ARMS="256 512"`,** before D9 is ruled (Brian's choice, 2026-10-18). The hand-off is
+  described in `HANDOFF.md` §9.
+
 **Shell setup.** The sbatch scripts set these for themselves. Every command below that is typed by hand
 (login node, dev node, DTN) needs them, so run this first in every new shell:
 ```bash
@@ -175,8 +189,11 @@ gives in `--export`: half the batch the layer's manifest records, and the cap it
 climbs the ladder again from 1,100. Deleting the layer instead re-runs the same attempt at the same
 batch; the limit is wall-clock time, so that helps only if the slowdown was transient.
 
-**Host RAM.** `--mem=64G` is unmeasured at scene scale: the largest v3 scene is 6.31 Gpx, 3.3x the
-1.93 Gpx scene that ran at 128G under the old whole-raster path. A detect task killed for host RAM
+**Host RAM.** Measured in the pilot (2026-10-18, 23 scenes, the 256 arm): peak RSS ≈ 1.7 GiB + 7.6 GiB per
+million detections (r 0.99), at most 19.3 GiB (2.2 M detections); S1, the largest v3 scene at 6.31 Gpx, used
+4.1 GiB. So `--mem=64G` covers about 8 M detections in one arm. The 512 arm is unmeasured at scene scale on
+this code. Before the pilot it read: `--mem=64G` is unmeasured at scene scale: the largest v3 scene is 6.31
+Gpx, 3.3x the 1.93 Gpx scene that ran at 128G under the old whole-raster path. A detect task killed for host RAM
 ends `OUT_OF_MEMORY` or with exit 137, prints sacct's MaxRSS, and then a `HOST RAM:` line. Its ledger
 holds a failed attempt, or only a `running` marker, with no next attempt, so a resubmit at the same
 `--mem` repeats the same attempt and dies the same way. Resubmit that row with more (`--mem=128G` on
@@ -250,7 +267,10 @@ relabel (`set_crs`), never a reprojection.
   unfused: fusing a `{512,256}` ladder needs a named preset (the runner refuses any set but the
   production three). Configuration 3 (SAM2 re-mask) on a ladder needs phase 5a, which is unbuilt;
   "256 + SAM2" is buildable but SAM2 has never run on this stack, so it needs a parity check first.
-- **D36 score floor** is downstream: catalogs are the conf-0.10 superset.
+  - *2026-10-18:* the v3 campaign runs `ARMS="256 512"` (the 256 arm first), so either ruling has its arms.
+    Evidence for the ruling: `data/review/d9_config2_at_025.json`.
+- **D36 score floor** is downstream: catalogs are the conf-0.10 superset. *Ruled 2026-10-18 (Brian):* 0.25,
+  with 0.40 a pre-registered sensitivity, applied at hirise2ctx's Stage 4.
 - ~~When `max_det` 1100 binds~~ **decided 2026-10-15: escalate** (see "What is fixed" and "When an
   arm escalates"). A non-binding run does not depend on the cap (279 tiles verified inert), so
   retrying until nothing binds is well defined, and it was checked end to end.
@@ -259,6 +279,7 @@ relabel (`set_crs`), never a reprojection.
   `MRO:BINNING = (2,2,2,1,1,1,1,2,2,...)`), so strips of the scene are 0.5 m/px resampled onto the
   0.25 grid and have a coarser completeness floor. The prep sidecar records the binning per scene.
   Read from the labels on 2026-10-17 (`data/review/pilot_images_check.json`), **11 of v3's 62 scenes
-  are mixed**: 7 drawn, 3 transfer and 1 lander. All of them bin outer CCDs (RED0-2 or RED0-3, often
+  are mixed**: 7 drawn, 3 transfer and 1 lander. Still 11 of the final 62 after D35 (the three scenes in
+  and the three out bin 1 throughout; `sherlock/manifests/campaign_v3.json`). All of them bin outer CCDs (RED0-2 or RED0-3, often
   with RED7-8). None of the pilot's 23 images is mixed except ESP_069088_2270, pair 3's
   low-incidence member, which bins RED0-3 and RED7-8.

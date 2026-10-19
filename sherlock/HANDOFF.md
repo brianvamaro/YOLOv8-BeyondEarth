@@ -84,7 +84,7 @@ for o in $OBS_LIST; do (cd "$LOCAL/out/$o" && sha256sum -c --quiet SHA256SUMS &&
 | `verified_utc` | string | when `verify` wrote this file: ISO 8601 with offset, e.g. `2026-10-20T14:03:11.512345+00:00` |
 | `ok` | bool | `true` exactly when `problems` is empty |
 | `problems` | list of string | each refusal, in words; empty when `ok` |
-| `stages` | list of string | the stages this hand-off is for, sorted. Configuration 1 is `["arm:256"]` |
+| `stages` | list of string | the stages this hand-off is for, sorted. Configuration 1 is `["arm:256"]`; the v3 campaign delivers `["arm:256", "arm:512"]` (§9) |
 | `layers` | list of object | one per delivered layer (below) |
 | `not_delivered` | list of `{layer, stage, why}` | any other layer in the directory: a trial of another configuration, a stale attempt. `stage` is `null` when no ledger entry wrote it. Never read these |
 | `raster` | object or `null` | the prepared input (below). `null` only when the prep sidecar was missing, and then `ok` is `false` |
@@ -93,8 +93,8 @@ Each entry of `layers`:
 
 | field | meaning |
 |---|---|
-| `layer` | the GeoPackage's file name: `<ProductId>-predictions-ct-010-ss-256-is-1024-ov-020-downscaled-mask-nms.gpkg` |
-| `stage` | `arm:256` |
+| `layer` | the GeoPackage's file name: `<ProductId>-predictions-ct-010-ss-256-is-1024-ov-020-downscaled-mask-nms.gpkg`, and `-ss-512-` for the 512 arm |
+| `stage` | `arm:256` or `arm:512` |
 | `manifest` | `<layer stem>-manifest.json`, beside it (§4) |
 | `config_hash` | the manifest's configuration digest |
 | `truncation` | the manifest's record; `{}` when nothing was lost (verify refuses a lossy one) |
@@ -134,7 +134,7 @@ The keys a consumer checks:
 | `config.confidence_threshold` | `0.1`: the delivered superset; the score floor (D36) is applied downstream |
 | `config.max_det`, `config.batch_size` | as in `handoff.json` |
 | `config.inference_contract_version` | `3`, the current inference code (contract 1 was code before 2026-07-30) |
-| `config.slice_size`, `config.inference_size`, `config.overlap_height_ratio` | 256, 1024, 0.2 (configuration 1) |
+| `config.slice_size`, `config.inference_size`, `config.overlap_height_ratio` | 256 (512 for the 512 arm), 1024, 0.2 |
 | `config.contour_method`, `config.remask_fn`, `config.sr_factor` | `skimage`, `null` (no SAM2), `1` |
 | `truncation` | `{}` |
 | `outputs.n_after_nms` | the layer's feature count |
@@ -240,7 +240,9 @@ These are Stage 1's six refusals as hirise2ctx proposed them, with what each one
      `run_ledger.jsonl` has a `finished_utc` or a `started_utc` later than `verified_utc`. All of them
      are timezone-aware UTC, so compare them as datetimes.
 3. **Every listed layer and manifest passes `sha256sum -c SHA256SUMS`.**
-4. **The delivered arm set is the one D9 rules.** `stages` is `["arm:256"]` for configuration 1.
+4. **The delivered arm set is the one D9 rules.** `stages` is `["arm:256"]` for configuration 1. The v3
+   campaign delivers both arms, `["arm:256", "arm:512"]`, because it runs before D9 is ruled (§9). Read the
+   `arm:256` layer for configuration 1; configuration 2's label is not in the hand-off.
 5. **Each layer's manifest** has `truncation` `{}`, `config.confidence_threshold` 0.1, `config.max_det`
    equal to `handoff.json`'s, and `config.inference_contract_version` 3.
 6. **`raster.frame` is the label-frame string** (§2). The layer's CRS also has `lat_ts =
@@ -251,3 +253,23 @@ And always:
   rest.
 - **To check a frame directly**, compare `scenes/<ObsId>/<ProductId>.prep.json`'s `output.transform`
   with what your own PDS-driver open of the `.LBL` gives, as `pds_driver_frames.py` does.
+
+## 9. The v3 campaign: two arms, unfused (2026-10-18)
+
+Brian chose to start the campaign before D9 is ruled, with both of configuration 2's arms (`ARMS="256 512"`).
+- **What a scene's hand-off holds:** two layers, `arm:256` and `arm:512`, each with its manifest and its own
+  checksums. `stages` is `["arm:256", "arm:512"]`. Each layer is complete on its own and passes rules 1–6.
+- **Configuration 1's label is the `arm:256` layer alone,** exactly as in `pilot-1`.
+- **Configuration 2's label is the two layers fused under its production rule** (`256pref_engulf`, the rule
+  the configuration study scored). The runner does not fuse a two-arm set: it refuses any set but production's
+  three, and a `{512, 256}` preset is not built. So that label is not in the hand-off. If D9 rules
+  configuration 2, the fusion is a later step on the delivered layers, with its own record.
+- **Never fuse the two layers yourself, or count them both.** The 512 arm detects many of the same boulders,
+  so their union double-counts.
+- **For Stage 1:** rule 4's arm set is now `["arm:256", "arm:512"]` on campaign scenes, and rule 5 applies to
+  each layer: the 512 manifest differs only in `config.slice_size` (512).
+- **S1–S3** (delivered in `pilot-1` with `arm:256` only) get their 512 arm in the campaign. Their 256 layer
+  is the same file, skipped by the ledger, and the campaign's hand-off lists both layers.
+- **If a 512 arm cannot finish** (for example a dense scene at batch 1 on a 24 GB card), that scene's
+  two-arm verify fails while its 256 layer stays complete. `verify --arms 256` then delivers configuration 1
+  alone, and the 512 arm is resubmitted on a larger card (`CAMPAIGN.md`, "When an arm escalates").

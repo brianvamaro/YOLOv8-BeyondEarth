@@ -238,6 +238,38 @@ def test_layers_of_arms_outside_the_handoff_are_listed_not_delivered(scene):
     assert "-ss-512-" not in (odir / "SHA256SUMS").read_text()
 
 
+def test_a_two_arm_handoff_delivers_both_layers(scene):
+    """The v3 campaign runs ARMS="256 512" unfused (2026-10-18): one hand-off carries both layers,
+    stages sorted, both in SHA256SUMS, nothing left over."""
+    manifest, scenes, out, write_manifest = scene
+    write_manifest()
+    odir = out / "ESP_028537_2270"
+    stem512 = STEM.replace("-ss-256-", "-ss-512-")
+    (odir / f"{stem512}.gpkg").write_bytes(b"pretend 512 layer")
+    (odir / f"{stem512}-manifest.json").write_text((odir / f"{STEM}-manifest.json").read_text())
+    _complete(odir, stem512, stage="arm:512")
+    ok, report = campaign.verify(campaign.scene_paths(manifest, 0, scenes, out), arms=["256", "512"])
+    assert ok, report["problems"]
+    assert report["stages"] == ["arm:256", "arm:512"]
+    assert sorted(r["layer"] for r in report["layers"]) == sorted([f"{STEM}.gpkg", f"{stem512}.gpkg"])
+    assert report["not_delivered"] == []
+    sums = (odir / "SHA256SUMS").read_text()
+    assert "-ss-256-" in sums and "-ss-512-" in sums
+
+
+def test_a_two_arm_handoff_fails_while_one_arm_is_unfinished(scene):
+    """The 512 arm still running (or stopped at batch 1 for GPU memory) fails the two-arm hand-off;
+    the 256 layer stays complete on disk for a later verify --arms 256."""
+    manifest, scenes, out, write_manifest = scene
+    write_manifest()
+    StageLedger(out / "ESP_028537_2270" / "run_ledger.jsonl").append(
+        {"stage": "arm:512", "state": "running"})
+    ok, report = campaign.verify(campaign.scene_paths(manifest, 0, scenes, out), arms=["256", "512"])
+    assert not ok and any("arm:512" in p for p in report["problems"])
+    ok, report = campaign.verify(campaign.scene_paths(manifest, 0, scenes, out), arms=["256"])
+    assert ok, report["problems"]
+
+
 def test_a_layer_rewritten_since_its_ledger_entry_fails_the_scene(scene):
     manifest, scenes, out, write_manifest = scene
     write_manifest()
