@@ -31,6 +31,10 @@ C:\Users\brian\Documents\PhD\BoulderNet\data\deliveries\hirise2ctx_v3\<TAG>\   (
   scripts write under `YOLOv8-BeyondEarth/data/`, not here.
 - **One root per `TAG`** keeps the pilot apart from the campaign. Resume holds only on one release
   (`CAMPAIGN.md` §3).
+  - **The exception: the v3 campaign runs on `pilot-1` itself** (§9). So its root is
+    `...\hirise2ctx_v3\campaign-v3\`, with `pilot-1`'s `CODE_STAMP.json`.
+  - The `pilot-1` root keeps the pilot as hirise2ctx accepted it. S1–S3's campaign hand-offs (both layers)
+    land only in `campaign-v3`.
 - **The JP2 is not pulled by default**, about 0.6 bytes per pixel (~19 GB for the pilot). On the laptop
   the label sits beside the prepared raster, which is already in the label frame. Ask if R11's overlays
   need the native JP2 instead.
@@ -58,7 +62,7 @@ after `campaign.py status` reports the scenes `verified`:
 
 ```bash
 TAG=pilot-1
-LOCAL=/c/Users/brian/Documents/PhD/BoulderNet/data/deliveries/hirise2ctx_v3/$TAG
+LOCAL=/c/Users/brian/Documents/PhD/BoulderNet/data/deliveries/hirise2ctx_v3/$TAG   # the v3 campaign: .../campaign-v3 (§9)
 mkdir -p "$LOCAL"
 R=$(ssh bamaro@dtn.sherlock.stanford.edu 'echo "$SCRATCH"') && test -n "$R"   # resolved there (CAMPAIGN.md §3)
 OBS_LIST="PSP_009116_2240 ESP_068483_2280 ESP_045550_2180"                      # the scenes to pull
@@ -258,7 +262,7 @@ And always:
 
 Brian chose to start the campaign before D9 is ruled, with both of configuration 2's arms (`ARMS="256 512"`).
 - **What a scene's hand-off holds:** two layers, `arm:256` and `arm:512`, each with its manifest and its own
-  checksums. `stages` is `["arm:256", "arm:512"]`. Each layer is complete on its own and passes rules 1–6.
+  checksums. `stages` is `["arm:256", "arm:512"]`.
 - **Configuration 1's label is the `arm:256` layer alone,** exactly as in `pilot-1`.
 - **Configuration 2's label is the two layers fused under its production rule** (`256pref_engulf`, the rule
   the configuration study scored). The runner does not fuse a two-arm set: it refuses any set but production's
@@ -266,10 +270,19 @@ Brian chose to start the campaign before D9 is ruled, with both of configuration
   configuration 2, the fusion is a later step on the delivered layers, with its own record.
 - **Never fuse the two layers yourself, or count them both.** The 512 arm detects many of the same boulders,
   so their union double-counts.
-- **For Stage 1:** rule 4's arm set is now `["arm:256", "arm:512"]` on campaign scenes, and rule 5 applies to
-  each layer: the 512 manifest differs only in `config.slice_size` (512).
+- **For Stage 1:**
+  - **Rule 4's arm set** is `["arm:256", "arm:512"]` on campaign scenes, or `["arm:256"]` alone while a scene's
+    512 arm waits for a larger card (below).
+  - **Rule 2** applies to every stage the hand-off lists.
+  - **Rule 5 applies per layer,** against that layer's own `handoff.json` entry. The 512 manifest differs from
+    the 256 one in `config.slice_size` (512), and where that arm escalated, also in `config.max_det` and
+    `config.batch_size`.
+  - **hirise2ctx's check as built** (one `Release` with `stages ("arm:256",)` and configuration 1's settings)
+    refuses these hand-offs. A campaign release needs both stages and a configuration per stage.
 - **S1–S3** (delivered in `pilot-1` with `arm:256` only) get their 512 arm in the campaign. Their 256 layer
   is the same file, skipped by the ledger, and the campaign's hand-off lists both layers.
 - **If a 512 arm cannot finish** (for example a dense scene at batch 1 on a 24 GB card), that scene's
   two-arm verify fails while its 256 layer stays complete. `verify --arms 256` then delivers configuration 1
-  alone, and the 512 arm is resubmitted on a larger card (`CAMPAIGN.md`, "When an arm escalates").
+  alone, and the 512 arm is resubmitted on a larger card (`CAMPAIGN.md`, "When an arm escalates"). A later
+  two-arm verify replaces that hand-off.
+- **On the laptop** the campaign lands in its own root, `hirise2ctx_v3\campaign-v3\` (§1), not in `pilot-1`'s.

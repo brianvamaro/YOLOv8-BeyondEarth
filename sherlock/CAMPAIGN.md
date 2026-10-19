@@ -54,6 +54,11 @@ URLs are optional (derived from the id) and column names are matched loosely, so
   skips them and detect skips their 256 arm.
 - **Both arms, `ARMS="256 512"`,** before D9 is ruled (Brian's choice, 2026-10-18). The hand-off is
   described in `HANDOFF.md` §9.
+- **Pull it to its own laptop root,** `BoulderNet\data\deliveries\hirise2ctx_v3\campaign-v3\`, not `pilot-1`'s
+  (`HANDOFF.md` §1). It runs on release `pilot-1`, whose root holds the pilot as hirise2ctx accepted it.
+- **Prep is array `48419046`** (2026-10-18 night).
+  - `squeue` showed it as `[0-61]`, without the `%8` limit.
+  - `scontrol update JobId=48419046 ArrayTaskThrottle=8` sets the limit on a queued array.
 
 **Shell setup.** The sbatch scripts set these for themselves. Every command below that is typed by hand
 (login node, dev node, DTN) needs them, so run this first in every new shell:

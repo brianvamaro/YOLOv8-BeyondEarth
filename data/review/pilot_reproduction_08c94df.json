@@ -1,0 +1,411 @@
+{
+ "what": "whether the scripts committed at the last commit reproduce the pilot's analysis JSONs, by digest and by re-running on a clean tree",
+ "asked_by": "hirise2ctx-pub/docs/bouldernet_stage1_results_2026-10-18.md, section 6, question 2",
+ "code": {
+  "python": "3.10.15",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "host": "Bdirb",
+  "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+  "scripts_sha256": "b1ea886f860021e1950d1f3c46f2056bde22c1a7f9c61a99dd1b9d43ef1509fd",
+  "git_sha": "b432dea710e5dda1e73522eac2c36282ad0dfc4c",
+  "git_dirty": false,
+  "ultralytics": "8.4.75",
+  "sahi": "0.12.1",
+  "torch": "2.11.0+cu128",
+  "geopandas": "1.1.3",
+  "shapely": "2.1.2",
+  "rasterio": "1.4.4",
+  "opencv-python": "4.13.0.92"
+ },
+ "commits": [
+  {
+   "commit": "e007bb4",
+   "subject": "Sherlock pilot manifests (drafts for review): S1-S3 from v3's manifest, and the five Test-",
+   "scripts_sha256": "1ca2752c830ed730865112b564fcbd6c80f3dd3f4d7956b9ffda43a342484545",
+   "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+  },
+  {
+   "commit": "55d9f0c",
+   "subject": "Evidence for hirise2ctx's pilot answers: the gap sets checked, CCD binning, the PDS driver",
+   "scripts_sha256": "25f728fd21ac75a683566a6f8352ea8c0d21ed2b5f5a2c2df6ec9227265fe749",
+   "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+  },
+  {
+   "commit": "dfcaa26",
+   "subject": "Sherlock pilot: the five gap sets in pilot_pairs.csv, a rehearsal manifest for ESP_046328_",
+   "scripts_sha256": "25f728fd21ac75a683566a6f8352ea8c0d21ed2b5f5a2c2df6ec9227265fe749",
+   "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+  },
+  {
+   "commit": "1c47352",
+   "subject": "Sherlock pilot ran clean: the delivery re-verified and the run's cost table (sherlock_pilo",
+   "scripts_sha256": "81f648f378d7f26d889ca700d3bf63ba9e0b51ec14cbe8aee5adc30602a174f1",
+   "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+  },
+  {
+   "commit": "6ddda8c",
+   "subject": "Pilot analysis: prep cross-check identical, v2 comparison, kept share and emission, calibr",
+   "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+   "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+  },
+  {
+   "commit": "684015d",
+   "subject": "Pilot placement check: all 23 catalogs sit on image features in every 4096-row band (268 b",
+   "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+   "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+  },
+  {
+   "commit": "08c94df",
+   "subject": "Pilot incidence: the five pairs and five gap sets on contract-3 catalogs, floors 0.10-0.50",
+   "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+   "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+  }
+ ],
+ "files": {
+  "sherlock_pilot.json": {
+   "committed_sha256": "5652bd14e22deb789b1b9e9203c85a2ff16de540813bf30dad5075781e909b0d",
+   "code_committed": {
+    "run": {
+     "git_sha": "dfcaa26acc233923cbeed541e23421e943017f82",
+     "git_dirty": true,
+     "scripts_sha256": "81f648f378d7f26d889ca700d3bf63ba9e0b51ec14cbe8aee5adc30602a174f1",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": [
+      "1c47352"
+     ]
+    },
+    "v2": {
+     "git_sha": "1c4735284914c613ca4239acb4b4bbccb3489def",
+     "git_dirty": true,
+     "scripts_sha256": "f1efe1fd47305824f722080d8c4675a1442063c6397a841aac20d7a9b13f527b",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": []
+    },
+    "kept": {
+     "git_sha": "1c4735284914c613ca4239acb4b4bbccb3489def",
+     "git_dirty": true,
+     "scripts_sha256": "f1efe1fd47305824f722080d8c4675a1442063c6397a841aac20d7a9b13f527b",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": []
+    },
+    "steps": {
+     "git_sha": "1c4735284914c613ca4239acb4b4bbccb3489def",
+     "git_dirty": true,
+     "scripts_sha256": "d9d6de76e7b5a203dd8bea47f34a97a5b1f10985b3b5375afde2c5fe2ff8c43f",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": []
+    },
+    "placement": {
+     "git_sha": "6ddda8c4853cebaf7b6ac33cbac74d17efc444d5",
+     "git_dirty": true,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": [
+      "6ddda8c",
+      "684015d",
+      "08c94df"
+     ]
+    }
+   },
+   "rerun_sha256": "c7a90724287019755b7e513917890069d9b0817099fc67df97767c1d2ccecdfe",
+   "code_rerun": {
+    "run": {
+     "git_sha": "08c94df5e270df63fead1a72ace97b7e1370b834",
+     "git_dirty": false,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+    },
+    "kept": {
+     "git_sha": "08c94df5e270df63fead1a72ace97b7e1370b834",
+     "git_dirty": false,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+    },
+    "v2": {
+     "git_sha": "08c94df5e270df63fead1a72ace97b7e1370b834",
+     "git_dirty": false,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+    },
+    "steps": {
+     "git_sha": "08c94df5e270df63fead1a72ace97b7e1370b834",
+     "git_dirty": false,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+    },
+    "placement": {
+     "git_sha": "08c94df5e270df63fead1a72ace97b7e1370b834",
+     "git_dirty": false,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+    }
+   },
+   "sections": {
+    "delivery": {
+     "leaves": 1,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "kept": {
+     "leaves": 2974,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "placement": {
+     "leaves": 1929,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "release": {
+     "leaves": 1,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "run": {
+     "leaves": 1050,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "steps": {
+     "leaves": 2679,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "v2": {
+     "leaves": 84,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "what": {
+     "leaves": 1,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    }
+   }
+  },
+  "incidence_pairs_pilot.json": {
+   "committed_sha256": "76ab0229dc1e4eafb0262b78a3304052de6c295c2a320fe5a8abdbb13904b484",
+   "code_committed": {
+    "(file)": {
+     "git_sha": "684015dc83956817b01ca47884db083da9bac450",
+     "git_dirty": true,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": [
+      "6ddda8c",
+      "684015d",
+      "08c94df"
+     ]
+    }
+   },
+   "rerun": null
+  },
+  "v2_block_shift_check.json": {
+   "committed_sha256": "baa9f7e8c5e4e5dd9102ace448a7d3426eca81a7098df32bf910e5a6751afd5b",
+   "code_committed": {
+    "(file)": {
+     "git_sha": "1c4735284914c613ca4239acb4b4bbccb3489def",
+     "git_dirty": true,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": [
+      "6ddda8c",
+      "684015d",
+      "08c94df"
+     ]
+    }
+   },
+   "rerun_sha256": "3567c54c987c1ce4cd8151a3e6310258e19eacf6f28fcda80b27dc722490d4b3",
+   "code_rerun": {
+    "(file)": {
+     "git_sha": "3a22c712efe68a01803dedcda83d3da5896ae5f0",
+     "git_dirty": false,
+     "scripts_sha256": "fdc8a1a22736c354fb1bbf7ab9933054ce1712a5b27bbf315abacf1cfccf401a",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+    }
+   },
+   "sections": {
+    "images": {
+     "leaves": 1412,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "summary": {
+     "leaves": 4,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "what": {
+     "leaves": 1,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    }
+   }
+  },
+  "pilot_prep_crosscheck.json": {
+   "committed_sha256": "34d7c3526938e3d5193c568551b28cf5cda762247a1afa258d70f37236a33d38",
+   "code_committed": {
+    "(file)": {
+     "git_sha": "1c4735284914c613ca4239acb4b4bbccb3489def",
+     "git_dirty": true,
+     "scripts_sha256": "cd4652bf13f2fb941f8edb9728618b7905e0b55ac67868c4f1b7a25cf8b99285",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d",
+     "scripts_equal_commits": [
+      "6ddda8c",
+      "684015d",
+      "08c94df"
+     ]
+    }
+   },
+   "rerun_sha256": "d4b84ab01b4d95fa71bcfb074fec0a79992c55bb4b180281784cef9dfde09165",
+   "code_rerun": {
+    "(file)": {
+     "git_sha": "5a1d48273c4a058628eb0891e15cb443fa81c8fa",
+     "git_dirty": false,
+     "scripts_sha256": "693a4aaac810144529edc9e8883e8f516839b31f63dc7e48c50dfbc00ccd11db",
+     "source_sha256": "db7f3e58344142212f46486578c8f9b8e302d99d640efcfef10edcb01a751d6d"
+    }
+   },
+   "sections": {
+    "all_identical": {
+     "leaves": 1,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "delivery": {
+     "leaves": 1,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "products": {
+     "leaves": 56,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    },
+    "what": {
+     "leaves": 1,
+     "differ": 0,
+     "only_committed": 0,
+     "only_rerun": 0,
+     "worst_relative_numeric": 0.0,
+     "first_differences": []
+    }
+   }
+  }
+ },
+ "incidence_intermediates": {
+  "G1__ESP_058974_2245.json": {
+   "regenerated": false
+  },
+  "G1__ESP_058974_2245_cells.npz": {
+   "regenerated": false
+  },
+  "G2__ESP_037545_2150.json": {
+   "regenerated": false
+  },
+  "G2__ESP_037545_2150_cells.npz": {
+   "regenerated": false
+  },
+  "G2plus__ESP_029818_2150.json": {
+   "regenerated": false
+  },
+  "G2plus__ESP_029818_2150_cells.npz": {
+   "regenerated": false
+  },
+  "P1__ESP_071699_2260.json": {
+   "differ": 0,
+   "leaves": 1230
+  },
+  "P1__ESP_071699_2260_cells.npz": {
+   "arrays_equal": true
+  },
+  "P2__ESP_055833_2260.json": {
+   "differ": 0,
+   "leaves": 1230
+  },
+  "P2__ESP_055833_2260_cells.npz": {
+   "arrays_equal": true
+  },
+  "P3__ESP_067214_2270.json": {
+   "differ": 0,
+   "leaves": 1230
+  },
+  "P3__ESP_067214_2270_cells.npz": {
+   "arrays_equal": true
+  },
+  "P4__ESP_055714_2270.json": {
+   "differ": 0,
+   "leaves": 1230
+  },
+  "P4__ESP_055714_2270_cells.npz": {
+   "arrays_equal": true
+  },
+  "P5__PSP_007492_2265.json": {
+   "regenerated": false
+  },
+  "P5__PSP_007492_2265_cells.npz": {
+   "regenerated": false
+  },
+  "U1__ESP_037796_2205.json": {
+   "regenerated": false
+  },
+  "U1__ESP_037796_2205_cells.npz": {
+   "regenerated": false
+  },
+  "U2__ESP_049730_2225.json": {
+   "regenerated": false
+  },
+  "U2__ESP_049730_2225_cells.npz": {
+   "regenerated": false
+  },
+  "U2__ESP_076224_2225.json": {
+   "regenerated": false
+  },
+  "U2__ESP_076224_2225_cells.npz": {
+   "regenerated": false
+  }
+ },
+ "crosscheck_rasters": {}
+}
